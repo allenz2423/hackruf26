@@ -286,6 +286,23 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
             <h2>Saved materials</h2>
             <p class="muted">Open study guides and flashcards, or start a quiz to see explanations and saved scores.</p>
           </div>
+          ${!token ? `
+            <div class="account-status-banner guest-banner">
+              ${icon("alert", { size: 20 })}
+              <div>
+                <strong>Guest Mode · Materials & Scores Saved Locally Only</strong>
+                <span>Generated study sets and quiz attempt scores are kept in this browser session only. <a class="auth-link" href="#/auth">Sign in to your cloud account</a> to preserve your study history and sync across devices.</span>
+              </div>
+            </div>
+          ` : `
+            <div class="account-status-banner signed-in-banner">
+              ${icon("check", { size: 20 })}
+              <div>
+                <strong>Cloud Sync Active</strong>
+                <span>Generated study materials, quiz attempts, and scores are automatically saved to your cloud profile.</span>
+              </div>
+            </div>
+          `}
           <div id="material-list"></div>
         </div>
       </section>

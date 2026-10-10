@@ -2209,3 +2209,133 @@ main {
 .data-list li.empty-state {
   padding: var(--space-7) var(--space-5);
 }
+
+/* Account Status Banners & Guest Notices */
+.account-status-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  font-size: 0.875rem;
+  line-height: 1.45;
+  margin-bottom: var(--space-4);
+}
+
+.account-status-banner strong {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.account-status-banner.guest-banner {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  color: #b45309;
+}
+
+.account-status-banner.guest-banner .auth-link {
+  color: #b45309;
+  font-weight: 600;
+  text-decoration: underline;
+}
+
+.account-status-banner.signed-in-banner {
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  color: #047857;
+}
+
+/* Auth Comparison Grid */
+.auth-comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+.auth-tier-card {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-5);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.auth-tier-card.tier-guest {
+  border-color: rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.03);
+}
+
+.auth-tier-card.tier-cloud {
+  border-color: rgba(37, 99, 235, 0.4);
+  background: rgba(37, 99, 235, 0.03);
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.07);
+}
+
+.auth-tier-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-3);
+}
+
+.auth-tier-header h3 {
+  font-size: 1.125rem;
+  font-weight: 700;
+  margin: 0;
+}
+
+.tier-badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.tier-badge.badge-guest {
+  background: rgba(245, 158, 11, 0.15);
+  color: #b45309;
+}
+
+.tier-badge.badge-cloud {
+  background: rgba(37, 99, 235, 0.15);
+  color: #1d4ed8;
+}
+
+.auth-tier-desc {
+  color: var(--muted);
+  font-size: 0.875rem;
+  margin-bottom: var(--space-4);
+}
+
+.auth-tier-features {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--space-5) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  flex-grow: 1;
+}
+
+.auth-tier-features li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: 0.875rem;
+  line-height: 1.4;
+}
+
+.feature-check {
+  color: #10b981;
+  font-weight: 700;
+}
+
+.feature-warn {
+  color: #f59e0b;
+  font-weight: 700;
+}

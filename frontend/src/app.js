@@ -78,7 +78,8 @@ function syncTutorControls() {
 }
 
 function shell(content, { section = "classes" } = {}) {
-  const userLabel = currentUser?.email ? currentUser.email.split("@")[0] : "Sign in";
+  const isGuest = !currentUser?.email;
+  const userLabel = currentUser?.email ? currentUser.email.split("@")[0] : "Guest";
 
   app.innerHTML = `
     <header class="app-header">
@@ -89,8 +90,9 @@ function shell(content, { section = "classes" } = {}) {
       <nav class="primary-nav" aria-label="Primary">
         <a href="#/classes" ${section === "classes" ? 'aria-current="page"' : ""}>Classes</a>
         <a href="#/tutor" ${section === "tutor" ? 'aria-current="page"' : ""}>Quick tutor</a>
-        <a href="#/auth" ${section === "auth" ? 'aria-current="page"' : ""} class="nav-account-link" style="display: inline-flex; align-items: center; gap: 0.35rem;">
+        <a href="#/auth" ${section === "auth" ? 'aria-current="page"' : ""} class="nav-account-link" style="display: inline-flex; align-items: center; gap: 0.4rem;">
           ${icon("user", { size: 16 })} <span>${escapeHtml(userLabel)}</span>
+          ${isGuest ? '<span class="tier-badge badge-guest" style="font-size: 0.65rem; padding: 1px 6px;">Guest</span>' : '<span class="tier-badge badge-cloud" style="font-size: 0.65rem; padding: 1px 6px;">Cloud</span>'}
         </a>
       </nav>
       <div class="status-strip" role="status" aria-live="polite" aria-label="Session status">
@@ -449,11 +451,76 @@ async function renderAuth() {
   const health = await checkBackendHealth();
 
   shell(`
-    <section class="section-stack" style="max-width: 640px; margin: 0 auto;">
+    <section class="section-stack" style="max-width: 820px; margin: 0 auto;">
       <div class="page-heading">
         <div>
-          <h1>Account & Database Sync</h1>
-          <p class="muted">Connected to Supabase PostgreSQL database and FastAPI backend services.</p>
+          <h1>Account & Cloud Sync</h1>
+          <p class="muted">Manage your session, understand guest vs cloud features, and sync across devices.</p>
+        </div>
+      </div>
+
+      ${user ? `
+        <div class="account-status-banner signed-in-banner">
+          ${icon("check", { size: 20 })}
+          <div>
+            <strong>Signed in as ${escapeHtml(user.email)} · Cloud Sync Active</strong>
+            <span>Your classes, uploaded course documents, syllabus roadmap, and generated study sets are automatically saved to your cloud profile.</span>
+          </div>
+        </div>
+      ` : `
+        <div class="account-status-banner guest-banner">
+          ${icon("alert", { size: 20 })}
+          <div>
+            <strong>Guest Mode Active · Files Are Not Saved to Cloud</strong>
+            <span>You are currently using Screen Tutor as a guest. Any uploaded notes, slides, or study sets are stored <strong>only in this browser's temporary storage</strong> and will be lost if you clear your browser cache. Sign in or create an account to save your files permanently to the cloud.</span>
+          </div>
+        </div>
+      `}
+
+      <div class="auth-comparison-grid">
+        <div class="auth-tier-card tier-guest">
+          <div class="auth-tier-header">
+            <h3>Guest Mode</h3>
+            <span class="tier-badge badge-guest">Local Only</span>
+          </div>
+          <p class="auth-tier-desc">Quick, zero-setup study sessions without an account. Best for exploring features.</p>
+          <ul class="auth-tier-features">
+            <li><span class="feature-check">✓</span> Gemini Live real-time screen & voice tutor</li>
+            <li><span class="feature-check">✓</span> Interactive flashcards and quiz players</li>
+            <li><span class="feature-check">✓</span> Built-in scratchpad & scientific calculator</li>
+            <li><span class="feature-check">✓</span> Sample study sets and quick review</li>
+            <li><span class="feature-warn">✕</span> <strong>Files NOT saved to cloud</strong></li>
+            <li><span class="feature-warn">✕</span> <strong>Lost on browser cache clear</strong></li>
+            <li><span class="feature-warn">✕</span> No cross-device progress sync</li>
+          </ul>
+          <a href="#/classes" class="btn btn-secondary" style="justify-content: center; width: 100%;">
+            Continue as Guest
+          </a>
+        </div>
+
+        <div class="auth-tier-card tier-cloud">
+          <div class="auth-tier-header">
+            <h3>Signed-in Account</h3>
+            <span class="tier-badge badge-cloud">Cloud Saved</span>
+          </div>
+          <p class="auth-tier-desc">Full persistence powered by Supabase PostgreSQL and private cloud storage.</p>
+          <ul class="auth-tier-features">
+            <li><span class="feature-check">✓</span> <strong>Permanent cloud storage</strong> for all course files</li>
+            <li><span class="feature-check">✓</span> Sync classes & syllabus maps across all devices</li>
+            <li><span class="feature-check">✓</span> Background lecture transcription & extraction</li>
+            <li><span class="feature-check">✓</span> Study sets, practice tests & score history preserved</li>
+            <li><span class="feature-check">✓</span> Gemini Live screen & audio sessions grounded in your files</li>
+            <li><span class="feature-check">✓</span> Free account, no credit card required</li>
+          </ul>
+          ${user ? `
+            <button id="auth-signout-btn" class="btn btn-danger-ghost" type="button" style="justify-content: center; width: 100%;">
+              ${icon("stop", { size: 16 })} Sign out (${escapeHtml(user.email.split("@")[0])})
+            </button>
+          ` : `
+            <a href="#auth-form" class="btn btn-primary" style="justify-content: center; width: 100%;">
+              Sign in or Register Below
+            </a>
+          `}
         </div>
       </div>
 
@@ -467,21 +534,26 @@ async function renderAuth() {
 
       ${user ? `
         <div class="panel">
-          <h2>Signed in as ${escapeHtml(user.email)}</h2>
-          <p class="muted">Your classes, notes, and study sets are synced to your private Supabase profile.</p>
+          <h2>Active Cloud Session</h2>
+          <p class="muted">Your classes and study sets are currently syncing to Supabase.</p>
           <div class="metric-strip" style="margin: 1.25rem 0;">
             <div class="metric">
-              <strong>${escapeHtml(user.email?.split('@')[0])}</strong>
+              <strong>${escapeHtml(user.email)}</strong>
               <span>User ID: ${escapeHtml(user.id.slice(0, 8))}...</span>
             </div>
             <div class="metric">
               <strong>Supabase Auth</strong>
-              <span>Session active</span>
+              <span>Session active · Cloud storage enabled</span>
             </div>
           </div>
-          <button id="auth-signout-btn" class="btn btn-danger-ghost" type="button">
-            ${icon("stop", { size: 16 })} Sign out
-          </button>
+          <div style="display: flex; gap: 0.75rem;">
+            <a href="#/classes" class="btn btn-primary">
+              Go to my classes
+            </a>
+            <button id="auth-signout-btn-2" class="btn btn-secondary" type="button">
+              ${icon("stop", { size: 16 })} Sign out
+            </button>
+          </div>
         </div>
       ` : `
         <div class="panel auth-panel">
@@ -516,7 +588,7 @@ async function renderAuth() {
   `, { section: "auth" });
 
   if (user) {
-    document.querySelector("#auth-signout-btn")?.addEventListener("click", async () => {
+    const handleSignOut = async () => {
       try {
         await signOut();
         currentUser = null;
@@ -525,7 +597,9 @@ async function renderAuth() {
       } catch (err) {
         toast(`Sign out failed: ${err.message}`, { tone: "error" });
       }
-    });
+    };
+    document.querySelector("#auth-signout-btn")?.addEventListener("click", handleSignOut);
+    document.querySelector("#auth-signout-btn-2")?.addEventListener("click", handleSignOut);
   } else {
     let mode = "signin";
     const tabSignin = document.querySelector("#auth-tab-signin");

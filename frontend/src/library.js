@@ -197,7 +197,23 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
           </button>
         </div>
       </div>
-      <p class="privacy-note">${icon("alert", { size: 16 })} Files are processed securely. Extracted text grounds the class AI tutor and study generators.</p>
+      ${!token ? `
+        <div class="account-status-banner guest-banner">
+          ${icon("alert", { size: 20 })}
+          <div>
+            <strong>Guest Mode · Files Stored Locally Only</strong>
+            <span>Uploaded files, notes, and transcripts are stored only in this browser and will not be saved to the cloud. If you clear cache or switch devices, these files will be lost. <a class="auth-link" href="#/auth">Sign in or create an account</a> to keep your course library permanently synced to the cloud.</span>
+          </div>
+        </div>
+      ` : `
+        <div class="account-status-banner signed-in-banner">
+          ${icon("check", { size: 20 })}
+          <div>
+            <strong>Cloud Sync Active</strong>
+            <span>All uploads and extracted transcripts are securely backed up to your private cloud storage and synced across devices.</span>
+          </div>
+        </div>
+      `}
       <div class="toolbar-row">
         <div class="chip-group" role="group" aria-label="Filter uploads by kind" id="upload-filters"></div>
       </div>
