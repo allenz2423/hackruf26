@@ -1,4 +1,6 @@
 import { escapeHtml } from "./ui.js";
+import { icon } from "./icons.js";
+import { renderFlashcards, normalizeCards, formatSourceCitation } from "./flashcards.js";
 
 function addDialog(title) {
   const dialog = document.createElement("dialog");
@@ -21,63 +23,177 @@ function addDialog(title) {
   return dialog;
 }
 
-function renderGuide(root, material) {
-  root.innerHTML = `
-    ${material.items?.length ? `<div class="study-mode-actions">
-      <button class="btn btn-secondary" type="button" data-practice>Practice questions</button>
-    </div>` : ""}
-    <article class="guide-content"><pre class="document-text">${escapeHtml(material.content || "This study guide has no written content yet.")}</pre></article>
-  `;
-  root.querySelector("[data-practice]")?.addEventListener("click", () => renderQuestions(root, material, () => renderGuide(root, material)));
-}
+/**
+ * Parses study guide content into structured sections:
+ * [{ heading, body, key_terms, sources }]
+ * Supports objects with sections, raw arrays, JSON strings, markdown headings, or plain text.
+ */
+export function parseGuideSections(material) {
+  let content = material.content;
 
-function renderFlashcards(root, material) {
-  const cards = material.cards?.length
-    ? material.cards
-    : (material.questions || ["Review this topic"])
-      .map((front) => ({ front, back: `Review this concept in ${material.sources?.[0] || "your class materials"}.` }));
-  let index = 0;
-  let flipped = false;
-
-  function draw() {
-    const card = cards[index];
-    root.innerHTML = `
-      <div class="study-progress"><span>Card ${index + 1} of ${cards.length}</span><progress max="${cards.length}" value="${index + 1}"></progress></div>
-      <button class="study-flashcard ${flipped ? "is-flipped" : ""}" type="button" data-flip aria-label="${flipped ? "Show question" : "Reveal answer"}">
-        <span class="field-hint">${flipped ? "Answer" : "Question"} - Select card to ${flipped ? "flip back" : "reveal"}</span>
-        <strong>${escapeHtml(flipped ? card.back : card.front)}</strong>
-      </button>
-      <div class="study-actions">
-        <button class="btn btn-secondary" type="button" data-prev ${index === 0 ? "disabled" : ""}>Previous</button>
-        <button class="btn btn-primary" type="button" data-next>${index === cards.length - 1 ? "Finish" : "Next card"}</button>
-      </div>
-    `;
-    root.querySelector("[data-flip]").addEventListener("click", () => {
-      flipped = !flipped;
-      draw();
-    });
-    root.querySelector("[data-prev]").addEventListener("click", () => {
-      index -= 1;
-      flipped = false;
-      draw();
-    });
-    root.querySelector("[data-next]").addEventListener("click", () => {
-      if (index < cards.length - 1) {
-        index += 1;
-        flipped = false;
-        draw();
-        return;
-      }
-      root.innerHTML = `<div class="session-complete"><h3>Deck complete</h3><p class="muted">You reviewed ${cards.length} ${cards.length === 1 ? "card" : "cards"}.</p><button class="btn btn-primary" type="button" data-restart>Review again</button></div>`;
-      root.querySelector("[data-restart]").addEventListener("click", () => {
-        index = 0;
-        flipped = false;
-        draw();
-      });
-    });
+  if (!content) {
+    if (Array.isArray(material.sections) && material.sections.length > 0) {
+      return material.sections;
+    }
+    return [];
   }
 
-  draw();
+  // Attempt JSON parsing if string looks like JSON
+  if (typeof content === "string") {
+    const trimmed = content.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === "object") {
+          content = parsed;
+        }
+      } catch {
+        // Fall back to string parsing
+      }
+    }
+  }
+
+  // If content is an object with a sections array
+  if (content && typeof content === "object") {
+    if (Array.isArray(content.sections) && content.sections.length > 0) {
+      return content.sections;
+    }
+    if (Array.isArray(content) && content.length > 0) {
+      return content;
+    }
+    if (content.heading || content.body) {
+      return [content];
+    }
+  }
+
+  if (Array.isArray(material.sections) && material.sections.length > 0) {
+    return material.sections;
+  }
+
+  // If content is a string, parse markdown headings (## or #) or numbered headings
+  if (typeof content === "string") {
+    const headerPattern = /^#{1,4}\s+(.+)$/gm;
+    const matches = [...content.matchAll(headerPattern)];
+    if (matches.length > 0) {
+      const sections = [];
+      for (let i = 0; i < matches.length; i++) {
+        const match = matches[i];
+        const heading = match[1].trim();
+        const start = match.index + match[0].length;
+        const end = i < matches.length - 1 ? matches[i + 1].index : content.length;
+        const body = content.slice(start, end).trim();
+        sections.push({
+          heading,
+          body,
+          key_terms: [],
+          sources: material.sources || []
+        });
+      }
+      return sections;
+    }
+
+    // Numbered sections: "1. Membrane structure\nBody..."
+    const numberedPattern = /(?:^|\n\n)(\d+\.\s+[^\n]+)\n([\s\S]*?)(?=(?:\n\n\d+\.\s+[^\n]+)|$)/g;
+    const numberedMatches = [...content.matchAll(numberedPattern)];
+    if (numberedMatches.length > 1) {
+      return numberedMatches.map((m) => ({
+        heading: m[1].replace(/^\d+\.\s*/, "").trim(),
+        body: m[2].trim(),
+        key_terms: [],
+        sources: material.sources || []
+      }));
+    }
+
+    return [{
+      heading: material.scope || material.title || "Overview",
+      body: content,
+      key_terms: [],
+      sources: material.sources || []
+    }];
+  }
+
+  return [];
+}
+
+function formatBodyParagraphs(body) {
+  if (!body) return "";
+  if (typeof body !== "string") {
+    if (typeof body === "object") {
+      try {
+        return `<pre class="document-text">${escapeHtml(JSON.stringify(body, null, 2))}</pre>`;
+      } catch {
+        return "";
+      }
+    }
+    body = String(body);
+  }
+  return body
+    .split(/\n{2,}/)
+    .filter((p) => p.trim())
+    .map((p) => `<p>${escapeHtml(p.trim()).replace(/\n/g, "<br>")}</p>`)
+    .join("");
+}
+
+function renderGuide(root, material) {
+  const sections = parseGuideSections(material);
+  const flashcardsAvailable = normalizeCards(material).length > 0;
+  const questionsAvailable = (material.items?.length || material.questions?.length || 0) > 0;
+
+  root.innerHTML = `
+    <div class="study-mode-actions">
+      ${flashcardsAvailable ? `
+        <button class="btn btn-secondary" type="button" data-flashcards>
+          ${icon("cards", { size: 16 })} Study flashcards
+        </button>
+      ` : ""}
+      ${questionsAvailable ? `
+        <button class="btn btn-secondary" type="button" data-practice>
+          ${icon("quiz", { size: 16 })} Practice questions
+        </button>
+      ` : ""}
+    </div>
+
+    <article class="guide-content">
+      ${sections.length > 0 ? `
+        <div class="guide-sections-list">
+          ${sections.map((section, idx) => `
+            <section class="guide-section">
+              <h3 class="guide-section-heading">${escapeHtml(section.heading || `Section ${idx + 1}`)}</h3>
+              <div class="guide-section-body">
+                ${formatBodyParagraphs(section.body)}
+              </div>
+              ${Array.isArray(section.key_terms) && section.key_terms.length > 0 ? `
+                <div class="guide-meta-block">
+                  <span class="guide-meta-label">Key terms:</span>
+                  <div class="guide-chips">
+                    ${section.key_terms.map((term) => `<span class="chip key-term-chip">${escapeHtml(term)}</span>`).join("")}
+                  </div>
+                </div>
+              ` : ""}
+              ${Array.isArray(section.sources) && section.sources.length > 0 ? `
+                <div class="guide-meta-block">
+                  <span class="guide-meta-label">Sources:</span>
+                  <div class="guide-chips">
+                    ${section.sources.map((src) => `<span class="chip source-chip">${escapeHtml(formatSourceCitation(src))}</span>`).join("")}
+                  </div>
+                </div>
+              ` : ""}
+            </section>
+          `).join("")}
+        </div>
+      ` : `
+        <p class="muted">This study guide has no written content yet.</p>
+      `}
+    </article>
+  `;
+
+  root.querySelector("[data-flashcards]")?.addEventListener("click", () => {
+    renderFlashcards(root, material, { onBack: () => renderGuide(root, material) });
+  });
+
+  root.querySelector("[data-practice]")?.addEventListener("click", () => {
+    renderQuestions(root, material, () => renderGuide(root, material));
+  });
 }
 
 function renderQuestions(root, material, onReturn = null) {
@@ -99,7 +215,10 @@ function renderQuestions(root, material, onReturn = null) {
       <div class="session-complete">
         <h3>Review complete</h3>
         <p class="muted">${result}</p>
-        <button class="btn btn-primary" type="button" data-restart>Try again</button>
+        <div class="study-actions" style="justify-content: center; gap: 0.5rem; margin-top: 1rem;">
+          <button class="btn btn-primary" type="button" data-restart>Try again</button>
+          ${onReturn ? `<button class="btn btn-secondary" type="button" data-return>Back to guide</button>` : ""}
+        </div>
       </div>`;
     root.querySelector("[data-restart]").addEventListener("click", () => {
       index = 0;
@@ -108,6 +227,7 @@ function renderQuestions(root, material, onReturn = null) {
       selections.clear();
       draw();
     });
+    root.querySelector("[data-return]")?.addEventListener("click", onReturn);
   }
 
   function draw() {
@@ -126,8 +246,11 @@ function renderQuestions(root, material, onReturn = null) {
       <section class="question-panel">
         <h3>${escapeHtml(item.prompt || item)}</h3>
         ${hasChoices ? `<fieldset class="answer-options" ${isChecked ? "disabled" : ""}>
-          <legend class="visually-hidden">Choose an answer</legend>
-          ${item.choices.map((choice) => `<label><input type="radio" name="answer" value="${escapeHtml(choice)}" ${selected === choice ? "checked" : ""} /><span>${escapeHtml(choice)}</span></label>`).join("")}
+          ${item.choices.map((choice) => {
+            const val = choice && typeof choice === "object" ? (choice.id ?? choice.text) : choice;
+            const label = choice && typeof choice === "object" ? (choice.text ?? choice.label ?? choice.id) : choice;
+            return `<label><input type="radio" name="answer" value="${escapeHtml(val)}" ${selected === val ? "checked" : ""} /><span>${escapeHtml(label)}</span></label>`;
+          }).join("")}
         </fieldset>` : `<p class="muted">Answer from memory, then reveal the review note.</p>`}
         <div class="answer-feedback" aria-live="polite">${isChecked ? hasChoices
           ? `<strong data-correct="${isCorrect}">${isCorrect ? "Correct" : `Answer: ${escapeHtml(item.answer)}`}</strong><p>${escapeHtml(item.explanation || "")}</p>`
@@ -180,8 +303,10 @@ export function openMaterialViewer(material) {
   dialog.querySelector("#material-dialog-meta").textContent = `${material.scope || "Class review"} - ${count} ${count === 1 ? "item" : "items"} - ${label}`;
 
   if (material.type === "Flashcards") {
-    renderFlashcards(root, material);
-  } else if (material.type === "Study guide" && material.content) {
+    renderFlashcards(root, material, {
+      onBack: () => dialog.close()
+    });
+  } else if (material.type === "Study guide" && (material.content || material.sections)) {
     renderGuide(root, material);
   } else {
     renderQuestions(root, material);

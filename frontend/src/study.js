@@ -1,5 +1,6 @@
 import { icon } from "./icons.js";
 import { renderQuizPlayer } from "./quiz-player.js";
+import { renderFlashcards } from "./flashcards.js";
 import { escapeHtml, toast } from "./ui.js";
 import { openMaterialViewer } from "./material-viewer.js";
 import {
@@ -38,26 +39,93 @@ function formatDate(iso) {
   return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function formatRemoteMaterial(detail, klassId, uiTypeFallback) {
+  const uiType = detail.kind ? fromApiKind(detail.kind) : (uiTypeFallback || "Quiz");
+  const sections = Array.isArray(detail.content?.sections) ? detail.content.sections : [];
+  const cards = Array.isArray(detail.content?.cards) ? detail.content.cards : [];
+  const rawQuestions = Array.isArray(detail.content?.questions) ? detail.content.questions : [];
+  const questions = rawQuestions.map((q, idx) => ({
+    id: q.id || `q-${idx + 1}`,
+    kind: q.kind || (Array.isArray(q.choices) && q.choices.length ? "multiple_choice" : "short_answer"),
+    prompt: q.prompt,
+    choices: Array.isArray(q.choices) ? q.choices : [],
+    sources: Array.isArray(q.sources) ? q.sources : [],
+    ...(q.answerIndex !== undefined ? { answerIndex: q.answerIndex } : {}),
+    ...(q.answer !== undefined ? { answer: q.answer } : {}),
+    explanation: q.explanation || ""
+  }));
+
+  const guideContent = sections.length
+    ? sections.map((s) => `## ${s.heading}\n\n${s.body}`).join("\n\n")
+    : (typeof detail.content === "string" ? detail.content : null);
+
+  const count = detail.item_count
+    || questions.length
+    || cards.length
+    || sections.length
+    || 0;
+
+  return {
+    id: detail.id,
+    classId: klassId,
+    title: detail.title || `${uiType}: Material`,
+    type: uiType,
+    scope: detail.scope?.kind === "all" ? "Whole class" : "Class material",
+    status: detail.status || "ready",
+    count,
+    createdAt: detail.created_at || new Date().toISOString(),
+    timeLimitMinutes: detail.options?.time_limit_minutes || (uiType === "Practice test" ? 15 : undefined),
+    isRemote: true,
+    sections,
+    content: guideContent,
+    cards,
+    questions,
+    attempts: detail.latest_attempt ? [{ scorePercent: Math.round(detail.latest_attempt.score_percent) }] : []
+  };
+}
+
 function scoreableQuestions(material) {
+  if (!material) return [];
   const questions = Array.isArray(material.questions) ? material.questions : [];
-  const playableQuestions = questions.filter((question) => question
-    && typeof question === "object"
-    && typeof question.prompt === "string"
-    && Array.isArray(question.choices)
-    && Number.isInteger(question.answerIndex));
-  if (playableQuestions.length) return playableQuestions;
+  const playableQuestions = questions.filter((question) => {
+    if (!question || typeof question !== "object") return false;
+    if (typeof question.prompt !== "string" || !question.prompt.trim()) return false;
+    const hasChoices = Array.isArray(question.choices) && question.choices.length > 0;
+    const hasKind = typeof question.kind === "string" && question.kind.trim().length > 0;
+    return hasChoices || hasKind;
+  });
+
+  if (playableQuestions.length) {
+    return playableQuestions.map((q, idx) => ({
+      id: q.id || `${material.id || "mat"}-q-${idx + 1}`,
+      kind: q.kind || (Array.isArray(q.choices) && q.choices.length ? "multiple_choice" : "short_answer"),
+      prompt: q.prompt,
+      choices: Array.isArray(q.choices) ? q.choices : [],
+      sources: Array.isArray(q.sources) ? q.sources : [],
+      ...(q.answerIndex !== undefined ? { answerIndex: q.answerIndex } : {}),
+      ...(q.answer !== undefined ? { answer: q.answer } : {}),
+      explanation: q.explanation || ""
+    }));
+  }
 
   return (material.items || []).flatMap((item, index) => {
-    if (!item.prompt || !Array.isArray(item.choices)) return [];
+    if (!item || typeof item !== "object") return [];
+    if (typeof item.prompt !== "string" || !item.prompt.trim()) return [];
+    const hasChoices = Array.isArray(item.choices) && item.choices.length > 0;
+    const hasKind = typeof item.kind === "string" && item.kind.trim().length > 0;
+    if (!hasChoices && !hasKind) return [];
+
     const answerIndex = typeof item.answer === "number"
       ? item.answer
-      : item.choices.indexOf(item.answer);
-    if (answerIndex < 0) return [];
+      : Array.isArray(item.choices) ? item.choices.indexOf(item.answer) : -1;
+
     return [{
-      id: item.id || `${material.id}-question-${index + 1}`,
+      id: item.id || `${material.id || "mat"}-question-${index + 1}`,
       prompt: item.prompt,
-      choices: item.choices,
-      answerIndex,
+      kind: item.kind || (hasChoices ? "multiple_choice" : "short_answer"),
+      choices: Array.isArray(item.choices) ? item.choices : [],
+      ...(answerIndex >= 0 ? { answerIndex } : {}),
+      ...(item.answer !== undefined ? { answer: item.answer } : {}),
       explanation: item.explanation || ""
     }];
   });
@@ -139,6 +207,7 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
             status: rm.status,
             count: rm.item_count || 10,
             createdAt: rm.created_at,
+            timeLimitMinutes: rm.options?.time_limit_minutes || (uiType === "Practice test" ? 15 : undefined),
             isRemote: true,
             attempts: rm.latest_attempt ? [{ scorePercent: Math.round(rm.latest_attempt.score_percent) }] : []
           };
@@ -243,7 +312,8 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
         const count = material.items?.length || material.cards?.length || questions.length || material.count || 0;
         const lastAttempt = material.attempts?.at(-1);
         const isAssessment = ["Quiz", "Practice test"].includes(material.type);
-        const canPlay = isAssessment;
+        const isFlashcards = material.type === "Flashcards";
+        const canPlay = isAssessment || isFlashcards;
         const title = material.title || material.type || "Study material";
         const prompts = material.items?.map((item) => item.prompt).filter(Boolean)
           || questions.map((question) => typeof question === "string" ? question : question.prompt).filter(Boolean);
@@ -265,7 +335,7 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
               <span class="row-meta">${formatDate(material.createdAt)}${material.timeLimitMinutes ? ` &middot; ${material.timeLimitMinutes} min` : ""}</span>
               <div style="display: flex; gap: 0.5rem; align-items: center;">
                 <button class="btn ${canPlay ? "btn-primary" : "btn-secondary"} material-open" type="button" data-open-material="${escapeHtml(material.id)}">
-                  ${canPlay ? "Start" : "Open"}
+                  ${isFlashcards ? "Study cards" : isAssessment ? "Start" : "Open"}
                 </button>
                 <button class="btn btn-ghost btn-icon" type="button" data-delete-material="${escapeHtml(material.id)}" aria-label="Delete material">
                   ${icon("trash", { size: 16 })}
@@ -298,6 +368,17 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
             options: { count, difficulty, time_limit_minutes: uiType === "Practice test" ? 15 : undefined }
           });
 
+          // If generation finished synchronously
+          if (res.status === "ready" && res.content) {
+            generateBtn.disabled = false;
+            generateBtn.innerHTML = `${icon("sparkles", { size: 18 })} Generate study set`;
+            const formatted = formatRemoteMaterial(res, klass.id, uiType);
+            onMaterialAdded(formatted);
+            toast(`Generated ${uiType} ready to practice!`);
+            renderMaterials();
+            return;
+          }
+
           toast("Generating study material with Gemini in the background...", { tone: "busy" });
 
           // Poll until ready
@@ -311,43 +392,31 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
                 generateBtn.disabled = false;
                 generateBtn.innerHTML = `${icon("sparkles", { size: 18 })} Generate study set`;
 
-                const formatted = {
-                  id: detail.id,
-                  classId: klass.id,
-                  title: detail.title,
-                  type: uiType,
-                  scope: "Whole class",
-                  status: "ready",
-                  count: detail.item_count,
-                  createdAt: detail.created_at,
-                  isRemote: true,
-                  content: detail.content?.sections ? detail.content.sections.map((s) => `## ${s.heading}\n${s.body}`).join("\n\n") : null,
-                  cards: detail.content?.cards || [],
-                  questions: (detail.content?.questions || []).map((q, idx) => ({
-                    id: q.id || `q-${idx}`,
-                    prompt: q.prompt,
-                    choices: q.choices,
-                    answerIndex: 0,
-                    explanation: ""
-                  }))
-                };
-
+                const formatted = formatRemoteMaterial(detail, klass.id, uiType);
                 onMaterialAdded(formatted);
                 toast(`Generated ${uiType} ready to practice!`);
                 renderMaterials();
-              } else if (detail.status === "failed" || attempts > 20) {
+              } else if (detail.status === "failed" || attempts >= 30) {
                 clearInterval(pollInterval);
                 generateBtn.disabled = false;
                 generateBtn.innerHTML = `${icon("sparkles", { size: 18 })} Generate study set`;
-                toast("Backend generation timed out or failed. Falling back to local template.", { tone: "busy" });
+                toast(detail.status === "failed"
+                  ? "Study generation failed on the server. Falling back to local template."
+                  : "Generation timed out. Falling back to local template.", { tone: "busy" });
                 const localMat = createLocalMaterial(uiType, klass, count);
                 onMaterialAdded(localMat);
                 renderMaterials();
               }
             } catch {
-              clearInterval(pollInterval);
-              generateBtn.disabled = false;
-              generateBtn.innerHTML = `${icon("sparkles", { size: 18 })} Generate study set`;
+              if (attempts >= 30) {
+                clearInterval(pollInterval);
+                generateBtn.disabled = false;
+                generateBtn.innerHTML = `${icon("sparkles", { size: 18 })} Generate study set`;
+                toast("Could not check generation status. Falling back to local template.", { tone: "busy" });
+                const localMat = createLocalMaterial(uiType, klass, count);
+                onMaterialAdded(localMat);
+                renderMaterials();
+              }
             }
           }, 3000);
           return;
@@ -388,22 +457,33 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
       if (token && material.isRemote && !material.questions?.length && !material.cards?.length && !material.content) {
         try {
           const detail = await getStudyMaterialDetailApi(materialId);
+          if (detail.status) material.status = detail.status;
           if (detail.content) {
-            if (detail.content.cards) material.cards = detail.content.cards;
-            if (detail.content.sections) material.content = detail.content.sections.map((s) => `## ${s.heading}\n${s.body}`).join("\n\n");
-            if (detail.content.questions) {
-              material.questions = detail.content.questions.map((q, idx) => ({
-                id: q.id || `q-${idx}`,
-                prompt: q.prompt,
-                choices: q.choices,
-                answerIndex: 0,
-                explanation: ""
-              }));
-            }
+            const parsed = formatRemoteMaterial(detail, klass.id, material.type);
+            material.cards = parsed.cards;
+            material.sections = parsed.sections;
+            material.content = parsed.content;
+            material.questions = parsed.questions;
+            if (parsed.timeLimitMinutes) material.timeLimitMinutes = parsed.timeLimitMinutes;
           }
         } catch (e) {
           console.warn("Could not load material detail:", e);
         }
+      }
+
+      if (material.type === "Practice test" && !material.timeLimitMinutes) {
+        material.timeLimitMinutes = 15;
+      }
+
+      if (material.type === "Flashcards") {
+        renderFlashcards(root, material, {
+          onBack: renderStudyView,
+          onAttemptCompleted: (attempt) => {
+            material.attempts = [...(material.attempts || []), attempt];
+            onAttemptCompleted?.(material.id, attempt);
+          }
+        });
+        return;
       }
 
       const questions = scoreableQuestions(material);
