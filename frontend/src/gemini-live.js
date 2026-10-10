@@ -1,8 +1,9 @@
 import { GoogleGenAI } from "@google/genai";
-import { requestLiveToken } from "./api.js";
+import { requestLiveToken, calculateExpression } from "./api.js";
 
 export class GeminiLiveController {
-  constructor({ onMessage, onAnnotationRequest, onStatusChange } = {}) {
+  constructor({ classId = null, onMessage, onAnnotationRequest, onStatusChange } = {}) {
+    this.classId = classId;
     this.onMessage = onMessage || (() => {});
     this.onAnnotationRequest = onAnnotationRequest || (() => {});
     this.onStatusChange = onStatusChange || (() => {});
@@ -12,7 +13,7 @@ export class GeminiLiveController {
 
   async connect() {
     this.onStatusChange("connecting");
-    const token = await requestLiveToken();
+    const token = await requestLiveToken(this.classId);
     this.client = new GoogleGenAI({ apiKey: token.access_token });
 
     this.session = await this.client.live.connect({
@@ -20,7 +21,10 @@ export class GeminiLiveController {
       callbacks: {
         onopen: () => this.onStatusChange("connected"),
         onmessage: (message) => this.handleMessage(message),
-        onerror: () => this.onStatusChange("error"),
+        onerror: (error) => {
+          console.error("Gemini Live session error:", error);
+          this.onStatusChange("error");
+        },
         onclose: () => this.onStatusChange("closed")
       }
     });
@@ -28,16 +32,94 @@ export class GeminiLiveController {
     return token;
   }
 
-  handleMessage(message) {
+  async handleMessage(message) {
     const parts = message?.serverContent?.modelTurn?.parts || [];
 
     for (const part of parts) {
       if (part.text) {
         this.onMessage({ role: "tutor", text: part.text });
       }
+    }
 
-      if (part.functionCall?.name === "add_annotations") {
-        this.onAnnotationRequest(part.functionCall.args);
+    // Collect all tool/function calls across message structure
+    const functionCalls = [...(message?.toolCall?.functionCalls || [])];
+    for (const part of parts) {
+      if (part.functionCall) {
+        functionCalls.push(part.functionCall);
+      }
+    }
+
+    if (functionCalls.length > 0) {
+      await this.handleFunctionCalls(functionCalls);
+    }
+  }
+
+  async handleFunctionCalls(functionCalls) {
+    const functionResponses = [];
+
+    for (const call of functionCalls) {
+      const { id, name, args } = call;
+
+      if (name === "calculate_expression") {
+        try {
+          const expression = args?.expression;
+          const res = await calculateExpression(expression);
+          functionResponses.push({
+            id,
+            name,
+            response: { result: res.result }
+          });
+        } catch (error) {
+          functionResponses.push({
+            id,
+            name,
+            response: {
+              error: {
+                code: error.code || "calculator_error",
+                message: error.message || "Could not calculate expression."
+              }
+            }
+          });
+        }
+      } else if (name === "add_annotations") {
+        try {
+          this.onAnnotationRequest(args);
+          functionResponses.push({
+            id,
+            name,
+            response: { status: "rendered" }
+          });
+        } catch (error) {
+          functionResponses.push({
+            id,
+            name,
+            response: {
+              error: {
+                code: "annotation_error",
+                message: error.message || "Could not render annotation."
+              }
+            }
+          });
+        }
+      } else {
+        functionResponses.push({
+          id,
+          name,
+          response: {
+            error: {
+              code: "unsupported_tool",
+              message: `Tool ${name} is not supported.`
+            }
+          }
+        });
+      }
+    }
+
+    if (functionResponses.length > 0 && this.session) {
+      try {
+        this.session.sendToolResponse({ functionResponses });
+      } catch (err) {
+        console.warn("Failed to send tool response to Gemini Live:", err);
       }
     }
   }

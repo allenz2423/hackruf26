@@ -1,9 +1,18 @@
 import { SAMPLE_ALGEBRA_MATERIALS } from "./sample-assessments.js";
 import { SAMPLE_VERSION, starterClasses } from "./static-data.js";
+import {
+  getClassesApi,
+  createClassApi,
+  updateClassApi,
+  deleteClassApi,
+  getAccessToken
+} from "./api.js";
 
 const STORE_KEY = "screen-tutor-classes";
 const VERSION_KEY = "screen-tutor-sample-version";
 const SAMPLE_SEED_KEY = `${STORE_KEY}-algebra-examples-v1`;
+
+const CLASS_PALETTE = ["#2563eb", "#7c3aed", "#059669", "#d97706", "#dc2626", "#0891b2"];
 
 function cloneData(value) {
   return JSON.parse(JSON.stringify(value));
@@ -115,26 +124,98 @@ export function getClassById(classId) {
   return readClasses().find((item) => item.id === classId) || null;
 }
 
-export function createClass(name) {
-  const classes = readClasses();
-  const nextClass = {
-    id: makeId(name),
-    name,
-    color: "#7c3aed",
-    icon: name.trim().charAt(0).toUpperCase() || "C",
-    nextExam: "",
-    focus: "New class workspace",
-    uploads: [],
-    materials: [],
-    updatedAt: new Date().toISOString()
-  };
+export async function syncClassesFromApi() {
+  const token = await getAccessToken();
+  if (!token) return getClasses();
 
-  classes.push(nextClass);
-  saveClasses(classes);
-  return nextClass;
+  try {
+    const remoteClasses = await getClassesApi();
+    if (!Array.isArray(remoteClasses)) return getClasses();
+
+    const current = readClasses();
+    const currentById = new Map(current.map((c) => [c.id, c]));
+
+    const merged = remoteClasses.map((rc, idx) => {
+      const local = currentById.get(rc.id) || {};
+      return {
+        id: rc.id,
+        name: rc.name,
+        color: local.color || CLASS_PALETTE[idx % CLASS_PALETTE.length],
+        icon: rc.name.trim().charAt(0).toUpperCase() || "C",
+        nextExam: local.nextExam || "",
+        focus: local.focus || "Class workspace",
+        uploads: local.uploads || [],
+        materials: local.materials || [],
+        uploadCount: rc.upload_count ?? (local.uploads?.length || 0),
+        materialCount: rc.material_count ?? (local.materials?.length || 0),
+        updatedAt: rc.updated_at || new Date().toISOString()
+      };
+    });
+
+    if (merged.length > 0) {
+      saveClasses(merged);
+      return merged;
+    }
+    return current;
+  } catch (err) {
+    console.warn("Could not sync classes from API:", err);
+    return getClasses();
+  }
 }
 
-export function updateClass(classId, patch) {
+export async function createClass(name) {
+  const token = await getAccessToken();
+  let created = null;
+
+  if (token) {
+    try {
+      const remote = await createClassApi(name);
+      created = {
+        id: remote.id,
+        name: remote.name,
+        color: CLASS_PALETTE[Math.floor(Math.random() * CLASS_PALETTE.length)],
+        icon: remote.name.trim().charAt(0).toUpperCase() || "C",
+        nextExam: "",
+        focus: "New class workspace",
+        uploads: [],
+        materials: [],
+        updatedAt: remote.updated_at || new Date().toISOString()
+      };
+    } catch (e) {
+      console.warn("Failed to create class via API, falling back to local:", e);
+    }
+  }
+
+  if (!created) {
+    created = {
+      id: makeId(name),
+      name,
+      color: "#7c3aed",
+      icon: name.trim().charAt(0).toUpperCase() || "C",
+      nextExam: "",
+      focus: "New class workspace",
+      uploads: [],
+      materials: [],
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  const classes = readClasses();
+  classes.push(created);
+  saveClasses(classes);
+  return created;
+}
+
+export async function updateClass(classId, patch) {
+  const token = await getAccessToken();
+  if (token && patch.name) {
+    try {
+      await updateClassApi(classId, patch.name);
+    } catch (e) {
+      console.warn("Failed to update class on API:", e);
+    }
+  }
+
   const classes = readClasses();
   const index = classes.findIndex((item) => item.id === classId);
   if (index === -1) return null;
@@ -144,7 +225,16 @@ export function updateClass(classId, patch) {
   return classes[index];
 }
 
-export function deleteClass(classId) {
+export async function deleteClass(classId) {
+  const token = await getAccessToken();
+  if (token) {
+    try {
+      await deleteClassApi(classId);
+    } catch (e) {
+      console.warn("Failed to delete class on API:", e);
+    }
+  }
+
   saveClasses(readClasses().filter((item) => item.id !== classId));
 }
 

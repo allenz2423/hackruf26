@@ -1,7 +1,15 @@
 import "./styles.css";
 import { AnnotationController } from "./annotations.js";
 import { AudioController } from "./audio.js";
-import { getClasses, getClassById, createClass, updateClass, deleteClass, resetSampleData } from "./classes.js";
+import {
+  getClasses,
+  getClassById,
+  createClass,
+  updateClass,
+  deleteClass,
+  resetSampleData,
+  syncClassesFromApi
+} from "./classes.js";
 import { GeminiLiveController } from "./gemini-live.js";
 import { icon } from "./icons.js";
 import { renderLibraryTab } from "./library.js";
@@ -10,8 +18,19 @@ import { ScreenCaptureController } from "./screen-capture.js";
 import { renderStudyTab } from "./study.js";
 import { deleteUploadedFile, deleteUploadedFiles } from "./file-store.js";
 import { escapeHtml, openDialog, toast } from "./ui.js";
+import {
+  getCurrentUser,
+  getAccessToken,
+  signInWithEmail,
+  signUpWithEmail,
+  signOut,
+  onAuthStateChange,
+  checkBackendHealth
+} from "./api.js";
 
 const app = document.querySelector("#app");
+
+let currentUser = null;
 
 const state = {
   session: "idle",
@@ -55,10 +74,12 @@ function syncTutorControls() {
   share.disabled = sharing;
   document.querySelector("#pause-screen").disabled = !sharing;
   document.querySelector("#end-session").disabled = !inSession;
-  document.querySelector("#mic-toggle").setAttribute("aria-pressed", String(state.mic === "on"));
+  document.querySelector("#mic-toggle")?.setAttribute("aria-pressed", String(state.mic === "on"));
 }
 
 function shell(content, { section = "classes" } = {}) {
+  const userLabel = currentUser?.email ? currentUser.email.split("@")[0] : "Sign in";
+
   app.innerHTML = `
     <header class="app-header">
       <a class="brand" href="#/classes">
@@ -68,6 +89,9 @@ function shell(content, { section = "classes" } = {}) {
       <nav class="primary-nav" aria-label="Primary">
         <a href="#/classes" ${section === "classes" ? 'aria-current="page"' : ""}>Classes</a>
         <a href="#/tutor" ${section === "tutor" ? 'aria-current="page"' : ""}>Quick tutor</a>
+        <a href="#/auth" ${section === "auth" ? 'aria-current="page"' : ""} class="nav-account-link" style="display: inline-flex; align-items: center; gap: 0.35rem;">
+          ${icon("user", { size: 16 })} <span>${escapeHtml(userLabel)}</span>
+        </a>
       </nav>
       <div class="status-strip" role="status" aria-live="polite" aria-label="Session status">
         ${Object.keys(STATUS_LABELS).map(statusPill).join("")}
@@ -77,10 +101,11 @@ function shell(content, { section = "classes" } = {}) {
   `;
 }
 
-function renderClasses() {
+async function renderClasses() {
   const classes = getClasses();
-  const totalUploads = classes.reduce((sum, klass) => sum + klass.uploads.length, 0);
-  const totalMaterials = classes.reduce((sum, klass) => sum + klass.materials.length, 0);
+  const totalUploads = classes.reduce((sum, klass) => sum + (klass.uploads?.length || 0), 0);
+  const totalMaterials = classes.reduce((sum, klass) => sum + (klass.materials?.length || 0), 0);
+
   shell(`
     <section>
       <div class="page-heading">
@@ -100,18 +125,18 @@ function renderClasses() {
       </div>
       <div class="class-grid" id="class-grid"></div>
     </section>
-  `);
+  `, { section: "classes" });
 
   const grid = document.querySelector("#class-grid");
   grid.innerHTML = classes.map((klass) => `
-    <article class="class-card" style="--class-color: ${escapeHtml(klass.color)}">
+    <article class="class-card" style="--class-color: ${escapeHtml(klass.color || "#2563eb")}">
       <a href="#/classes/${encodeURIComponent(klass.id)}/library" class="class-card-main">
-        <span class="class-icon" aria-hidden="true">${escapeHtml(klass.icon)}</span>
+        <span class="class-icon" aria-hidden="true">${escapeHtml(klass.icon || "C")}</span>
         <span class="class-name">${escapeHtml(klass.name)}</span>
         <span class="class-focus">${escapeHtml(klass.focus || "Study workspace")}</span>
         <span class="class-meta">
-          <span>${klass.uploads.length} ${klass.uploads.length === 1 ? "upload" : "uploads"}</span>
-          <span>${klass.materials.length} study ${klass.materials.length === 1 ? "set" : "sets"}</span>
+          <span>${klass.uploads?.length || 0} ${(klass.uploads?.length || 0) === 1 ? "upload" : "uploads"}</span>
+          <span>${klass.materials?.length || 0} study ${(klass.materials?.length || 0) === 1 ? "set" : "sets"}</span>
         </span>
         ${klass.nextExam ? `<span class="class-next">${icon("syllabus", { size: 15 })}${escapeHtml(klass.nextExam)}</span>` : ""}
       </a>
@@ -130,7 +155,7 @@ function renderClasses() {
   async function addClass() {
     const name = await openDialog({ title: "New class", input: { label: "Class name" }, confirmLabel: "Create class" });
     if (!name) return;
-    const nextClass = createClass(name);
+    const nextClass = await createClass(name);
     window.location.hash = `#/classes/${encodeURIComponent(nextClass.id)}/library`;
   }
 
@@ -160,7 +185,7 @@ function renderClasses() {
       const klass = getClassById(renameId);
       const name = await openDialog({ title: "Rename class", input: { label: "Class name", value: klass.name } });
       if (name) {
-        updateClass(renameId, { name, icon: name.charAt(0).toUpperCase() });
+        await updateClass(renameId, { name, icon: name.charAt(0).toUpperCase() });
         renderClasses();
       }
     }
@@ -174,8 +199,8 @@ function renderClasses() {
         danger: true
       });
       if (confirmed) {
-        await Promise.allSettled([deleteUploadedFiles(klass.uploads.map((upload) => upload.id))]);
-        deleteClass(deleteId);
+        await Promise.allSettled([deleteUploadedFiles((klass.uploads || []).map((u) => u.id))]);
+        await deleteClass(deleteId);
         toast(`Deleted ${klass.name}.`);
         renderClasses();
       }
@@ -189,7 +214,7 @@ const CLASS_TABS = [
   { id: "tutor", label: "Tutor", icon: "monitor" }
 ];
 
-function renderClassTab({ id, tab }) {
+async function renderClassTab({ id, tab }) {
   const klass = getClassById(id);
   if (!klass) {
     window.location.hash = "#/classes";
@@ -200,8 +225,8 @@ function renderClassTab({ id, tab }) {
     <section>
       <a class="back-link" href="#/classes">${icon("arrowLeft", { size: 16 })} All classes</a>
       <div class="class-header">
-        <div class="class-title" style="--class-color: ${escapeHtml(klass.color)}">
-          <span class="class-icon" aria-hidden="true">${escapeHtml(klass.icon)}</span>
+        <div class="class-title" style="--class-color: ${escapeHtml(klass.color || "#2563eb")}">
+          <span class="class-icon" aria-hidden="true">${escapeHtml(klass.icon || "C")}</span>
           <div>
             <h1>${escapeHtml(klass.name)}</h1>
             <p class="muted">${escapeHtml(klass.focus || "Class study workspace")}</p>
@@ -217,12 +242,12 @@ function renderClassTab({ id, tab }) {
       </div>
       <div id="class-tab"></div>
     </section>
-  `);
+  `, { section: "classes" });
 
   const root = document.querySelector("#class-tab");
 
   if (tab === "study") {
-    renderStudyTab({
+    await renderStudyTab({
       root,
       klass,
       onMaterialAdded: (material) => {
@@ -246,7 +271,7 @@ function renderClassTab({ id, tab }) {
     return;
   }
 
-  renderLibraryTab({
+  await renderLibraryTab({
     root,
     klass,
     onUploadsAdded: (uploads) => {
@@ -255,7 +280,7 @@ function renderClassTab({ id, tab }) {
     },
     onUploadRemoved: (uploadId) => {
       deleteUploadedFile(uploadId).catch(() => toast("Could not remove the cached file from this browser.", { tone: "error" }));
-      updateClass(klass.id, { uploads: klass.uploads.filter((upload) => upload.id !== uploadId) });
+      updateClass(klass.id, { uploads: klass.uploads.filter((u) => u.id !== uploadId) });
       renderClassTab({ id, tab });
     }
   });
@@ -331,9 +356,20 @@ function renderTutor(klass = null) {
 
   syncTutorControls();
 
+  // Check if a question was queued from quiz player ("Ask tutor about this")
+  const queuedQuestion = sessionStorage.getItem("tutor_initial_question");
+  if (queuedQuestion) {
+    const questionInput = document.querySelector("#question-input");
+    if (questionInput) {
+      questionInput.value = queuedQuestion;
+      sessionStorage.removeItem("tutor_initial_question");
+    }
+  }
+
   const video = document.querySelector("#screen-preview");
   const emptyStage = document.querySelector(".empty-stage");
   const live = new GeminiLiveController({
+    classId: klass?.id || null,
     onMessage: (message) => appendMessage(message.role, message.text),
     onStatusChange: (connection) => setStatus({ connection }),
     onAnnotationRequest: (args) => annotations.addMany(args?.items || args?.annotations || [])
@@ -388,7 +424,7 @@ function renderTutor(klass = null) {
   });
 
   document.querySelector("#clear-marks").addEventListener("click", () => annotations.clear());
-  document.querySelector("#mic-toggle").addEventListener("click", async () => {
+  document.querySelector("#mic-toggle")?.addEventListener("click", async () => {
     try {
       await audio.toggle();
     } catch (error) {
@@ -408,13 +444,168 @@ function renderTutor(klass = null) {
   });
 }
 
+async function renderAuth() {
+  const user = await getCurrentUser();
+  const health = await checkBackendHealth();
+
+  shell(`
+    <section class="section-stack" style="max-width: 640px; margin: 0 auto;">
+      <div class="page-heading">
+        <div>
+          <h1>Account & Database Sync</h1>
+          <p class="muted">Connected to Supabase PostgreSQL database and FastAPI backend services.</p>
+        </div>
+      </div>
+
+      <div class="panel overview-card" style="margin-bottom: 1.5rem;">
+        <span class="kind-icon">${icon("monitor", { size: 22 })}</span>
+        <div>
+          <strong>Backend Service Health: <span class="pill" data-tone="${health.status === 'ok' ? 'good' : 'busy'}">${health.status}</span></strong>
+          <span class="row-meta">FastAPI server provisions Live tokens, calculates math, and extracts text.</span>
+        </div>
+      </div>
+
+      ${user ? `
+        <div class="panel">
+          <h2>Signed in as ${escapeHtml(user.email)}</h2>
+          <p class="muted">Your classes, notes, and study sets are synced to your private Supabase profile.</p>
+          <div class="metric-strip" style="margin: 1.25rem 0;">
+            <div class="metric">
+              <strong>${escapeHtml(user.email?.split('@')[0])}</strong>
+              <span>User ID: ${escapeHtml(user.id.slice(0, 8))}...</span>
+            </div>
+            <div class="metric">
+              <strong>Supabase Auth</strong>
+              <span>Session active</span>
+            </div>
+          </div>
+          <button id="auth-signout-btn" class="btn btn-danger-ghost" type="button">
+            ${icon("stop", { size: 16 })} Sign out
+          </button>
+        </div>
+      ` : `
+        <div class="panel auth-panel">
+          <div class="tabs" style="margin-bottom: 1.5rem; justify-content: center; display: flex; gap: 0.5rem;">
+            <button id="auth-tab-signin" class="btn btn-secondary" type="button">Sign in</button>
+            <button id="auth-tab-signup" class="btn btn-ghost" type="button">Create account</button>
+          </div>
+
+          <form id="auth-form" class="section-stack">
+            <div class="field-block" id="auth-name-block" hidden>
+              <label for="auth-name">Full name or nickname</label>
+              <input id="auth-name" name="name" type="text" placeholder="Ada Lovelace" />
+            </div>
+            <div class="field-block">
+              <label for="auth-email">Email address</label>
+              <input id="auth-email" name="email" type="email" required placeholder="student@example.com" />
+            </div>
+            <div class="field-block">
+              <label for="auth-password">Password</label>
+              <input id="auth-password" name="password" type="password" required minlength="6" placeholder="At least 6 characters" />
+            </div>
+            <button id="auth-submit-btn" class="btn btn-primary" type="submit" style="width: 100%; justify-content: center; margin-top: 1rem;">
+              Sign in
+            </button>
+          </form>
+          <p class="field-hint" style="text-align: center; margin-top: 1.25rem;">
+            Connecting to Supabase project: <code>rmwpbaxufddzerxfbtwa.supabase.co</code>
+          </p>
+        </div>
+      `}
+    </section>
+  `, { section: "auth" });
+
+  if (user) {
+    document.querySelector("#auth-signout-btn")?.addEventListener("click", async () => {
+      try {
+        await signOut();
+        currentUser = null;
+        toast("Signed out successfully.");
+        renderAuth();
+      } catch (err) {
+        toast(`Sign out failed: ${err.message}`, { tone: "error" });
+      }
+    });
+  } else {
+    let mode = "signin";
+    const tabSignin = document.querySelector("#auth-tab-signin");
+    const tabSignup = document.querySelector("#auth-tab-signup");
+    const nameBlock = document.querySelector("#auth-name-block");
+    const submitBtn = document.querySelector("#auth-submit-btn");
+    const form = document.querySelector("#auth-form");
+
+    tabSignin.addEventListener("click", () => {
+      mode = "signin";
+      tabSignin.className = "btn btn-secondary";
+      tabSignup.className = "btn btn-ghost";
+      nameBlock.hidden = true;
+      submitBtn.textContent = "Sign in";
+    });
+
+    tabSignup.addEventListener("click", () => {
+      mode = "signup";
+      tabSignup.className = "btn btn-secondary";
+      tabSignin.className = "btn btn-ghost";
+      nameBlock.hidden = false;
+      submitBtn.textContent = "Create account";
+    });
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const email = document.querySelector("#auth-email").value.trim();
+      const password = document.querySelector("#auth-password").value;
+      const name = document.querySelector("#auth-name")?.value.trim() || "";
+
+      submitBtn.disabled = true;
+      submitBtn.textContent = "Connecting...";
+
+      try {
+        if (mode === "signin") {
+          await signInWithEmail(email, password);
+          toast("Signed in successfully!");
+        } else {
+          await signUpWithEmail(email, password, name);
+          toast("Account created and signed in!");
+        }
+        currentUser = await getCurrentUser();
+        await syncClassesFromApi();
+        window.location.hash = "#/classes";
+      } catch (err) {
+        toast(err.message, { tone: "error" });
+        submitBtn.disabled = false;
+        submitBtn.textContent = mode === "signin" ? "Sign in" : "Create account";
+      }
+    });
+  }
+}
+
 const router = createRouter(
   [
     { path: "/classes", render: renderClasses },
     { path: "/classes/:id/:tab", render: renderClassTab },
-    { path: "/tutor", render: () => renderTutor() }
+    { path: "/tutor", render: () => renderTutor() },
+    { path: "/auth", render: renderAuth }
   ],
   { render: renderClasses }
 );
 
-router.render();
+// Initialize authentication and startup sync
+(async () => {
+  try {
+    currentUser = await getCurrentUser();
+    if (currentUser) {
+      await syncClassesFromApi();
+    }
+  } catch (err) {
+    console.warn("Initial auth/sync check:", err);
+  }
+
+  onAuthStateChange(async (event, session) => {
+    currentUser = session?.user || null;
+    if (currentUser) {
+      await syncClassesFromApi();
+    }
+  });
+
+  router.render();
+})();
