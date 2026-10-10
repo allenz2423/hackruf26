@@ -8,7 +8,7 @@ import logging
 from fastapi import APIRouter, Body, Request, Response
 
 from app.api.dependencies import (
-    database_pool,
+    database,
     enforce_calculator_request_policy,
     enforce_lean_request_policy,
     enforce_token_request_policy,
@@ -75,18 +75,18 @@ async def create_live_token(
         user_id = getattr(request.state, "user_id", None)
         if user_id is None:
             raise ApiError(401, "authentication_required", "Please sign in to use class materials.")
-        pool = database_pool(request)
-        class_row = await pool.fetchrow(
-            "SELECT id, name FROM public.course_classes WHERE id = $1 AND owner_id = $2",
+        database_connection = database(request)
+        class_row = await database_connection.fetchrow(
+            "SELECT id, name FROM course_classes WHERE id = ?1 AND owner_id = ?2",
             payload.class_id,
             user_id,
         )
         if class_row is None:
             raise ApiError(404, "not_found", "The requested resource was not found.")
-        notes = await pool.fetch(
-            "SELECT title, left(COALESCE(summary, extracted_text, ''), 40000) AS context "
-            "FROM public.course_notes "
-            "WHERE class_id = $1 AND status = 'ready' ORDER BY "
+        notes = await database_connection.fetch(
+            "SELECT title, substr(COALESCE(summary, extracted_text, ''), 1, 40000) AS context "
+            "FROM course_notes "
+            "WHERE class_id = ?1 AND status = 'ready' ORDER BY "
             "CASE WHEN kind = 'syllabus' THEN 0 ELSE 1 END, created_at",
             payload.class_id,
         )

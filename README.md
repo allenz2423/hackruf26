@@ -12,21 +12,19 @@ See the [product overview](docs/design.md), [frontend design](docs/frontend-desi
 
 ## Status
 
-The backend token-service boilerplate is in place. Supabase Auth and PostgreSQL
-are selected for sign-in, login sessions, and class-library data; the initial
-class-library schema is in [the initial migration](supabase/migrations/20261010120000_initial_class_library.sql),
-with private student profile rows in [the profile migration](supabase/migrations/20261010180000_user_profiles.sql).
-Supabase Auth remains authoritative for email and login sessions. The backend
-and frontend are not yet connected to Supabase; class materials currently do
-not sync across devices.
+The FastAPI backend uses SQLite for class-library data and private local storage
+for uploaded files. Supabase Auth remains the identity provider for browser
+sign-in; the backend verifies its access tokens and stores the verified user ID
+with each class. The default SQLite database and uploaded files live under
+`backend/.local/` and need persistent storage for deployed environments.
 
 ## Proposed stack
 
 - HTML, CSS, and JavaScript for the browser UI, with Google's JavaScript SDK for Gemini Live.
 - Python, FastAPI, and Pydantic for the token service.
 - Gemini Live API using `gemini-3.8-live` for real-time multimodal tutoring.
-- Supabase Auth for sign-in and Supabase-managed PostgreSQL for class-library data.
-- A small backend that issues constrained, short-lived Gemini Live credentials; the long-lived API key stays server-side. Database integration, note storage, and study-material generation are not implemented yet.
+- Supabase Auth for sign-in and SQLite for backend-owned class-library data.
+- A small backend that issues constrained, short-lived Gemini Live credentials; the long-lived API key stays server-side. SQLite-backed class-library APIs store course notes and generated study materials.
 
 See [backend setup and configuration](backend/README.md) to run the token
 service locally.

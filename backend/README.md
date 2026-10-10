@@ -4,8 +4,8 @@ FastAPI owns the Gemini API key, provisions one-use Gemini Live tokens, verifies
 
 ## Local setup
 
-1. Start or select a Supabase project. Apply the tracked database migrations with the Supabase CLI (`supabase start` for the local stack or `supabase db push` for a linked project).
-2. Copy the root `.env.example` to `.env` and configure `GEMINI_API_KEY`, `SUPABASE_URL`, `DATABASE_URL`, and a random `FILE_URL_SIGNING_SECRET` with at least 32 characters. Set `SUPABASE_JWT_SECRET` only for projects still signing JWTs with HS256. Set `GEMINI_TEXT_MODEL=gemini-3.8-flash` to override its default.
+1. Configure a Supabase project for browser sign-in and set its `SUPABASE_URL`. Supabase Auth remains the identity provider; application records are stored in SQLite.
+2. Copy the root `.env.example` to `.env` and configure `GEMINI_API_KEY`, `SUPABASE_URL`, and a random `FILE_URL_SIGNING_SECRET` with at least 32 characters. Set `SUPABASE_JWT_SECRET` only for projects still signing JWTs with HS256. Set `GEMINI_TEXT_MODEL=gemini-3.8-flash` to override its default.
 3. Install Lean through `elan` if it is not already installed, then prepare the pinned Lean/Mathlib project. The proof checker uses the local `lake` executable; no container runtime is required.
 
    ```bash
@@ -16,7 +16,8 @@ FastAPI owns the Gemini API key, provisions one-use Gemini Live tokens, verifies
    cd ../..
    ```
 
-4. Install and run the backend:
+4. Set `SQLITE_PATH` if you want the database somewhere other than `backend/.local/screen_tutor.sqlite3`. The backend creates its parent directory and initializes the schema at startup.
+5. Install and run the backend:
 
    ```bash
    cd backend
@@ -28,7 +29,7 @@ FastAPI owns the Gemini API key, provisions one-use Gemini Live tokens, verifies
    uvicorn app.main:app --app-dir backend --reload
    ```
 
-The API listens on port 8000. A Vite development server can proxy `/api` to it. If `frontend/dist` exists, FastAPI serves it from the same origin. Original course files are stored privately under `backend/.local/private_uploads` by default; use a persistent private volume when deploying this single-instance implementation.
+The API listens on port 8000. A Vite development server can proxy `/api` to it. If `frontend/dist` exists, FastAPI serves it from the same origin. Original course files are stored privately under `backend/.local/private_uploads` by default; use persistent private storage for both that directory and the SQLite database file when deploying this single-instance implementation. Back up both together. SQLite is configured for one backend process; move to a shared database before running multiple workers or instances.
 
 ## Authentication and ownership
 

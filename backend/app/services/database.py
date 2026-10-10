@@ -1,30 +1,138 @@
-"""PostgreSQL pool helpers for the Supabase-hosted application schema."""
+"""SQLite storage helpers for the backend-owned application data."""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sqlite3
+from collections.abc import Iterable, Sequence
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+from uuid import UUID
 
-import asyncpg
+import aiosqlite
 
 from app.config import Settings
 
 
-async def create_database_pool(settings: Settings) -> asyncpg.Pool | None:
-    """Create a small async pool when a Supabase database URL is configured."""
-    if settings.database_url is None:
-        return None
-    dsn = settings.database_url.get_secret_value().strip()
-    return await asyncpg.create_pool(
-        dsn=dsn,
-        min_size=1,
-        max_size=5,
-        command_timeout=30,
-        statement_cache_size=0,
-    )
+def _parameters(values: Sequence[object]) -> tuple[object, ...]:
+    """Convert Python values to SQLite's native binding types."""
+    return tuple(str(value) if isinstance(value, UUID) else value for value in values)
+
+
+def _row(value: sqlite3.Row | None) -> dict[str, Any] | None:
+    return dict(value) if value is not None else None
+
+
+class SQLiteConnection:
+    """Small async connection facade shared by route and transaction code."""
+
+    def __init__(self, connection: aiosqlite.Connection) -> None:
+        self._connection = connection
+
+    async def fetch(self, query: str, *values: object) -> list[dict[str, Any]]:
+        cursor = await self._connection.execute(query, _parameters(values))
+        try:
+            return [dict(row) async for row in cursor]
+        finally:
+            await cursor.close()
+
+    async def fetchrow(self, query: str, *values: object) -> dict[str, Any] | None:
+        cursor = await self._connection.execute(query, _parameters(values))
+        try:
+            return _row(await cursor.fetchone())
+        finally:
+            await cursor.close()
+
+    async def fetchval(self, query: str, *values: object) -> Any:
+        row = await self.fetchrow(query, *values)
+        return next(iter(row.values())) if row else None
+
+    async def execute(self, query: str, *values: object) -> str:
+        cursor = await self._connection.execute(query, _parameters(values))
+        try:
+            command = query.lstrip().split(None, 1)[0].upper()
+            return f"{command} {max(cursor.rowcount, 0)}"
+        finally:
+            await cursor.close()
+
+    async def executemany(
+        self, query: str, values: Iterable[Sequence[object]]
+    ) -> None:
+        normalized = (_parameters(row) for row in values)
+        cursor = await self._connection.executemany(query, normalized)
+        await cursor.close()
+
+    @asynccontextmanager
+    async def transaction(self):
+        """Start a write-reserving transaction and roll it back on failure."""
+        await self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield self
+        except BaseException:
+            await self._connection.rollback()
+            raise
+        else:
+            await self._connection.commit()
+
+
+class SQLiteDatabase(SQLiteConnection):
+    """Single-connection SQLite database serialized for async application use."""
+
+    def __init__(self, connection: aiosqlite.Connection) -> None:
+        super().__init__(connection)
+        self._lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def acquire(self):
+        """Provide exclusive access; callers may hold it for a transaction."""
+        async with self._lock:
+            yield SQLiteConnection(self._connection)
+
+    async def _run(self, method: str, query: str, *values: object) -> Any:
+        async with self.acquire() as connection:
+            return await getattr(connection, method)(query, *values)
+
+    async def fetch(self, query: str, *values: object) -> list[dict[str, Any]]:
+        return await self._run("fetch", query, *values)
+
+    async def fetchrow(self, query: str, *values: object) -> dict[str, Any] | None:
+        return await self._run("fetchrow", query, *values)
+
+    async def fetchval(self, query: str, *values: object) -> Any:
+        return await self._run("fetchval", query, *values)
+
+    async def execute(self, query: str, *values: object) -> str:
+        return await self._run("execute", query, *values)
+
+    async def executemany(
+        self, query: str, values: Iterable[Sequence[object]]
+    ) -> None:
+        async with self.acquire() as connection:
+            await connection.executemany(query, values)
+
+    async def close(self) -> None:
+        await self._connection.close()
+
+
+async def create_database(settings: Settings) -> SQLiteDatabase:
+    """Open the configured SQLite file and initialize the current schema."""
+    path = settings.sqlite_path_value
+    if path != ":memory:":
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+    connection = await aiosqlite.connect(path, isolation_level=None)
+    connection.row_factory = aiosqlite.Row
+    await connection.execute("PRAGMA foreign_keys = ON")
+    await connection.execute("PRAGMA journal_mode = WAL")
+    await connection.execute("PRAGMA busy_timeout = 5000")
+    schema = Path(__file__).with_name("sqlite_schema.sql").read_text(encoding="utf-8")
+    await connection.executescript(schema)
+    return SQLiteDatabase(connection)
 
 
 def json_value(value: object, fallback: object = None) -> object:
-    """Normalize asyncpg JSON/JSONB values across codec settings."""
+    """Decode JSON text stored in SQLite while tolerating legacy values."""
     if value is None:
         return fallback
     if isinstance(value, str):

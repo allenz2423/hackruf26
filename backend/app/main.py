@@ -21,7 +21,7 @@ from app.config import Settings, get_settings
 from app.middleware.request_context import RequestContextMiddleware
 from app.middleware.request_size import RequestSizeLimitMiddleware
 from app.security.rate_limit import InMemoryRateLimiter
-from app.services.database import create_database_pool
+from app.services.database import create_database
 from app.services.gemini_content import GeminiContentService
 from app.services.gemini_tokens import GeminiTokenService, create_genai_client
 from app.services.lean_proofs import LeanProofService, LeanRuntimeUnavailable
@@ -78,10 +78,8 @@ def create_app(
         else:
             application.state.lean_proof_service = None
 
-        application.state.database_pool = await create_database_pool(settings)
-        application.state.private_storage = (
-            LocalPrivateStorage(settings) if settings.database_url is not None else None
-        )
+        application.state.database = await create_database(settings)
+        application.state.private_storage = LocalPrivateStorage(settings)
         application.state.supabase_verifier = (
             SupabaseJWTVerifier(settings) if settings.supabase_url is not None else None
         )
@@ -112,8 +110,7 @@ def create_app(
                 client.close()
             if content_client is not None:
                 content_client.close()
-            if application.state.database_pool is not None:
-                await application.state.database_pool.close()
+            await application.state.database.close()
 
     application = FastAPI(
         title="Screen Tutor API",
@@ -142,11 +139,23 @@ def create_app(
         )
 
     @application.exception_handler(RequestValidationError)
-    async def handle_validation_error(request: Request, _: RequestValidationError) -> JSONResponse:
+    async def handle_validation_error(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
         request_id = getattr(request.state, "request_id", None)
+        invalid_class_id = any(
+            error.get("loc") == ("path", "class_id")
+            and error.get("type") in {"uuid_parsing", "uuid_type"}
+            for error in exc.errors()
+        )
         body = ErrorResponse(
-            code="invalid_request",
-            message="The request is malformed or contains unsupported fields.",
+            code="invalid_class_id" if invalid_class_id else "invalid_request",
+            message=(
+                "This class ID is not a backend UUID. Create or sync the class and its source "
+                "uploads before using backend generation."
+                if invalid_class_id
+                else "The request is malformed or contains unsupported fields."
+            ),
             request_id=request_id,
         )
         return JSONResponse(status_code=400, content=body.model_dump(mode="json"))
