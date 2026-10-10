@@ -202,15 +202,15 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
           ${icon("alert", { size: 20 })}
           <div>
             <strong>Guest Mode · Files Stored Locally Only</strong>
-            <span>Uploaded files, notes, and transcripts are stored only in this browser and will not be saved to the cloud. If you clear cache or switch devices, these files will be lost. <a class="auth-link" href="#/auth">Sign in or create an account</a> to keep your course library permanently synced to the cloud.</span>
+            <span>Uploaded files, notes, and transcripts are stored only in this browser and will not be saved to the backend database. If you clear cache or reload, these files will be lost. <a class="auth-link" href="#/auth">Sign in or create an account</a> to keep your course library permanently saved in the SQLite database.</span>
           </div>
         </div>
       ` : `
         <div class="account-status-banner signed-in-banner">
           ${icon("check", { size: 20 })}
           <div>
-            <strong>Cloud Sync Active</strong>
-            <span>All uploads and extracted transcripts are securely backed up to your private cloud storage and synced across devices.</span>
+            <strong>SQLite Database Sync Active</strong>
+            <span>All uploads and extracted transcripts are securely saved to the backend SQLite database and private storage.</span>
           </div>
         </div>
       `}

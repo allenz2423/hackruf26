@@ -291,15 +291,15 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
               ${icon("alert", { size: 20 })}
               <div>
                 <strong>Guest Mode · Materials & Scores Saved Locally Only</strong>
-                <span>Generated study sets and quiz attempt scores are kept in this browser session only. <a class="auth-link" href="#/auth">Sign in to your cloud account</a> to preserve your study history and sync across devices.</span>
+                <span>Generated study sets and quiz attempt scores are kept in this browser session only. <a class="auth-link" href="#/auth">Sign in to your account</a> to preserve your study history in the SQLite database.</span>
               </div>
             </div>
           ` : `
             <div class="account-status-banner signed-in-banner">
               ${icon("check", { size: 20 })}
               <div>
-                <strong>Cloud Sync Active</strong>
-                <span>Generated study materials, quiz attempts, and scores are automatically saved to your cloud profile.</span>
+                <strong>SQLite Database Active</strong>
+                <span>Generated study materials, quiz attempts, and scores are automatically saved to your profile in the backend SQLite database.</span>
               </div>
             </div>
           `}

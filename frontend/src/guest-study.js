@@ -263,7 +263,7 @@ export function renderGuestStudy(root) {
           ${icon("alert", { size: 20 })}
           <div>
             <strong>Temporary guest session</strong>
-            <span>Files and study sets stay in this browser session and are not saved to an account. <a class="auth-link" href="#/auth">Sign in to save your work.</a></span>
+            <span>Files and study sets stay in this browser session and are not saved to the SQLite database. <a class="auth-link" href="#/auth">Sign in to save your work permanently.</a></span>
           </div>
         </div>
 

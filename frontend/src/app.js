@@ -100,7 +100,7 @@ function shell(content, { section = "classes" } = {}) {
         <a href="#/tutor" ${section === "tutor" ? 'aria-current="page"' : ""}>Quick tutor</a>
         <a href="#/auth" ${section === "auth" ? 'aria-current="page"' : ""} class="nav-account-link">
           ${icon("user", { size: 16 })}
-          ${isGuest ? `<span class="nav-account-name">Guest</span>` : `<span class="nav-account-name">${escapeHtml(userLabel)}</span><span class="tier-badge badge-cloud">Cloud</span>`}
+          ${isGuest ? `<span class="nav-account-name">Guest</span>` : `<span class="nav-account-name">${escapeHtml(userLabel)}</span><span class="tier-badge badge-cloud">SQLite</span>`}
         </a>
       </nav>
       ${showSessionStatus ? `<div class="status-strip" role="status" aria-live="polite" aria-label="Session status">
@@ -486,8 +486,8 @@ async function renderAuth() {
     <section class="section-stack" style="max-width: 820px; margin: 0 auto;">
       <div class="page-heading">
         <div>
-          <h1>Account & Cloud Sync</h1>
-          <p class="muted">Manage your session, understand guest vs cloud features, and sync across devices.</p>
+          <h1>Account & SQLite Database Sync</h1>
+          <p class="muted">Manage your session, understand guest vs persistent SQLite database storage.</p>
         </div>
       </div>
 
@@ -495,16 +495,16 @@ async function renderAuth() {
         <div class="account-status-banner signed-in-banner">
           ${icon("check", { size: 20 })}
           <div>
-            <strong>Signed in as ${escapeHtml(user.email)} · Cloud Sync Active</strong>
-            <span>Your classes, uploaded course documents, syllabus roadmap, and generated study sets are automatically saved to your cloud profile.</span>
+            <strong>Signed in as ${escapeHtml(user.email)} · SQLite Database Sync Active</strong>
+            <span>Your classes, uploaded course documents, syllabus roadmap, and generated study sets are automatically saved to the backend SQLite database (<code>screen_tutor.sqlite3</code>).</span>
           </div>
         </div>
       ` : `
         <div class="account-status-banner guest-banner">
           ${icon("alert", { size: 20 })}
           <div>
-            <strong>Guest Mode Active · Files Are Not Saved to Cloud</strong>
-            <span>You are currently using Screen Tutor as a guest. Any uploaded notes, slides, or study sets are stored <strong>only in this browser's temporary storage</strong> and will be lost if you clear your browser cache. Sign in or create an account to save your files permanently to the cloud.</span>
+            <strong>Guest Mode Active · Files Are Not Saved to Database</strong>
+            <span>You are currently using Screen Tutor as a guest. Any uploaded notes, slides, or study sets are stored <strong>only in this browser's temporary storage</strong> and will not be saved to the SQLite database. Sign in or create an account to save your files permanently to the database.</span>
           </div>
         </div>
       `}
@@ -521,9 +521,9 @@ async function renderAuth() {
             <li><span class="feature-check">✓</span> Interactive flashcards and quiz players</li>
             <li><span class="feature-check">✓</span> Built-in scratchpad & scientific calculator</li>
             <li><span class="feature-check">✓</span> Sample study sets and quick review</li>
-            <li><span class="feature-warn">✕</span> <strong>Files NOT saved to cloud</strong></li>
-            <li><span class="feature-warn">✕</span> <strong>Lost on browser cache clear</strong></li>
-            <li><span class="feature-warn">✕</span> No cross-device progress sync</li>
+            <li><span class="feature-warn">✕</span> <strong>Files NOT saved to database</strong></li>
+            <li><span class="feature-warn">✕</span> <strong>Lost on browser cache clear or reload</strong></li>
+            <li><span class="feature-warn">✕</span> No persistent multi-class library</li>
           </ul>
           <a href="#/study" class="btn btn-secondary" style="justify-content: center; width: 100%;">
             Continue as Guest
@@ -533,16 +533,16 @@ async function renderAuth() {
         <div class="auth-tier-card tier-cloud">
           <div class="auth-tier-header">
             <h3>Signed-in Account</h3>
-            <span class="tier-badge badge-cloud">Cloud Saved</span>
+            <span class="tier-badge badge-cloud">SQLite Saved</span>
           </div>
-          <p class="auth-tier-desc">Full persistence powered by Supabase PostgreSQL and private cloud storage.</p>
+          <p class="auth-tier-desc">Full persistence powered by backend SQLite database (<code>screen_tutor.sqlite3</code>) and local private file storage.</p>
           <ul class="auth-tier-features">
-            <li><span class="feature-check">✓</span> <strong>Permanent cloud storage</strong> for all course files</li>
-            <li><span class="feature-check">✓</span> Sync classes & syllabus maps across all devices</li>
+            <li><span class="feature-check">✓</span> <strong>Permanent SQLite database storage</strong> for all course files</li>
+            <li><span class="feature-check">✓</span> Sync classes & syllabus maps automatically via FastAPI</li>
             <li><span class="feature-check">✓</span> Background lecture transcription & extraction</li>
-            <li><span class="feature-check">✓</span> Study sets, practice tests & score history preserved</li>
+            <li><span class="feature-check">✓</span> Study sets, practice tests & score history preserved in SQLite</li>
             <li><span class="feature-check">✓</span> Gemini Live screen & audio sessions grounded in your files</li>
-            <li><span class="feature-check">✓</span> Free account, no credit card required</li>
+            <li><span class="feature-check">✓</span> High performance local WAL-mode storage</li>
           </ul>
           ${user ? `
             <button id="auth-signout-btn" class="btn btn-danger-ghost" type="button" style="justify-content: center; width: 100%;">
@@ -559,23 +559,23 @@ async function renderAuth() {
       <div class="panel overview-card" style="margin-bottom: 1.5rem;">
         <span class="kind-icon">${icon("monitor", { size: 22 })}</span>
         <div>
-          <strong>Backend Service Health: <span class="pill" data-tone="${health.status === 'ok' ? 'good' : 'busy'}">${health.status}</span></strong>
-          <span class="row-meta">FastAPI server provisions Live tokens, calculates math, and extracts text.</span>
+          <strong>Backend & SQLite Database: <span class="pill" data-tone="${health.status === 'ok' ? 'good' : 'busy'}">${health.status === 'ok' ? 'Connected (SQLite)' : health.status}</span></strong>
+          <span class="row-meta">FastAPI server connected to SQLite (<code>screen_tutor.sqlite3</code>), provisions Live tokens, and extracts text.</span>
         </div>
       </div>
 
       ${user ? `
         <div class="panel">
-          <h2>Active Cloud Session</h2>
-          <p class="muted">Your classes and study sets are currently syncing to Supabase.</p>
+          <h2>Active Database Session</h2>
+          <p class="muted">Your classes and study sets are synced to the backend SQLite database.</p>
           <div class="metric-strip" style="margin: 1.25rem 0;">
             <div class="metric">
               <strong>${escapeHtml(user.email)}</strong>
               <span>User ID: ${escapeHtml(user.id.slice(0, 8))}...</span>
             </div>
             <div class="metric">
-              <strong>Supabase Auth</strong>
-              <span>Session active · Cloud storage enabled</span>
+              <strong>SQLite Database</strong>
+              <span>Persistence active · Local WAL storage</span>
             </div>
           </div>
           <div style="display: flex; gap: 0.75rem;">
@@ -612,7 +612,7 @@ async function renderAuth() {
             </button>
           </form>
           <p class="field-hint" style="text-align: center; margin-top: 1.25rem;">
-            Connecting to Supabase project: <code>rmwpbaxufddzerxfbtwa.supabase.co</code>
+            Authentication via Supabase Auth · Database storage powered by backend SQLite (<code>screen_tutor.sqlite3</code>)
           </p>
         </div>
       `}
