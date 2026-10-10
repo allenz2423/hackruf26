@@ -345,6 +345,7 @@ function renderTutor(klass = null) {
             <button id="end-session" class="btn btn-danger-ghost" type="button" disabled aria-label="End session" title="End session">${icon("stop", { size: 18 })}<span class="btn-label">End</span></button>
           </div>
         </div>
+        <p class="tutor-privacy-note">${icon("monitor", { size: 16 })}<span>Screen frames go to Google Gemini while sharing. Microphone audio is sent only when you turn on the mic.</span></p>
         <div class="screen-stage">
           <video id="screen-preview" autoplay muted playsinline aria-label="Shared screen preview"></video>
           <svg id="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg>
@@ -481,13 +482,14 @@ function renderTutor(klass = null) {
 async function renderAuth() {
   const user = await getCurrentUser();
   const health = await checkBackendHealth();
+  const backendReady = health.status === "ok";
 
   shell(`
-    <section class="section-stack" style="max-width: 820px; margin: 0 auto;">
-      <div class="page-heading">
+    <section class="account-page section-stack">
+      <div class="page-heading account-heading">
         <div>
-          <h1>Account & SQLite Database Sync</h1>
-          <p class="muted">Manage your session, understand guest vs persistent SQLite database storage.</p>
+          <h1>Account</h1>
+          <p class="muted">Save classes, uploads, and study history across browser sessions.</p>
         </div>
       </div>
 
@@ -549,9 +551,9 @@ async function renderAuth() {
               ${icon("stop", { size: 16 })} Sign out (${escapeHtml(user.email.split("@")[0])})
             </button>
           ` : `
-            <a href="#auth-form" class="btn btn-primary" style="justify-content: center; width: 100%;">
-              Sign in or Register Below
-            </a>
+            <button id="account-focus-auth" class="btn btn-primary account-jump-action" type="button">
+              Sign in or create account
+            </button>
           `}
         </div>
       </div>
@@ -559,7 +561,7 @@ async function renderAuth() {
       <div class="panel overview-card" style="margin-bottom: 1.5rem;">
         <span class="kind-icon">${icon("monitor", { size: 22 })}</span>
         <div>
-          <strong>Backend & SQLite Database: <span class="pill" data-tone="${health.status === 'ok' ? 'good' : 'busy'}">${health.status === 'ok' ? 'Connected (SQLite)' : health.status}</span></strong>
+          <strong>Backend & SQLite Database: <span class="pill" data-tone="${backendReady ? 'good' : 'busy'}">${backendReady ? 'Connected (SQLite)' : health.status}</span></strong>
           <span class="row-meta">FastAPI server connected to SQLite (<code>screen_tutor.sqlite3</code>), provisions Live tokens, and extracts text.</span>
         </div>
       </div>
@@ -590,22 +592,22 @@ async function renderAuth() {
       ` : `
         <div class="panel auth-panel">
           <div class="tabs" style="margin-bottom: 1.5rem; justify-content: center; display: flex; gap: 0.5rem;">
-            <button id="auth-tab-signin" class="btn btn-secondary" type="button">Sign in</button>
-            <button id="auth-tab-signup" class="btn btn-ghost" type="button">Create account</button>
+            <button id="auth-tab-signin" class="btn btn-secondary" type="button" aria-pressed="true">Sign in</button>
+            <button id="auth-tab-signup" class="btn btn-ghost" type="button" aria-pressed="false">Create account</button>
           </div>
 
-          <form id="auth-form" class="section-stack">
+          <form id="auth-form" class="section-stack" action="" novalidate>
             <div class="field-block" id="auth-name-block" hidden>
               <label for="auth-name">Full name or nickname</label>
-              <input id="auth-name" name="name" type="text" placeholder="Ada Lovelace" />
+              <input id="auth-name" name="name" type="text" autocomplete="name" placeholder="Ada Lovelace" />
             </div>
             <div class="field-block">
               <label for="auth-email">Email address</label>
-              <input id="auth-email" name="email" type="email" required placeholder="student@example.com" />
+              <input id="auth-email" name="email" type="email" required autocomplete="email" placeholder="student@example.com" />
             </div>
             <div class="field-block">
               <label for="auth-password">Password</label>
-              <input id="auth-password" name="password" type="password" required minlength="6" placeholder="At least 6 characters" />
+              <input id="auth-password" name="password" type="password" required minlength="6" autocomplete="current-password" placeholder="At least 6 characters" />
             </div>
             <button id="auth-submit-btn" class="btn btn-primary" type="submit" style="width: 100%; justify-content: center; margin-top: 1rem;">
               Sign in
@@ -639,25 +641,38 @@ async function renderAuth() {
     const nameBlock = document.querySelector("#auth-name-block");
     const submitBtn = document.querySelector("#auth-submit-btn");
     const form = document.querySelector("#auth-form");
+    document.querySelector("#account-focus-auth")?.addEventListener("click", () => {
+      form.scrollIntoView({ block: "center", behavior: "smooth" });
+      document.querySelector("#auth-email")?.focus();
+    });
 
     tabSignin.addEventListener("click", () => {
       mode = "signin";
       tabSignin.className = "btn btn-secondary";
       tabSignup.className = "btn btn-ghost";
+      tabSignin.setAttribute("aria-pressed", "true");
+      tabSignup.setAttribute("aria-pressed", "false");
       nameBlock.hidden = true;
       submitBtn.textContent = "Sign in";
+      document.querySelector("#auth-password").autocomplete = "current-password";
     });
 
     tabSignup.addEventListener("click", () => {
       mode = "signup";
       tabSignup.className = "btn btn-secondary";
       tabSignin.className = "btn btn-ghost";
+      tabSignup.setAttribute("aria-pressed", "true");
+      tabSignin.setAttribute("aria-pressed", "false");
       nameBlock.hidden = false;
       submitBtn.textContent = "Create account";
+      document.querySelector("#auth-password").autocomplete = "new-password";
     });
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
+      event.stopPropagation();
+      if (!form.reportValidity()) return;
+
       const email = document.querySelector("#auth-email").value.trim();
       const password = document.querySelector("#auth-password").value;
       const name = document.querySelector("#auth-name")?.value.trim() || "";

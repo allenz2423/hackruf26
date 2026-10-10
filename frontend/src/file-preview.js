@@ -94,6 +94,11 @@ export async function openUploadPreview(upload) {
   const dialog = makeDialog(upload);
   const content = dialog.querySelector("#preview-content");
 
+  if (upload.file) {
+    renderFilePreview(dialog, upload.file);
+    return;
+  }
+
   if (upload.content || upload.transcript?.length) {
     const transcript = upload.transcript?.map(({ at, text }) => `${at} - ${text}`).join("\n") || "";
     setTextPreview(content, [upload.content, transcript && `Transcript excerpts\n${transcript}`].filter(Boolean).join("\n\n"));

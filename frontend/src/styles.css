@@ -1407,7 +1407,7 @@ main {
 }
 
 .stage-panel {
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
 }
 
 .stage-topline {
@@ -1416,6 +1416,20 @@ main {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
+}
+
+.tutor-privacy-note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.tutor-privacy-note .icon {
+  margin-top: 1px;
+  color: var(--primary);
 }
 
 .stage-controls {
@@ -2296,6 +2310,15 @@ main {
 }
 
 /* Account Status Banners & Guest Notices */
+.account-page {
+  width: min(100%, 920px);
+  margin-inline: auto;
+}
+
+.account-heading {
+  margin-bottom: var(--space-4);
+}
+
 .account-status-banner {
   display: flex;
   align-items: flex-start;
@@ -2333,16 +2356,16 @@ main {
 
 /* Auth Comparison Grid */
 .auth-comparison-grid {
-  display: grid;
+  display: none;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: var(--space-4);
-  margin-bottom: var(--space-6);
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
 }
 
 .auth-tier-card {
   display: flex;
   flex-direction: column;
-  padding: var(--space-5);
+  padding: var(--space-4);
   border-radius: var(--radius-lg);
   border: 1px solid var(--line);
   background: var(--surface);
@@ -2394,16 +2417,16 @@ main {
 .auth-tier-desc {
   color: var(--muted);
   font-size: 0.875rem;
-  margin-bottom: var(--space-4);
+  margin-bottom: var(--space-3);
 }
 
 .auth-tier-features {
   list-style: none;
   padding: 0;
-  margin: 0 0 var(--space-5) 0;
+  margin: 0 0 var(--space-4) 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 6px;
   flex-grow: 1;
 }
 
@@ -2423,6 +2446,62 @@ main {
 .feature-warn {
   color: var(--warning);
   font-weight: 700;
+}
+
+.account-jump-action {
+  justify-content: center;
+  width: 100%;
+}
+
+.auth-panel {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-5);
+}
+
+.auth-panel .tabs {
+  justify-content: center;
+  justify-self: center;
+  margin-bottom: 0 !important;
+}
+
+.auth-panel form {
+  gap: var(--space-4);
+}
+
+.field-block {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.field-block label {
+  color: var(--text);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.field-block input,
+.field-block select {
+  width: 100%;
+  min-height: 46px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 400;
+}
+
+.field-block input::placeholder {
+  color: color-mix(in srgb, var(--muted) 70%, transparent);
+}
+
+.field-block input:focus,
+.field-block select:focus {
+  border-color: var(--primary);
+  outline: 3px solid var(--ring);
+  outline-offset: 1px;
 }
 
 .nav-account-link {
@@ -2517,6 +2596,23 @@ main {
 .guest-upload-list {
   max-height: 280px;
   overflow-y: auto;
+}
+
+.data-list li.guest-upload-empty {
+  display: flex;
+  justify-content: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) 0 0;
+  color: var(--muted);
+  font-size: 0.875rem;
+  text-align: left;
+}
+
+.guest-upload-empty .empty-icon {
+  width: 32px;
+  height: 32px;
+  margin: 0;
+  border-radius: var(--radius-sm);
 }
 
 .guest-generate-panel {

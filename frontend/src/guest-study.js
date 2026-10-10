@@ -244,6 +244,7 @@ export function renderGuestStudy(root) {
   function renderView() {
     const hasUploads = guestSession.uploads.length > 0;
     const hasMaterials = guestSession.materials.length > 0;
+    const hasReadableNotes = guestSession.uploads.some((upload) => upload.content?.trim());
 
     root.innerHTML = `
       <section class="guest-workspace">
@@ -253,7 +254,7 @@ export function renderGuestStudy(root) {
             <p class="muted">Add class notes, then turn them into a study set you can use right away.</p>
           </div>
           <div class="page-actions">
-            <a href="#/auth" class="btn btn-primary">
+            <a href="#/auth" class="btn btn-secondary">
               ${icon("user", { size: 16 })} Sign in to save work
             </a>
           </div>
@@ -287,30 +288,29 @@ export function renderGuestStudy(root) {
                 <span class="upload-zone-icon">${icon("upload", { size: 28 })}</span>
                 <strong>Drop files here or <span class="browse">browse</span></strong>
                 <span class="muted">PDF, DOCX, PPTX, TXT, MD, images, and audio/video</span>
-                <small>Session-only; not saved to an account</small>
                 <input id="guest-upload-input" class="visually-hidden" type="file" multiple
                   accept=".pdf,.docx,.pptx,.txt,.md,.png,.jpg,.jpeg,.mp4,.webm,.mov,.mp3,.m4a,.wav" />
               </label>
             </div>
 
             <div class="guest-upload-list-wrap">
-              <ul class="data-list" id="guest-upload-list" aria-live="polite">
+              <ul class="data-list guest-upload-list" id="guest-upload-list" aria-live="polite">
                 ${!hasUploads ? `
-                  <li class="empty-state">
-                    <span class="empty-icon">${icon("file", { size: 24 })}</span>
-                    <strong>No files uploaded yet</strong>
-                    <span>Upload a file or paste text notes above to begin generating study materials.</span>
+                  <li class="empty-state guest-upload-empty">
+                    <span class="empty-icon">${icon("file", { size: 18 })}</span>
+                    <span>No files yet. Add a source above or paste notes.</span>
                   </li>
                 ` : guestSession.uploads.map((upload, idx) => `
                   <li>
                     <span class="kind-icon" data-kind="Document">${icon("file", { size: 18 })}</span>
                     <span class="row-main">
-                      <strong class="file-name">${escapeHtml(upload.name)}</strong>
+                      <button class="file-name" type="button" data-preview-upload="${idx}" title="Preview ${escapeHtml(upload.name)}">${escapeHtml(upload.name)}</button>
                       <span class="row-meta">${formatBytes(upload.size || 0)} · Temporary Session File</span>
                       ${upload.content ? `<span class="row-summary">${escapeHtml(upload.content.slice(0, 100))}...</span>` : ""}
                     </span>
                     <span class="pill" data-tone="busy">Temporary</span>
                     <span class="row-actions">
+                      <button class="btn btn-secondary btn-small" type="button" data-preview-upload="${idx}">${icon("file", { size: 16 })} View</button>
                       <button class="btn btn-ghost btn-icon" type="button" data-remove-upload="${idx}" aria-label="Remove ${escapeHtml(upload.name)}">
                         ${icon("trash", { size: 16 })}
                       </button>
@@ -368,10 +368,10 @@ export function renderGuestStudy(root) {
               </div>
             </div>
 
-            <button id="guest-generate-btn" class="btn btn-primary generate-submit" type="submit" ${hasUploads ? "" : "disabled"}>
+            <button id="guest-generate-btn" class="btn btn-primary generate-submit" type="submit" ${hasReadableNotes ? "" : "disabled"}>
               ${icon("sparkles", { size: 18 })} Generate study set
             </button>
-            ${hasUploads ? "" : `<p class="field-hint">Upload at least one file or paste notes above to enable generation.</p>`}
+            ${hasReadableNotes ? "" : `<p class="field-hint">Paste notes or add a .txt/.md file to generate from your text. Other uploads can still be previewed.</p>`}
           </form>
 
           <!-- Step 3: Saved Study Sets -->
@@ -514,6 +514,20 @@ export function renderGuestStudy(root) {
         const idx = Number(e.currentTarget.dataset.removeUpload);
         guestSession.uploads.splice(idx, 1);
         renderView();
+      });
+    });
+
+    root.querySelectorAll("[data-preview-upload]").forEach((btn) => {
+      btn.addEventListener("click", async (event) => {
+        const upload = guestSession.uploads[Number(event.currentTarget.dataset.previewUpload)];
+        if (!upload) return;
+
+        try {
+          const { openUploadPreview } = await import("./file-preview.js");
+          await openUploadPreview(upload);
+        } catch {
+          toast("The file preview could not be opened. Try uploading it again.", { tone: "error" });
+        }
       });
     });
 
