@@ -2,7 +2,10 @@ export function createRouter(routes, fallback) {
   let currentRoute = null;
 
   function match(hash) {
-    const path = hash.replace(/^#/, "") || "/classes";
+    const path = hash.replace(/^#/, "");
+    if (!path || path === "/") {
+      return { route: fallback, params: {}, path: "/" };
+    }
 
     for (const route of routes) {
       const keys = [];
