@@ -14,13 +14,18 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.errors import ApiError
+from app.api.class_library import router as class_library_router
 from app.api.routes import router
 from app.api.schemas import ErrorResponse
 from app.config import Settings, get_settings
 from app.middleware.request_context import RequestContextMiddleware
 from app.middleware.request_size import RequestSizeLimitMiddleware
 from app.security.rate_limit import InMemoryRateLimiter
+from app.services.database import create_database_pool
+from app.services.gemini_content import GeminiContentService
 from app.services.gemini_tokens import GeminiTokenService, create_genai_client
+from app.services.storage import LocalPrivateStorage
+from app.services.supabase_auth import SupabaseJWTVerifier
 
 logger = logging.getLogger("screen_tutor.errors")
 
@@ -46,30 +51,60 @@ def create_app(
             settings.calculator_rate_limit,
             settings.calculator_rate_window_seconds,
         )
+        application.state.upload_rate_limiter = InMemoryRateLimiter(
+            settings.upload_rate_limit,
+            settings.upload_rate_window_seconds,
+        )
+        application.state.generation_rate_limiter = InMemoryRateLimiter(
+            settings.generation_rate_limit,
+            settings.generation_rate_window_seconds,
+        )
+
+        application.state.database_pool = await create_database_pool(settings)
+        application.state.private_storage = (
+            LocalPrivateStorage(settings) if settings.database_url is not None else None
+        )
+        application.state.supabase_verifier = (
+            SupabaseJWTVerifier(settings) if settings.supabase_url is not None else None
+        )
 
         client = None
+        content_client = None
         if token_service_override is not None:
             application.state.token_service = token_service_override
+            application.state.gemini_content_service = None
         else:
             client = create_genai_client(settings)
+            application.state.gemini_client = client
             application.state.token_service = GeminiTokenService(client, settings)
+            content_client = create_genai_client(
+                settings,
+                timeout_seconds=settings.gemini_content_timeout_seconds,
+            )
+            application.state.gemini_content_client = content_client
+            application.state.gemini_content_service = GeminiContentService(content_client, settings)
 
         try:
             yield
         finally:
             if client is not None:
                 client.close()
+            if content_client is not None:
+                content_client.close()
+            if application.state.database_pool is not None:
+                await application.state.database_pool.close()
 
     application = FastAPI(
         title="Screen Tutor API",
         description=(
-            "Constrained Gemini Live token service and bounded symbolic calculator. "
-            "Media remains browser-to-Gemini."
+            "Authenticated class library, Gemini content processing, constrained Live token service, "
+            "and bounded symbolic calculator. Live media remains browser-to-Gemini."
         ),
         version="0.1.0",
         lifespan=lifespan,
     )
     application.include_router(router)
+    application.include_router(class_library_router)
 
     @application.exception_handler(ApiError)
     async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:
@@ -128,13 +163,15 @@ def create_app(
         CORSMiddleware,
         allow_origins=list(cors_settings.allowed_origins),
         allow_credentials=False,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
         max_age=600,
     )
     application.add_middleware(
         RequestSizeLimitMiddleware,
-        max_body_bytes=cors_settings.request_body_max_bytes,
+        capability_max_bytes=cors_settings.request_body_max_bytes,
+        library_json_max_bytes=cors_settings.library_json_body_max_bytes,
+        upload_max_bytes=cors_settings.max_upload_bytes,
     )
     application.add_middleware(RequestContextMiddleware)
 

@@ -8,6 +8,7 @@ import logging
 from fastapi import APIRouter, Body, Request, Response
 
 from app.api.dependencies import (
+    database_pool,
     enforce_calculator_request_policy,
     enforce_token_request_policy,
 )
@@ -57,16 +58,46 @@ async def create_live_token(
     payload: LiveTokenRequest = Body(default=LiveTokenRequest()),
 ) -> LiveTokenResponse:
     """Issue one constrained token; media continues directly from browser to Gemini."""
-    del payload  # The empty contract intentionally accepts no caller-controlled settings.
     settings = _settings(request)
     await enforce_token_request_policy(request, settings)
+
+    class_context = None
+    if payload.class_id is not None:
+        user_id = getattr(request.state, "user_id", None)
+        if user_id is None:
+            raise ApiError(401, "authentication_required", "Please sign in to use class materials.")
+        pool = database_pool(request)
+        class_row = await pool.fetchrow(
+            "SELECT id, name FROM public.course_classes WHERE id = $1 AND owner_id = $2",
+            payload.class_id,
+            user_id,
+        )
+        if class_row is None:
+            raise ApiError(404, "not_found", "The requested resource was not found.")
+        notes = await pool.fetch(
+            "SELECT title, left(COALESCE(summary, extracted_text, ''), 40000) AS context "
+            "FROM public.course_notes "
+            "WHERE class_id = $1 AND status = 'ready' ORDER BY "
+            "CASE WHEN kind = 'syllabus' THEN 0 ELSE 1 END, created_at",
+            payload.class_id,
+        )
+        context_parts = [f"Class: {class_row['name']}\n"]
+        remaining = 40_000
+        for note in notes:
+            excerpt = str(note["context"] or "")[:remaining]
+            if excerpt:
+                context_parts.append(f"Source: {note['title']}\n{excerpt}")
+                remaining -= len(excerpt)
+            if remaining <= 0:
+                break
+        class_context = "\n\n".join(context_parts)
 
     response.headers["Cache-Control"] = "no-store, private"
     response.headers["Pragma"] = "no-cache"
 
     service: GeminiTokenService = request.app.state.token_service
     try:
-        result = await service.create_token()
+        result = await service.create_token(class_context=class_context)
     except Exception as exc:  # noqa: BLE001 - upstream details must not reach clients or logs
         request_id = getattr(request.state, "request_id", "unknown")
         logger.error(
