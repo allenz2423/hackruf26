@@ -1,4 +1,11 @@
+import { SAMPLE_ALGEBRA_MATERIALS } from "./sample-assessments.js";
+
 const STORE_KEY = "screen-tutor-classes";
+const SAMPLE_SEED_KEY = `${STORE_KEY}-algebra-examples-v1`;
+
+function cloneData(value) {
+  return JSON.parse(JSON.stringify(value));
+}
 
 const starterClasses = [
   {
@@ -7,7 +14,7 @@ const starterClasses = [
     color: "#2563eb",
     icon: "M",
     uploads: [],
-    materials: []
+    materials: cloneData(SAMPLE_ALGEBRA_MATERIALS)
   },
   {
     id: "biology",
@@ -19,20 +26,53 @@ const starterClasses = [
   }
 ];
 
+function saveClasses(classes) {
+  localStorage.setItem(STORE_KEY, JSON.stringify(classes));
+}
+
+function addAlgebraExamples(classes) {
+  const nextClasses = cloneData(classes);
+  let mathClass = nextClasses.find((item) => item.id === "math-151")
+    || nextClasses.find((item) => item.name?.trim().toLowerCase() === "math 151");
+
+  if (!mathClass) {
+    mathClass = {
+      id: "math-151",
+      name: "Math 151",
+      color: "#2563eb",
+      icon: "M",
+      uploads: [],
+      materials: []
+    };
+    nextClasses.unshift(mathClass);
+  }
+
+  mathClass.uploads = Array.isArray(mathClass.uploads) ? mathClass.uploads : [];
+  mathClass.materials = Array.isArray(mathClass.materials) ? mathClass.materials : [];
+  const existingIds = new Set(mathClass.materials.map((material) => material.id));
+  const missingExamples = SAMPLE_ALGEBRA_MATERIALS
+    .filter((material) => !existingIds.has(material.id));
+  mathClass.materials.unshift(...cloneData(missingExamples));
+  return nextClasses;
+}
+
 function readClasses() {
   const saved = localStorage.getItem(STORE_KEY);
-  if (!saved) return starterClasses;
+  if (!saved) return cloneData(starterClasses);
 
   try {
     const parsed = JSON.parse(saved);
-    return Array.isArray(parsed) ? parsed : starterClasses;
+    if (!Array.isArray(parsed)) return cloneData(starterClasses);
+    if (localStorage.getItem(SAMPLE_SEED_KEY) !== "1") {
+      const seeded = addAlgebraExamples(parsed);
+      saveClasses(seeded);
+      localStorage.setItem(SAMPLE_SEED_KEY, "1");
+      return seeded;
+    }
+    return parsed;
   } catch {
-    return starterClasses;
+    return cloneData(starterClasses);
   }
-}
-
-function saveClasses(classes) {
-  localStorage.setItem(STORE_KEY, JSON.stringify(classes));
 }
 
 function makeId(name) {

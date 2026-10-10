@@ -28,7 +28,9 @@ The backend also runs the **class library**: it stores each student's classes an
 
 ### Supabase PostgreSQL schema
 
-The migrations cover Supabase Auth user ownership, classes, course notes/materials, generated quizzes and practice exams (as well as the other study-material types), source-note links, completed attempts, and student error flags. Class `owner_id` references `auth.users(id)` directly with `ON DELETE CASCADE`; the app does not keep a duplicate user identity table. Foreign keys cascade class deletion through its notes, generated materials, and attempts. Composite class keys prevent source-note link rows from crossing class boundaries; backend validation also checks citations inside generated JSON. Deleting a source note removes generated materials derived from it. PostgreSQL holds private storage keys, extracted text, lecture transcript segments, and syllabus outlines. Original files live outside the static web root. Live screen/audio media, live-session transcripts, annotation events, and tutoring conversations are not stored.
+The migrations cover Supabase Auth user ownership, classes, course notes/materials, generated quizzes and practice exams (as well as the other study-material types), source-note links, completed attempts, student error flags, and the data table for uploaded assessments. Class `owner_id` references `auth.users(id)` directly with `ON DELETE CASCADE`; the app does not keep a duplicate user identity table. Foreign keys cascade class deletion through its notes, generated materials, and attempts. Composite class keys prevent source-note link rows from crossing class boundaries; backend validation also checks citations inside generated JSON. Deleting a source note removes generated materials derived from it. PostgreSQL holds private storage keys, extracted text, lecture transcript segments, and syllabus outlines. Original files live outside the static web root. Live screen/audio media, live-session transcripts, annotation events, and tutoring conversations are not stored.
+
+The [uploaded assessment migration](../supabase/migrations/20261010150000_uploaded_assessment_workflow.sql) adds storage for parsed questions, detected student responses, grading mode, confidence, and results. Its API and processing workflow are specified below but are not implemented by the current backend commit. A blank test should be stored as an ungraded reference; a completed test should be graded against a detected answer key or explicitly labeled as an estimate based on that class's notes. If responses cannot be read reliably or no usable class notes are available, mark the assessment `needs_review` without a score. Generated practice quizzes and exams remain separate `study_materials` and can cite an imported test's course-note row as a source.
 
 ### Supabase Auth sessions
 
@@ -107,7 +109,7 @@ The server token request occurs after the student begins the session. It is inde
 
 ### Frontend integration status
 
-The frontend on `main` was reviewed after pulling commit `92b3691`. Its current HTTP client in [`frontend/src/api.js`](../frontend/src/api.js) only calls `POST /api/live-token`, sends `{}`, and does not attach a Supabase access token. The class page still reads and writes starter classes in `localStorage` ([`frontend/src/classes.js`](../frontend/src/classes.js)); the library adds file metadata locally without uploading file bytes ([`frontend/src/library.js`](../frontend/src/library.js)); and the study page creates placeholder materials locally ([`frontend/src/study.js`](../frontend/src/study.js)). The quiz and flashcard views are placeholders. The backend routes below are implemented, but the frontend screens do not yet consume them.
+The frontend on `main` was reviewed through commit `1145cf1`. Its current HTTP client in [`frontend/src/api.js`](../frontend/src/api.js) only calls `POST /api/live-token`, sends `{}`, and does not attach a Supabase access token. The class page still reads and writes classes in `localStorage` ([`frontend/src/classes.js`](../frontend/src/classes.js)); the library adds file metadata locally without uploading file bytes ([`frontend/src/library.js`](../frontend/src/library.js]); and the study page includes static, playable Math 151 algebra examples alongside local material state ([`frontend/src/sample-assessments.js`](../frontend/src/sample-assessments.js), [`frontend/src/study.js`](../frontend/src/study.js)). The quiz player scores those sample questions locally; it does not call the backend attempts API. The backend routes below are implemented, but the frontend screens do not yet consume them.
 
 The backend implements `GET /healthz`, `POST /api/live-token`, `POST /api/tools/calculate`, and the class-library routes below. With `SUPABASE_URL` configured, it verifies Supabase access-token signatures and claims and requires the verified user for API calls. Without Supabase configured, the standalone token and calculator prototype requires `DEMO_GATE_TOKEN`; protected requests return `503` if neither authentication option is configured. Class-library routes remain unavailable without Supabase Auth, PostgreSQL, and private storage.
 
@@ -340,7 +342,21 @@ The API uses `kind: quiz | practice_exam | study_guide | flashcards`. Map the cu
 
 Ready content is type-specific: quizzes and practice exams contain questions with stable IDs, prompt, question kind, choices where relevant, and source citations; study guides contain ordered sections and citations; flashcards contain ordered cards with stable IDs, front/back text, and citations. Keep answer keys and scoring rubrics server-side until an attempt is submitted. Return a failed material with a safe `failure_code` so the UI can show a retry/regenerate action; never return model traces or raw exception text.
 
-The pulled Study page currently fabricates a ready item in local state, while `quiz-player.js` and `flashcards.js` are placeholders. Connecting these APIs requires replacing that local path with generation submission, polling the material detail until `ready` or `failed`, and using the attempt endpoint for scoring.
+The current Study page includes sample algebra quizzes and practice exams in local state. `quiz-player.js` scores those samples in the browser; it does not call the backend attempts API. Connecting generated material requires replacing the local path with generation submission, polling the material detail until `ready` or `failed`, and using the attempt endpoint for saved scoring. Flashcards are not yet connected to a backend material.
+
+#### Imported existing assessments (schema present, API not implemented)
+
+The uploaded-assessment migration defines the database record, but these endpoints and their grading worker are not part of the current backend implementation. Keep this boundary explicit until the workflow is built:
+
+| Method and path | Target contract |
+| --- | --- |
+| `POST /api/classes/{class_id}/assessments` | Accept one existing test file as `multipart/form-data`, create its course-note source and `uploaded_assessments` row, and return `202` with processing state. The source file remains private and processing uses the same limits as course uploads. |
+| `GET /api/classes/{class_id}/assessments` | Return `{"items": [...]}` with assessment summaries for the caller's class. |
+| `GET /api/assessments/{assessment_id}` | Return the owned assessment's parsed questions, detected responses, grading mode, optional score/confidence, per-question grading result, status, and safe failure code. |
+
+`processing_status` is `processing`, `ready`, `needs_review`, or `failed`. A blank test is a ready, ungraded reference (`grading_mode: not_graded`, no score). A completed test with a detected answer key uses `answer_key`; without a key, grading from notes in the same class must be labeled `class_notes_estimated` and include confidence. Unreadable responses or missing usable class notes result in `needs_review` and no score. The owner may view the answer key and grading result for their own uploaded test. Never treat an imported test's key as the answer key for a separately generated quiz.
+
+When implemented, imported-test source rows will be normal course notes and can be selected through the existing `uploads` study-material scope. Generated quizzes and practice exams remain separate materials with immutable content and source links.
 
 ### Upload processing
 
