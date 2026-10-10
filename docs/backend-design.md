@@ -20,14 +20,18 @@ The backend also runs the **class library**: it stores each student's classes an
 - `pydantic-settings` for environment-based configuration, including local `.env` loading.
 - Google's `google-genai` Python SDK to provision ephemeral Live API tokens.
 - Uvicorn as the ASGI server.
-- PostgreSQL for classes, course materials, generated study materials, and attempts. The initial class-library schema prototype is [backend/schema.sql](../backend/schema.sql); database connection code will be added in a later implementation step.
+- Supabase-managed PostgreSQL for classes, course materials, generated study materials, and attempts. The initial schema is versioned at [supabase/migrations/20261010120000_initial_class_library.sql](../supabase/migrations/20261010120000_initial_class_library.sql); the FastAPI database connection and class-library endpoints will be added in a later implementation step.
 - Private object storage for original uploaded files (local disk for a demo; S3-compatible or Supabase/Firebase storage for deployment).
 - A background job runner for slow work such as lecture transcription and generation (FastAPI `BackgroundTasks` for the demo; a real queue such as RQ or Celery if needed later).
 - File parsers: `pypdf` for PDFs, `python-docx` for DOCX, `python-pptx` for PPTX. Images, scanned PDFs, and video/audio go to Gemini.
 
-### PostgreSQL schema prototype
+### Supabase PostgreSQL schema
 
-The initial schema in `backend/schema.sql` covers app identities, owner-scoped classes, course notes/materials, generated quizzes and practice exams (as well as the other planned study-material types), source-note links, and completed attempts. Foreign keys cascade class deletion through its notes, generated materials, and attempts. Composite class keys prevent source-note link rows from crossing class boundaries; backend validation must also keep citations inside the generated JSON content consistent with those links. Deleting a source note deletes generated materials derived from it. Original file bytes remain in private object storage; PostgreSQL holds the storage key, extracted text, lecture transcript segments, and parsed syllabus outline. Live screen/audio media, live-session transcripts, annotation events, and tutoring conversations are not stored.
+The initial migration covers app identities, owner-scoped classes, course notes/materials, generated quizzes and practice exams (as well as the other planned study-material types), source-note links, and completed attempts. Foreign keys cascade class deletion through its notes, generated materials, and attempts. Composite class keys prevent source-note link rows from crossing class boundaries; backend validation must also keep citations inside generated JSON content consistent with those links. Deleting a source note deletes generated materials derived from it. Original file bytes remain in private object storage; Postgres holds the storage key, extracted text, lecture transcript segments, and parsed syllabus outline. Live screen/audio media, live-session transcripts, annotation events, and tutoring conversations are not stored.
+
+Row-level security is enabled on the application tables, with no Supabase Data API policies yet. This denies row access to ordinary `anon` and `authenticated` Data API clients until a sign-in flow and matching per-user policies are implemented. The planned FastAPI service uses a server-only Postgres connection and must still scope every query to the authenticated owner. The existing `app_users.auth_subject` maps the app's identity provider; it does not assume Supabase Auth.
+
+Keep schema changes in timestamped `supabase/migrations/` files and apply them through the Supabase CLI. Obtain `DATABASE_URL` from the Supabase project's Connect dialog and store it only on the server. A persistent backend can use the direct connection where its network supports IPv6 (or the project's IPv4 add-on); an IPv4-only backend can use the session pooler. Use the project's selected Postgres major version when configuring local Supabase development.
 
 The frontend can be plain HTML/CSS/JS bundled by Vite. In development, Vite proxies `/api` to FastAPI; in deployment, FastAPI serves the built static files or the host serves both behind one same-origin URL.
 
@@ -171,7 +175,7 @@ Read these values from the process environment, with `pydantic-settings` loading
 | `APP_ORIGINS` | Deployment-dependent | Allowed browser origins for API requests |
 | `TOKEN_RATE_LIMIT` | No | Maximum token requests per identity/window |
 | `GEMINI_TEXT_MODEL` | Yes, for the class library | Standard Gemini model for text extraction, transcription, and study-material generation |
-| `DATABASE_URL` | Yes, for the class library | Database connection string |
+| `DATABASE_URL` | Yes, for the class library | Server-only Supabase Postgres connection string |
 | `STORAGE_BUCKET` / `STORAGE_DIR` | Yes, for the class library | Where original uploaded files are stored |
 | `MAX_UPLOAD_MB` / `MAX_LECTURE_MINUTES` | No | Upload size and lecture length limits |
 

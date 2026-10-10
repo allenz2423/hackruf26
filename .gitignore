@@ -2,4 +2,9 @@
 .env
 .env.*
 !.env.example
-**/.DS_Store 
+**/.DS_Store
+
+# Supabase CLI state is machine-local; keep config and migrations tracked.
+supabase/.temp/
+supabase/.branches/
+.supabase/

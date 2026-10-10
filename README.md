@@ -13,14 +13,16 @@ See the [product overview](docs/design.md), [frontend design](docs/frontend-desi
 ## Status
 
 The backend token-service boilerplate is in place. The frontend and the
-separate notes and study-material services are not implemented yet.
+separate notes and study-material services are not implemented yet. The
+initial Supabase Postgres schema migration is in `supabase/migrations/`.
 
 ## Proposed stack
 
 - HTML, CSS, and JavaScript for the browser UI, with Google's JavaScript SDK for Gemini Live.
 - Python, FastAPI, and Pydantic for the token service.
 - Gemini Live API using `gemini-3.8-live` for real-time multimodal tutoring.
-- A small backend that issues constrained, short-lived Gemini Live credentials; the long-lived API key stays server-side. The current backend MVP has no database and does not yet implement note storage or study-material generation.
+- Supabase-managed PostgreSQL for the planned class library, with schema changes tracked as migrations.
+- A small backend that issues constrained, short-lived Gemini Live credentials; the long-lived API key stays server-side. The current backend MVP does not yet connect to the database or implement note storage or study-material generation.
 
 See [backend setup and configuration](backend/README.md) to run the token
 service locally.

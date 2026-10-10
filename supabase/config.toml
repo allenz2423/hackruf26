@@ -1,0 +1,3 @@
+# Stable local Supabase CLI project name. Each developer links their own
+# Supabase project with `supabase link`.
+project_id = "screen-tutor"

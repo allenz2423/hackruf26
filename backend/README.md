@@ -62,3 +62,16 @@ headers only from that proxy; the app does not trust arbitrary
 The request cannot select a model, prompt, or tool. Failures return a stable
 `code`, user-safe `message`, and `request_id`; raw upstream errors and
 credentials are never returned. The token response is marked `no-store`.
+
+## Supabase database
+
+The class-library schema is captured in the root `supabase/migrations/`
+directory. The current FastAPI service does not connect to the database or
+implement class, note, quiz, or test endpoints yet. When those services are
+added, keep the Supabase Postgres connection string server-side and apply
+schema changes through versioned Supabase CLI migrations. The initial
+migration enables row-level security without browser-facing policies, so
+ordinary `anon` and `authenticated` Supabase Data API clients cannot read or
+write these tables until user authentication and per-user policies are
+deliberately added. A privileged server database connection can bypass RLS,
+so future API queries must still enforce class ownership.

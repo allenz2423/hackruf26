@@ -1,9 +1,9 @@
--- Screen Tutor class library: PostgreSQL bootstrap schema prototype.
+-- Screen Tutor class library: initial Supabase Postgres migration.
 -- Uploaded binaries stay in private object storage; only their storage keys
 -- and extracted text are stored here. Live-session media, transcripts,
 -- annotations, and conversations are intentionally outside this schema.
 
-BEGIN;
+SET search_path = public;
 
 DO $$ BEGIN
     CREATE TYPE course_note_kind AS ENUM (
@@ -169,9 +169,10 @@ CREATE INDEX IF NOT EXISTS study_materials_class_status_idx
 CREATE INDEX IF NOT EXISTS study_material_attempts_material_completed_idx
     ON study_material_attempts (material_id, completed_at DESC);
 
-CREATE OR REPLACE FUNCTION set_updated_at()
+CREATE OR REPLACE FUNCTION public.set_updated_at()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = public
 AS $$
 BEGIN
     NEW.updated_at = now();
@@ -199,12 +200,13 @@ CREATE TRIGGER study_materials_set_updated_at
 CREATE OR REPLACE FUNCTION delete_materials_for_note()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = public
 AS $$
 BEGIN
     DELETE FROM study_materials
     WHERE id IN (
         SELECT material_id
-        FROM study_material_sources
+        FROM public.study_material_sources
         WHERE note_id = OLD.id
     );
     RETURN OLD;
@@ -216,4 +218,12 @@ CREATE TRIGGER course_notes_delete_derived_materials
     BEFORE DELETE ON course_notes
     FOR EACH ROW EXECUTE FUNCTION delete_materials_for_note();
 
-COMMIT;
+-- The backend will use a server-only database connection and enforce class
+-- ownership in its API. Supabase's browser-facing Data API stays closed until
+-- Supabase Auth and matching per-user policies are explicitly integrated.
+ALTER TABLE public.app_users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.course_classes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.course_notes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.study_materials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.study_material_sources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.study_material_attempts ENABLE ROW LEVEL SECURITY;
