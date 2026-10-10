@@ -1,4 +1,6 @@
 -- Screen Tutor class library: initial Supabase Postgres migration.
+-- Supabase Auth owns auth.users and auth.sessions. Application ownership
+-- references Auth user IDs; this schema does not copy or manage sessions.
 -- Uploaded binaries stay in private object storage; only their storage keys
 -- and extracted text are stored here. Live-session media, transcripts,
 -- annotations, and conversations are intentionally outside this schema.
@@ -32,18 +34,9 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
--- auth_subject is the stable ID from the selected sign-in provider. Passwords
--- and provider credentials are deliberately not stored in this database.
-CREATE TABLE IF NOT EXISTS app_users (
-    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    auth_subject    text NOT NULL UNIQUE,
-    created_at      timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT app_users_auth_subject_not_blank CHECK (btrim(auth_subject) <> '')
-);
-
 CREATE TABLE IF NOT EXISTS course_classes (
     id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    owner_id        uuid NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+    owner_id        uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     name            text NOT NULL,
     created_at      timestamptz NOT NULL DEFAULT now(),
     updated_at      timestamptz NOT NULL DEFAULT now(),
@@ -220,8 +213,7 @@ CREATE TRIGGER course_notes_delete_derived_materials
 
 -- The backend will use a server-only database connection and enforce class
 -- ownership in its API. Supabase's browser-facing Data API stays closed until
--- Supabase Auth and matching per-user policies are explicitly integrated.
-ALTER TABLE public.app_users ENABLE ROW LEVEL SECURITY;
+-- matching owner-scoped policies are deliberately added.
 ALTER TABLE public.course_classes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.course_notes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.study_materials ENABLE ROW LEVEL SECURITY;
