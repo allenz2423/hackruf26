@@ -8,3 +8,11 @@
 supabase/.temp/
 supabase/.branches/
 .supabase/
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+
+# Local agent scratch artifacts
+.codex/
+converted-skills/
