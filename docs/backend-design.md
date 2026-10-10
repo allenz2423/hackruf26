@@ -20,10 +20,14 @@ The backend also runs the **class library**: it stores each student's classes an
 - `pydantic-settings` for environment-based configuration, including local `.env` loading.
 - Google's `google-genai` Python SDK to provision ephemeral Live API tokens.
 - Uvicorn as the ASGI server.
-- A database for classes, uploads, extracted text/transcripts, and study materials (for example, SQLite for a local demo, Postgres or Supabase for deployment).
+- PostgreSQL for classes, course materials, generated study materials, and attempts. The initial class-library schema prototype is [backend/schema.sql](../backend/schema.sql); database connection code will be added in a later implementation step.
 - Private object storage for original uploaded files (local disk for a demo; S3-compatible or Supabase/Firebase storage for deployment).
 - A background job runner for slow work such as lecture transcription and generation (FastAPI `BackgroundTasks` for the demo; a real queue such as RQ or Celery if needed later).
 - File parsers: `pypdf` for PDFs, `python-docx` for DOCX, `python-pptx` for PPTX. Images, scanned PDFs, and video/audio go to Gemini.
+
+### PostgreSQL schema prototype
+
+The initial schema in `backend/schema.sql` covers app identities, owner-scoped classes, course notes/materials, generated quizzes and practice exams (as well as the other planned study-material types), source-note links, and completed attempts. Foreign keys cascade class deletion through its notes, generated materials, and attempts. Composite class keys prevent source-note link rows from crossing class boundaries; backend validation must also keep citations inside the generated JSON content consistent with those links. Deleting a source note deletes generated materials derived from it. Original file bytes remain in private object storage; PostgreSQL holds the storage key, extracted text, lecture transcript segments, and parsed syllabus outline. Live screen/audio media, live-session transcripts, annotation events, and tutoring conversations are not stored.
 
 The frontend can be plain HTML/CSS/JS bundled by Vite. In development, Vite proxies `/api` to FastAPI; in deployment, FastAPI serves the built static files or the host serves both behind one same-origin URL.
 
