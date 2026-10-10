@@ -1,7 +1,10 @@
--- Screen Tutor class library: PostgreSQL bootstrap schema prototype.
+-- Screen Tutor class library: Supabase PostgreSQL bootstrap schema prototype.
+-- Run as a migration in the Supabase project after Supabase Auth is enabled.
 -- Uploaded binaries stay in private object storage; only their storage keys
 -- and extracted text are stored here. Live-session media, transcripts,
 -- annotations, and conversations are intentionally outside this schema.
+-- Supabase Auth owns auth.users and auth.sessions. This app schema references
+-- Auth user IDs for ownership; it does not copy or manage login-session rows.
 
 BEGIN;
 
@@ -32,18 +35,9 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
--- auth_subject is the stable ID from the selected sign-in provider. Passwords
--- and provider credentials are deliberately not stored in this database.
-CREATE TABLE IF NOT EXISTS app_users (
-    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    auth_subject    text NOT NULL UNIQUE,
-    created_at      timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT app_users_auth_subject_not_blank CHECK (btrim(auth_subject) <> '')
-);
-
 CREATE TABLE IF NOT EXISTS course_classes (
     id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    owner_id        uuid NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+    owner_id        uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     name            text NOT NULL,
     created_at      timestamptz NOT NULL DEFAULT now(),
     updated_at      timestamptz NOT NULL DEFAULT now(),
@@ -168,6 +162,16 @@ CREATE INDEX IF NOT EXISTS study_materials_class_status_idx
     ON study_materials (class_id, status);
 CREATE INDEX IF NOT EXISTS study_material_attempts_material_completed_idx
     ON study_material_attempts (material_id, completed_at DESC);
+
+-- These tables are served by the FastAPI application, which verifies the
+-- Supabase access token and applies owner-scoped queries. Keep direct client
+-- access through the Supabase Data API closed until explicit user-scoped RLS
+-- policies are designed and reviewed.
+ALTER TABLE course_classes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE course_notes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE study_materials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE study_material_sources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE study_material_attempts ENABLE ROW LEVEL SECURITY;
 
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS trigger

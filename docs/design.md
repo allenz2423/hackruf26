@@ -292,5 +292,5 @@ The tool should have no capability beyond adding or clearing this overlay. In pa
 - Supported upload formats and size limits for the MVP, including maximum lecture video length and whether to keep the original video or only its transcript after processing.
 - Whether notes reach the tutor as full text, summaries, or chunks retrieved per question (RAG).
 - Which standard Gemini model to use for text extraction and study-material generation.
-- Database and file-storage choice (for example, Firebase, Supabase, or Postgres plus S3-compatible storage).
-- Authentication approach for a public demo versus a local hackathon build.
+- The file-storage provider and deployment configuration (Supabase Storage or private S3-compatible storage; local private storage may be used for development).
+- The final Supabase Auth session timeout settings for the public deployment.

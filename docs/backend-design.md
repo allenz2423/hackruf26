@@ -10,7 +10,7 @@ The backend exists to protect the long-lived Gemini API key and issue short-live
 
 For the MVP, the backend does not receive screen frames, microphone audio, tutor audio, transcripts, or annotation data. It does not proxy the Live WebSocket.
 
-The backend also runs the **class library**: it stores each student's classes and uploaded course materials (notes, documents, syllabi, lecture slides, and video/audio lectures), extracts text and transcribes lectures with the Gemini API, and generates quizzes, practice tests, study guides, and flashcards from them. This part needs sign-in, a database, and file storage.
+The backend also runs the **class library**: it stores each student's classes and uploaded course materials (notes, documents, syllabi, lecture slides, and video/audio lectures), extracts text and transcribes lectures with the Gemini API, and generates quizzes, practice tests, study guides, and flashcards from them. This part uses Supabase Auth for sign-in, Supabase PostgreSQL for application data and Auth sessions, and private file storage.
 
 ## Proposed backend stack
 
@@ -20,14 +20,33 @@ The backend also runs the **class library**: it stores each student's classes an
 - `pydantic-settings` for environment-based configuration, including local `.env` loading.
 - Google's `google-genai` Python SDK to provision ephemeral Live API tokens.
 - Uvicorn as the ASGI server.
-- PostgreSQL for classes, course materials, generated study materials, and attempts. The initial class-library schema prototype is [backend/schema.sql](../backend/schema.sql); database connection code will be added in a later implementation step.
+- Supabase Auth and its managed PostgreSQL database. Supabase Auth owns login sessions; the app schema stores class-library data and refers to the Supabase Auth user ID for ownership. The initial app schema prototype is [backend/schema.sql](../backend/schema.sql); database connection code will be added in a later implementation step.
 - Private object storage for original uploaded files (local disk for a demo; S3-compatible or Supabase/Firebase storage for deployment).
 - A background job runner for slow work such as lecture transcription and generation (FastAPI `BackgroundTasks` for the demo; a real queue such as RQ or Celery if needed later).
 - File parsers: `pypdf` for PDFs, `python-docx` for DOCX, `python-pptx` for PPTX. Images, scanned PDFs, and video/audio go to Gemini.
 
 ### PostgreSQL schema prototype
 
-The initial schema in `backend/schema.sql` covers app identities, owner-scoped classes, course notes/materials, generated quizzes and practice exams (as well as the other planned study-material types), source-note links, and completed attempts. Foreign keys cascade class deletion through its notes, generated materials, and attempts. Composite class keys prevent source-note link rows from crossing class boundaries; backend validation must also keep citations inside the generated JSON content consistent with those links. Deleting a source note deletes generated materials derived from it. Original file bytes remain in private object storage; PostgreSQL holds the storage key, extracted text, lecture transcript segments, and parsed syllabus outline. Live screen/audio media, live-session transcripts, annotation events, and tutoring conversations are not stored.
+The initial schema in `backend/schema.sql` covers Supabase Auth user ownership, classes, course notes/materials, generated quizzes and practice exams (as well as the other planned study-material types), source-note links, and completed attempts. Class `owner_id` references `auth.users(id)` directly with `ON DELETE CASCADE`; the app does not keep a duplicate user identity table. Foreign keys cascade class deletion through its notes, generated materials, and attempts. Composite class keys prevent source-note link rows from crossing class boundaries; backend validation must also keep citations inside the generated JSON content consistent with those links. Deleting a source note deletes generated materials derived from it. Original file bytes remain in private object storage; PostgreSQL holds the storage key, extracted text, lecture transcript segments, and parsed syllabus outline. Live screen/audio media, live-session transcripts, annotation events, and tutoring conversations are not stored.
+
+### Supabase Auth sessions
+
+Supabase Auth is the source of truth for browser sign-in sessions. It stores and manages those records in its protected `auth.sessions` table and issues a short-lived access-token JWT plus a rotating refresh token. Do not create a second `public.user_sessions` table, copy refresh tokens into application tables, or write directly to `auth.sessions`; use the Supabase Auth client/API for sign-in, refresh, and sign-out. The app schema only references the stable Supabase user UUID (`auth.users.id`) for ownership.
+
+| Event | Session behavior |
+| --- | --- |
+| Sign-in | Supabase Auth creates the login session and returns access and refresh tokens to the browser Auth client. |
+| API request | The browser sends the current access JWT to FastAPI; FastAPI verifies it and uses the verified `sub` UUID as the owner. |
+| Token refresh | The Auth client exchanges the current refresh token for a new access/refresh pair; application tables are not involved. |
+| Sign-out | The Auth client asks Supabase Auth to revoke the session and clears its local session state. An already-issued access JWT can remain valid until its `exp` claim. |
+
+The browser uses the Supabase JavaScript Auth client to sign in and refresh its session. For every protected FastAPI request, it sends the current access token as `Authorization: Bearer <access-token>`. FastAPI verifies the JWT signature and validates its issuer, audience, expiration, and `sub` claim using the project's Supabase signing keys or a supported Supabase verifier. It treats the verified `sub` UUID as the caller identity; it never trusts a user ID sent in a request body or URL. The frontend's publishable key is safe for browser use; Supabase secret/service-role keys and the PostgreSQL connection string remain server-only.
+
+The Supabase Auth project settings control access-token lifetime and supported session timeouts. Access tokens default to a one-hour lifetime; sessions otherwise remain active until sign-out or another configured termination event. Keep the default JWT lifetime unless deployment needs justify a change, and choose session timeout settings before public deployment. If a future high-risk operation requires immediate session revocation, additionally check the token's `session_id` against Supabase Auth session state for that operation; do not make every request depend on querying internal Auth tables.
+
+Application tables have row-level security enabled with no browser-facing policies in the prototype. Class-library data is accessed through FastAPI, which verifies the caller and scopes every query by the verified owner UUID. Keep the database connection and any privileged Supabase key on the server. If the app later accesses application tables directly through Supabase's Data API, add and review user-scoped RLS policies before granting that access.
+
+This login session is separate from a tutoring Live session. The browser owns the Gemini Live connection and any transient resume handle. Do not store Gemini ephemeral access tokens, Live session handles, media, transcripts, annotations, or tutoring conversations in Supabase Auth or the application tables.
 
 The frontend can be plain HTML/CSS/JS bundled by Vite. In development, Vite proxies `/api` to FastAPI; in deployment, FastAPI serves the built static files or the host serves both behind one same-origin URL.
 
@@ -36,11 +55,12 @@ The frontend can be plain HTML/CSS/JS bundled by Vite. In development, Vite prox
 ### Backend owns
 
 - Load and validate `GEMINI_API_KEY` and the server-selected `GEMINI_MODEL`.
+- Verify Supabase Auth access tokens and derive the caller's user ID from verified claims.
 - Create ephemeral tokens with short session-start and token expiration windows.
 - Lock token constraints to the approved Live model and the app's fixed session configuration/tool declarations where supported by the API.
 - Apply request-size limits, origin checks, rate limits, and sanitized errors.
 - Serve the frontend and a health endpoint, if the selected deployment uses a same-origin host.
-- Student sign-in, and scoping every class, upload, and study material to its owner.
+- Supabase Auth sign-in/session management, and scoping every class, upload, and study material to the verified owner's Supabase user ID.
 - Receiving course-material uploads, validating type and size, and storing the original file.
 - Extracting text from documents and slides, transcribing video/audio lectures with timestamps, and parsing syllabi into a topic/exam outline.
 - Generating quizzes, practice tests, study guides, and flashcards from a class's materials with a structured-output schema, and validating the result before saving it.
@@ -80,7 +100,7 @@ The server token request occurs after the student begins the session. It is inde
 
 ### `POST /api/live-token`
 
-No caller-controlled model or tool configuration is accepted. The request body is empty (or `{}`), or contains only an optional `class_id`, so the server always chooses the model and configuration. When `class_id` is given, the server checks that the student owns the class and builds the session's system instructions from that class's materials on the server side; the client cannot supply its own instructions.
+Requires a valid Supabase access token in the `Authorization: Bearer <access-token>` header. No caller-controlled model or tool configuration is accepted. The request body is empty (or `{}`), or contains only an optional `class_id`, so the server always chooses the model and configuration. When `class_id` is given, the server checks that the verified Supabase user owns the class and builds the session's system instructions from that class's materials on the server side; the client cannot supply its own instructions.
 
 **Success response**
 
@@ -114,7 +134,7 @@ No caller-controlled model or tool configuration is accepted. The request body i
 
 ### Class library endpoints
 
-All of these require sign-in and only return the caller's own data. Responses use Pydantic models.
+All of these require a valid Supabase access token and only return the caller's own data. Responses use Pydantic models. FastAPI derives the owner ID from the verified JWT `sub` claim and applies that owner filter on every query; clients do not submit an authoritative owner ID.
 
 | Method and path | Purpose |
 | --- | --- |
@@ -171,7 +191,9 @@ Read these values from the process environment, with `pydantic-settings` loading
 | `APP_ORIGINS` | Deployment-dependent | Allowed browser origins for API requests |
 | `TOKEN_RATE_LIMIT` | No | Maximum token requests per identity/window |
 | `GEMINI_TEXT_MODEL` | Yes, for the class library | Standard Gemini model for text extraction, transcription, and study-material generation |
-| `DATABASE_URL` | Yes, for the class library | Database connection string |
+| `SUPABASE_URL` | Yes | Supabase project URL; used to identify the Auth issuer and signing-key endpoint |
+| `SUPABASE_PUBLISHABLE_KEY` | Yes, for the frontend | Public project key used by the browser Supabase Auth client; never treat it as a user identity |
+| `DATABASE_URL` | Yes, for the class library | Server-only connection string for the Supabase PostgreSQL database |
 | `STORAGE_BUCKET` / `STORAGE_DIR` | Yes, for the class library | Where original uploaded files are stored |
 | `MAX_UPLOAD_MB` / `MAX_LECTURE_MINUTES` | No | Upload size and lecture length limits |
 
@@ -182,11 +204,13 @@ Do not put the Gemini API key in frontend config, rendered HTML, client-side env
 - Serve over HTTPS and use same-origin frontend/API deployment where possible.
 - Allow only configured origins. Do not use wildcard CORS with credentials.
 - Require an authenticated app session for public deployments. For a private hackathon demo without accounts, use a short-lived demo gate and strict IP/token rate limits; an unrestricted public token endpoint can be abused to incur API costs.
+- Verify Supabase JWT signatures and standard claims before using `sub`; decoding a JWT without signature verification is not authentication. Never accept the Supabase publishable key as proof of a signed-in user.
 - Apply limits to request body size, token issuance frequency, and simultaneous sessions per user/session.
 - Do not log authorization headers, ephemeral tokens, API keys, request bodies containing credentials, or media (the backend should not receive media).
 - Return generic upstream failures to the browser; log only a request ID, status, and safe error category.
 - If abuse controls need counters, use short-lived in-memory counters for a single instance or a shared rate-limit store for multiple instances. Never store screen or microphone media as part of rate limiting.
 - Check ownership on every class, upload, and study-material request. Keep uploaded files in private storage and serve them only through short-lived signed URLs.
+- Keep Supabase secret/service-role keys and database credentials on the backend. The prototype enables RLS without browser-facing policies; do not expose class tables through the Data API until owner-scoped policies are in place.
 - Check uploads by content type and size, not only by file extension. Limit upload size, lecture length, uploads per class, and generation requests per student.
 - Never log uploaded file contents, extracted text, or transcripts.
 
@@ -219,3 +243,6 @@ Do not put the Gemini API key in frontend config, rendered HTML, client-side env
 - [FastAPI](https://fastapi.tiangolo.com/)
 - [Pydantic](https://docs.pydantic.dev/latest/)
 - [Google Gen AI Python SDK](https://github.com/googleapis/python-genai)
+- [Supabase Auth sessions](https://supabase.com/docs/guides/auth/sessions)
+- [Supabase JWT verification](https://supabase.com/docs/guides/auth/jwts)
+- [Supabase user data and `auth.users` references](https://supabase.com/docs/guides/auth/managing-user-data)
