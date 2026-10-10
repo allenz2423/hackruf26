@@ -124,6 +124,10 @@ export function getClassById(classId) {
   return readClasses().find((item) => item.id === classId) || null;
 }
 
+/**
+ * Synchronize classes from backend API while strictly preserving
+ * all local classes and added materials so no user-created classes are lost.
+ */
 export async function syncClassesFromApi() {
   const token = await getAccessToken();
   if (!token) return getClasses();
@@ -134,9 +138,10 @@ export async function syncClassesFromApi() {
 
     const current = readClasses();
     const currentById = new Map(current.map((c) => [c.id, c]));
+    const currentByName = new Map(current.map((c) => [c.name.trim().toLowerCase(), c]));
 
-    const merged = remoteClasses.map((rc, idx) => {
-      const local = currentById.get(rc.id) || {};
+    const mergedRemote = remoteClasses.map((rc, idx) => {
+      const local = currentById.get(rc.id) || currentByName.get(rc.name.trim().toLowerCase()) || {};
       return {
         id: rc.id,
         name: rc.name,
@@ -152,11 +157,15 @@ export async function syncClassesFromApi() {
       };
     });
 
-    if (merged.length > 0) {
-      saveClasses(merged);
-      return merged;
-    }
-    return current;
+    const remoteIds = new Set(mergedRemote.map((rc) => rc.id));
+    const remoteNames = new Set(mergedRemote.map((rc) => rc.name.trim().toLowerCase()));
+
+    // Keep all existing classes that aren't on remote so newly added classes always stay!
+    const preservedLocal = current.filter((c) => !remoteIds.has(c.id) && !remoteNames.has(c.name.trim().toLowerCase()));
+
+    const combined = [...mergedRemote, ...preservedLocal];
+    saveClasses(combined);
+    return combined;
   } catch (err) {
     console.warn("Could not sync classes from API:", err);
     return getClasses();
@@ -164,17 +173,18 @@ export async function syncClassesFromApi() {
 }
 
 export async function createClass(name) {
+  const trimmed = name.trim();
   const token = await getAccessToken();
   let created = null;
 
   if (token) {
     try {
-      const remote = await createClassApi(name);
+      const remote = await createClassApi(trimmed);
       created = {
         id: remote.id,
         name: remote.name,
         color: CLASS_PALETTE[Math.floor(Math.random() * CLASS_PALETTE.length)],
-        icon: remote.name.trim().charAt(0).toUpperCase() || "C",
+        icon: remote.name.charAt(0).toUpperCase() || "C",
         nextExam: "",
         focus: "New class workspace",
         uploads: [],
@@ -188,10 +198,10 @@ export async function createClass(name) {
 
   if (!created) {
     created = {
-      id: makeId(name),
-      name,
+      id: makeId(trimmed),
+      name: trimmed,
       color: "#7c3aed",
-      icon: name.trim().charAt(0).toUpperCase() || "C",
+      icon: trimmed.charAt(0).toUpperCase() || "C",
       nextExam: "",
       focus: "New class workspace",
       uploads: [],
@@ -201,6 +211,14 @@ export async function createClass(name) {
   }
 
   const classes = readClasses();
+  // Check if class with identical name already exists
+  const existingIdx = classes.findIndex((c) => c.name.trim().toLowerCase() === trimmed.toLowerCase());
+  if (existingIdx >= 0) {
+    classes[existingIdx] = { ...classes[existingIdx], ...created };
+    saveClasses(classes);
+    return classes[existingIdx];
+  }
+
   classes.push(created);
   saveClasses(classes);
   return created;
