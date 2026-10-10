@@ -188,4 +188,5 @@ The browser may stop a screen track when the user ends sharing from its own cont
 - A student can upload notes, a document, a syllabus, slides, and a lecture video into a class and see each one's progress until it is ready.
 - A ready lecture shows a timestamped transcript that seeks the player when clicked.
 - A student can generate a quiz, practice test, study guide, and flashcard set from a class's uploads, take the quiz or test, and see a score with explanations and source links.
+- The Math 151 demo class starts with basic-algebra quiz and practice-exam examples; students can submit answers, review the answer key and explanations, retake them, and see saved attempt scores.
 - A student can open the Tutor tab from a missed question and ask about it.
