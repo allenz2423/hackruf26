@@ -6,7 +6,7 @@
 
 ## Purpose and scope
 
-The backend exists to protect the long-lived Gemini API key and issue short-lived Gemini Live credentials to the browser. The browser connects directly to the Gemini Live API so real-time screen and audio streams do not pass through or get stored by Screen Tutor's server. The server fixes the Live model's approved tool set and provides the bounded calculator function endpoint; Google Search runs as Gemini's built-in grounding tool.
+The backend exists to protect the long-lived Gemini API key and issue short-lived Gemini Live credentials to the browser. The browser connects directly to the Gemini Live API so real-time screen and audio streams do not pass through or get stored by Screen Tutor's server. The server fixes the Live model's approved tool set and provides bounded calculator and Lean proof-check endpoints; Google Search runs as Gemini's built-in grounding tool.
 
 For the MVP, the backend does not receive screen frames, microphone audio, tutor audio, transcripts, or annotation data. It does not proxy the Live WebSocket.
 
@@ -65,7 +65,7 @@ The frontend can be plain HTML/CSS/JS bundled by Vite. In development, Vite prox
 - Verify Supabase Auth access tokens and derive the caller's user ID from verified claims.
 - Create ephemeral tokens with short session-start and token expiration windows.
 - Lock token constraints to the approved Live model and the app's fixed session configuration, Google Search grounding, and function declarations where supported by the API.
-- Execute only the bounded `calculate_expression` function through the calculator endpoint; the browser handles Live tool calls and annotation rendering.
+- Execute only the bounded `calculate_expression` and `verify_lean_proof` functions through their tool endpoints; the browser handles Live tool calls and annotation rendering.
 - Apply request-size limits, origin checks, rate limits, and sanitized errors.
 - Serve the frontend and a health endpoint, if the selected deployment uses a same-origin host.
 - Supabase Auth sign-in/session management, and scoping every class, upload, and study material to the verified owner's Supabase user ID.
@@ -100,8 +100,8 @@ sequenceDiagram
     Browser->>Live: Connect using token and fixed Live config
     Browser->>Live: Send frames, optional mic audio, and questions
     Live-->>Browser: Audio, transcript, search grounding, and function calls
-    Browser->>App: POST /api/tools/calculate for calculator function calls only
-    App-->>Browser: Bounded numeric result
+    Browser->>App: POST /api/tools/calculate or /api/tools/verify-lean for custom math calls
+    App-->>Browser: Bounded calculation or Lean verification result
     Browser->>Live: Function response with matching call ID
 ```
 
@@ -111,19 +111,19 @@ The server token request occurs after the student begins the session. It is inde
 
 ### Frontend integration status
 
-The frontend on `main` was reviewed through commit `1145cf1`. Its current HTTP client in [`frontend/src/api.js`](../frontend/src/api.js) only calls `POST /api/live-token`, sends `{}`, and does not attach a Supabase access token. The class page still reads and writes classes in `localStorage` ([`frontend/src/classes.js`](../frontend/src/classes.js)); the library adds file metadata locally without uploading file bytes ([`frontend/src/library.js`](../frontend/src/library.js]); and the study page includes static, playable Math 151 algebra examples alongside local material state ([`frontend/src/sample-assessments.js`](../frontend/src/sample-assessments.js), [`frontend/src/study.js`](../frontend/src/study.js)). The quiz player scores those sample questions locally; it does not call the backend attempts API. The backend routes below are implemented, but the frontend screens do not yet consume them.
+The frontend on `main` was reviewed at commit `06b4493`. Its shared `apiFetch` client in [`frontend/src/api.js`](../frontend/src/api.js) attaches the current Supabase access token and calls the Live token, calculator, class, upload, syllabus, study-material, attempt, and flag routes. The tutor passes its selected class ID to the Live token request, and Vite proxies same-origin `/api` calls to FastAPI. This class-ID request is currently supported by the backend, although the repository's shared integration contract says the frontend should send `{}`; align that contract before removing either behavior. Vite does not proxy `/healthz`, but `checkBackendHealth()` requests that path, so the development health check hits Vite rather than FastAPI and can report the backend as unreachable. Add a `/healthz` proxy or use FastAPI's same-origin static serving for local verification.
 
-The backend implements `GET /healthz`, `POST /api/live-token`, `POST /api/tools/calculate`, and the class-library routes below. With `SUPABASE_URL` configured, it verifies Supabase access-token signatures and claims and requires the verified user for API calls. Without Supabase configured, the standalone token and calculator prototype requires `DEMO_GATE_TOKEN`; protected requests return `503` if neither authentication option is configured. Class-library routes remain unavailable without Supabase Auth, PostgreSQL, and private storage.
+The backend implements `GET /healthz`, `POST /api/live-token`, `POST /api/tools/calculate`, `POST /api/tools/verify-lean`, and the class-library routes below. With `SUPABASE_URL` configured, it verifies Supabase access-token signatures and claims and requires the verified user for API calls. Without Supabase configured, the standalone token, calculator, and Lean proof-check endpoints require `DEMO_GATE_TOKEN`; protected requests return `503` if neither authentication option is configured. Class-library routes remain unavailable without Supabase Auth, PostgreSQL, and private storage.
 
 Before protected API calls can work, the frontend must initialize Supabase Auth and send `Authorization: Bearer <current-access-token>` on each `/api/*` request. Supabase Auth itself owns sign-in, refresh, and sign-out; FastAPI does not add duplicate auth-session endpoints. The tutor screen must also pass its selected `class_id` to `/api/live-token` if the model should receive class materials.
 
-The pulled `frontend/src/gemini-live.js` currently handles annotation requests locally, but it does not execute `calculate_expression` through `/api/tools/calculate` or send function responses back to Gemini. The class tutor currently starts the same empty token request as Quick tutor. The frontend integration must route approved calculator calls to the calculator endpoint, answer every custom Live function call using its matching call ID, and supply the selected class ID for class tutoring. `google_search` stays inside Gemini and `add_annotations` stays local to the browser.
+The current `GeminiLiveController` dispatches `calculate_expression` to `/api/tools/calculate`, returns its response using the original function-call ID, and handles `add_annotations` locally. It does not yet dispatch `verify_lean_proof`; that call currently receives an `unsupported_tool` response, so Lean verification is not usable from the UI until the frontend adds a `verifyLeanProof` API helper and dispatch branch. `google_search` stays inside Gemini and does not use the custom function-call path.
 
 ### Shared API conventions
 
 - Use same-origin `/api` requests and JSON unless the endpoint is a file upload.
 - The API's CORS allow-list must permit `GET`, `POST`, `PATCH`, `PUT`, `DELETE`, and `OPTIONS` for the configured frontend origins; do not enable wildcard credentialed CORS.
-- Class-library routes require a valid Supabase access token. Token and calculator routes use the same verified Supabase identity when configured, or the private demo gate when Supabase is not configured. `GET /healthz` is public. The short-lived signed file URL is a bearer link and does not require a Supabase header. FastAPI derives the owner from the verified JWT and checks ownership for every class, upload, and material ID. Never accept `owner_id` from the client.
+- Class-library routes require a valid Supabase access token. Token and tool routes use the same verified Supabase identity when configured, or the private demo gate when Supabase is not configured. `GET /healthz` is public. The short-lived signed file URL is a bearer link and does not require a Supabase header. FastAPI derives the owner from the verified JWT and checks ownership for every class, upload, and material ID. Never accept `owner_id` from the client.
 - IDs are UUID strings. Enum values in requests and responses use lowercase `snake_case`; the frontend can map them to its title-case labels (for example, `lecture_video` → “Lecture”).
 - Collection responses use `{"items": [...]}`. Mutations return the created or updated resource unless the contract says `204 No Content`.
 - Errors use `{"code": "...", "message": "...", "request_id": "..."}`. Messages are safe to show to a student and do not include raw upstream errors or submitted file/text contents.
@@ -171,6 +171,7 @@ The backend creates one immutable tool set inside the server-owned `LiveConnectC
 | --- | --- | --- |
 | `google_search` | Gemini built-in grounding tool | Verify current or uncertain facts. Gemini performs the search and returns grounded response content and source metadata over the direct Live connection; there is no backend search proxy or search-results database. |
 | `calculate_expression` | Blocking custom function declaration | Evaluate exact arithmetic or bounded symbolic expressions. The Live API sends the function call to the browser; the browser calls `POST /api/tools/calculate` and returns the API result to the same Live session using the original function-call ID and name. Gemini waits for the response before continuing. |
+| `verify_lean_proof` | Blocking custom function declaration | Check whether a formal Lean 4 proposition follows from a supplied tactic proof using the pinned Mathlib project. The browser calls `POST /api/tools/verify-lean` and returns `verified`, `rejected`, or `timed_out` plus bounded diagnostics. Acceptance checks only the formal proposition, not whether it accurately represents the student's natural-language question. |
 | `add_annotations` | Blocking custom function declaration | Request a temporary mark over the matching shared-screen frame. This remains the only visual action. The browser validates and renders the call over its in-page preview, then replies to the matching function call. Gemini waits for the response before continuing. |
 
 The function-call declarations and their schemas are fixed by the backend. The caller cannot add tools, change descriptions or schemas, or send tool configuration with `/api/live-token`. Google Search grounding is for fact checking and current information; it does not grant general browsing, arbitrary URL fetching, or application control. The Live service performs Search internally. It does not send search queries or results through the Screen Tutor backend.
@@ -213,9 +214,9 @@ The request uses the same configured app authorization gate and allow-listed Ori
 | `413` | Request body exceeds the configured limit (default 1,024 bytes) |
 | `429` | Calculator rate limit reached |
 
-Errors use the shared `{ "code", "message", "request_id" }` response shape. Calculator-specific codes are `invalid_expression` for a rejected expression and `calculator_rate_limited` for `429`; shared request codes include `invalid_request`, `request_too_large`, `authentication_required`, and `origin_not_allowed`.
+Errors use the shared `{ "code", "message", "request_id" }` response shape. Calculator-specific codes are `invalid_expression` and `calculator_rate_limited`; Lean-specific codes are `invalid_lean_input`, `lean_rate_limited`, `lean_busy`, `lean_disabled`, and `lean_unavailable`. Shared request codes include `invalid_request`, `request_too_large`, `authentication_required`, and `origin_not_allowed`.
 
-Live reports custom calls in `toolCall.functionCalls[]`. Both custom functions are declared with `behavior: BLOCKING`, so Gemini waits for their responses. The browser should dispatch each call only by its approved name, then return the matching `functionResponses[]` with the original function-call ID and name. If one event contains several calls, return a response for each one in the same response message. Track call IDs so a cancellation event can stop an outstanding calculator fetch and prevent its late response from being sent. Never execute an unknown function name. For a failed calculator call, return only the sanitized `code` and `message` as a short structured function error so the tutor can ask for a clearer expression or explain the limit. If the HTTP request itself fails, use a generic `calculator_unavailable` error; do not retry in a loop. For success, return `{ "result": "37" }` as the function response. `google_search` is Gemini's built-in tool and does not use this custom function-call path. Live function calls are not executed automatically by the API; the client must execute and answer them.
+Live reports custom calls in `toolCall.functionCalls[]`. The calculator, Lean verifier, and annotation function declarations use `behavior: BLOCKING`, so Gemini waits for their responses. The browser should dispatch each call only by its approved name, then return the matching `functionResponses[]` with the original function-call ID and name. If one event contains several calls, return a response for each one in the same response message. Track call IDs so a cancellation event can stop outstanding calculator or Lean HTTP requests and prevent late responses from being sent. Never execute an unknown function name. For failed HTTP calls, return only the sanitized `code` and `message` as a short structured function error. Use a generic tool-unavailable code when the request itself fails; do not retry in a loop. For calculator success, return `{ "result": "37" }`; for Lean success or proof rejection, return its `{ "status", "diagnostics" }` response. Handle `add_annotations` locally. `google_search` is Gemini's built-in tool and does not use this custom function-call path. Live function calls are not executed automatically by the API; the client must execute and answer them.
 
 The browser's execution outline is:
 
@@ -240,6 +241,38 @@ session.sendToolResponse({
   }],
 });
 ```
+
+### `POST /api/tools/verify-lean`
+
+This endpoint executes the `verify_lean_proof` Live function using the backend's pinned Lean 4/Mathlib project. The model supplies a one-line formal proposition and its tactic proof body; the backend wraps them in a theorem declaration, so callers cannot supply imports or top-level Lean commands.
+
+**Request**
+
+```json
+{
+  "proposition": "forall n : Nat, n + 0 = n",
+  "proof": "induction n with\n| zero => rfl\n| succ n ih => simp [ih]"
+}
+```
+
+`proof` omits the leading `by`. The server rejects command, metaprogramming, `sorry`, `admit`, and comment syntax. Both fields have strict character limits. The local Lean process has a wall-clock timeout, CPU and file-size limits where `prlimit` is available, and bounded concurrency and output.
+
+**Response**
+
+```json
+{
+  "status": "verified",
+  "diagnostics": "Lean accepted the formal proposition and proof."
+}
+```
+
+`status` is `verified`, `rejected`, or `timed_out`. Rejected proofs return truncated Lean diagnostics so the model can revise its proof. A timeout is not reported as a failed theorem. Lean verifies only the supplied formal proposition; it cannot confirm that the proposition faithfully expresses the student's natural-language problem.
+
+The request uses the same app authorization and Origin checks as calculator calls. Defaults are 3 requests per authenticated user (or socket peer in demo mode) per minute, 12 seconds per check, and a 65,536-byte body limit. Proof source and diagnostics are not logged or persisted. The local runner is suitable for a controlled, single-instance hackathon deployment; it is not a full OS sandbox. Keep it behind authenticated access and add process isolation before exposing proof checks to untrusted public traffic.
+
+If `LEAN_TOOL_ENABLED=true` (the default), startup requires the configured Lean/Mathlib project to be installed and ready. Set it to `false` to omit the tool from new Live token configurations; the endpoint then returns `503`.
+
+Live function-call handling follows the same call-ID contract as calculation: dispatch `verify_lean_proof` to this endpoint and return the JSON response to the same Live session under the original function-call ID and name. For an HTTP error, send a short structured error with the API's safe `code` and `message`; do not retry automatically.
 
 Use the application's current authorization token in the example above; do not use the Gemini ephemeral token for the Screen Tutor HTTP API. Check the function name against the approved set before executing it. Handle `add_annotations` locally and leave `google_search` execution to Gemini's built-in tool service.
 
@@ -386,7 +419,7 @@ The backend creates ephemeral tokens through the Gemini API's Live token provisi
 - Use `GEMINI_API_KEY` only on the server.
 - Set `uses` to one for a new Live session and use short, explicit expiration values allowed by the API.
 - Constrain the model to `GEMINI_MODEL` (default `gemini-3.8-live`).
-- Constrain supported Live configuration to audio responses, output transcription, screen input, session resumption if enabled, the built-in `google_search` tool, and exactly the `calculate_expression` and `add_annotations` functions.
+- Constrain supported Live configuration to audio responses, output transcription, screen input, session resumption if enabled, the built-in `google_search` tool, and the server-approved `calculate_expression`, optional `verify_lean_proof`, and `add_annotations` functions.
 - Reject or ignore client attempts to provide a different model, arbitrary instructions, or additional tools.
 
 Keep the token configuration in one server-side module so frontend and backend settings do not drift. The browser must send the matching setup configuration when it connects. Verify all constraint fields against the current [ephemeral token documentation](https://ai.google.dev/gemini-api/docs/live-api/ephemeral-tokens) during implementation.
@@ -402,6 +435,12 @@ Read these values from the process environment, with `pydantic-settings` loading
 | `APP_ORIGINS` | Deployment-dependent | Allowed browser origins for API requests |
 | `TOKEN_RATE_LIMIT` / `TOKEN_RATE_WINDOW_SECONDS` | No | Token requests per socket peer/window; defaults to 5 per 60 seconds per process |
 | `CALCULATOR_RATE_LIMIT` / `CALCULATOR_RATE_WINDOW_SECONDS` | No | Calculator requests per socket peer/window; defaults to 30 per 60 seconds per process |
+| `LEAN_TOOL_ENABLED` | No | Advertise the Lean proof-check tool; defaults to `true` and requires the Lean/Mathlib project at startup |
+| `LEAN_RATE_LIMIT` / `LEAN_RATE_WINDOW_SECONDS` | No | Lean proof checks per user/window; defaults to 3 per 60 seconds per process |
+| `LEAN_TIMEOUT_SECONDS` | No | Maximum wall time per proof check; defaults to 12 seconds |
+| `LEAN_REQUEST_MAX_BYTES` | No | Maximum request body for proof checks; defaults to 65,536 bytes |
+| `LEAN_PROJECT_DIR` | No | Lean/Lake project containing the pinned Mathlib dependency; defaults to `backend/lean` |
+| `LEAN_LAKE_EXECUTABLE` | No | Lake executable name or path; defaults to `lake` |
 | `GEMINI_TEXT_MODEL` | No | Standard Gemini model for text extraction, transcription, syllabus parsing, and study-material generation; defaults to `gemini-3.8-flash` |
 | `SUPABASE_URL` | Yes, for the class library and signed-in API | Supabase project URL; used to identify the Auth issuer and signing-key endpoint |
 | `SUPABASE_PUBLISHABLE_KEY` | Yes, for the frontend | Public project key used by the browser Supabase Auth client; never treat it as a user identity |
@@ -414,7 +453,7 @@ Read these values from the process environment, with `pydantic-settings` loading
 | `GENERATION_RATE_LIMIT` / `GENERATION_RATE_WINDOW_SECONDS` | No | Study-material generation requests per user/window; defaults to 10 per hour per process |
 | `LIBRARY_JSON_BODY_MAX_BYTES` | No | Maximum JSON body size for library endpoints; defaults to 1,100,000 bytes |
 | `GEMINI_CONTENT_TIMEOUT_SECONDS` | No | Timeout for the separate Gemini content-generation client; defaults to 600 seconds |
-| `DEMO_GATE_TOKEN` | Yes when Supabase Auth is not configured | Private demo authorization for token and calculator endpoints; protected requests fail closed if neither auth option exists |
+| `DEMO_GATE_TOKEN` | Yes when Supabase Auth is not configured | Private demo authorization for token and tool endpoints; protected requests fail closed if neither auth option exists |
 
 Do not put the Gemini API key in frontend config, rendered HTML, client-side environment variables, source maps, or API responses. Use the repository's `.env.example` as the local template. Production deployment should inject secrets through its secret manager.
 
@@ -425,6 +464,7 @@ Do not put the Gemini API key in frontend config, rendered HTML, client-side env
 - Require an authenticated app session for public deployments. For a private hackathon demo without accounts, use a short-lived demo gate and strict IP/token rate limits; an unrestricted public token endpoint can be abused to incur API costs.
 - Verify Supabase JWT signatures and standard claims before using `sub`; decoding a JWT without signature verification is not authentication. Never accept the Supabase publishable key as proof of a signed-in user.
 - Apply limits to request body size, token issuance frequency, upload volume per class, and upload/generation request frequency per user.
+- Keep Lean proof checks behind the same authenticated app gate, limit source size and output, rate-limit requests, and stop long-running Lean process groups. The local runner has resource limits but is not an OS sandbox; isolate it before public multi-tenant use.
 - Do not log authorization headers, ephemeral tokens, API keys, request bodies containing credentials, or media (the backend should not receive media).
 - Return generic upstream failures to the browser; log only a request ID, status, and safe error category.
 - If abuse controls need counters, use short-lived in-memory counters for a single instance or a shared rate-limit store for multiple instances. Never store screen or microphone media as part of rate limiting.
@@ -445,10 +485,11 @@ Do not put the Gemini API key in frontend config, rendered HTML, client-side env
 
 - The frontend can request a constrained ephemeral token and connect to `gemini-3.8-live` without exposing the long-lived API key.
 - Invalid requests cannot choose another model or add tools.
-- Every Live token uses the server-approved Google Search, calculator, and annotation tool set; the caller cannot expand it.
+- Every Live token uses the server-approved Google Search, calculator, Lean (when enabled), and annotation tool set; the caller cannot expand it.
 - Google Search grounding is available for fact checking, and the client can display returned citation metadata without routing search results through the backend.
 - Calculator expressions are parsed with a bounded AST allowlist into SymPy; exact numeric and symbolic results are supported without evaluating user-supplied code.
 - Invalid or over-limit calculator expressions return sanitized errors, and submitted expressions are not logged or stored.
+- The Live model can request formal proof verification; Lean accepts valid proofs, rejects invalid or unsafe snippets, and applies time/output/resource bounds without persisting submissions.
 - Missing configuration, Google API failure, rate limiting, and origin rejection return stable, sanitized errors.
 - Screen/audio streams never transit the backend and are never stored by it.
 - Same-origin static frontend and API routes work over HTTPS in the deployed environment.

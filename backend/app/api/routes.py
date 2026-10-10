@@ -10,6 +10,7 @@ from fastapi import APIRouter, Body, Request, Response
 from app.api.dependencies import (
     database_pool,
     enforce_calculator_request_policy,
+    enforce_lean_request_policy,
     enforce_token_request_policy,
 )
 from app.api.errors import ApiError
@@ -17,12 +18,20 @@ from app.api.schemas import (
     CalculatorRequest,
     CalculatorResponse,
     HealthResponse,
+    LeanProofRequest,
+    LeanProofResponse,
     LiveTokenRequest,
     LiveTokenResponse,
 )
 from app.config import Settings
 from app.services.calculator import CalculatorInputError, evaluate_expression
 from app.services.gemini_tokens import GeminiTokenService
+from app.services.lean_proofs import (
+    LeanProofBusy,
+    LeanProofInputError,
+    LeanProofService,
+    LeanRuntimeUnavailable,
+)
 
 logger = logging.getLogger("screen_tutor.api")
 router = APIRouter()
@@ -148,3 +157,60 @@ async def calculate_expression(
             "The calculator accepts only bounded numeric or symbolic math expressions.",
         ) from None
     return CalculatorResponse(result=result)
+
+
+@router.post(
+    "/api/tools/verify-lean",
+    response_model=LeanProofResponse,
+    tags=["tools"],
+    responses={
+        400: {"description": "The Lean request contains unsupported syntax."},
+        401: {"description": "The configured app gate was not satisfied."},
+        403: {"description": "The request origin is not allow-listed."},
+        413: {"description": "The request body exceeds the configured Lean limit."},
+        429: {"description": "The Lean proof-check rate or concurrency limit was reached."},
+        503: {"description": "Lean/Mathlib is not available."},
+    },
+)
+async def verify_lean_proof(
+    request: Request,
+    response: Response,
+    payload: LeanProofRequest,
+) -> LeanProofResponse:
+    """Check the model's formal proof without logging or storing its source."""
+    settings = _settings(request)
+    await enforce_lean_request_policy(request, settings)
+    if not settings.lean_tool_enabled:
+        raise ApiError(503, "lean_disabled", "Formal proof checking is unavailable right now.")
+
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    service: LeanProofService | None = getattr(request.app.state, "lean_proof_service", None)
+    if service is None:
+        raise ApiError(503, "lean_unavailable", "Formal proof checking is unavailable right now.")
+    try:
+        return await service.verify(payload.proposition, payload.proof)
+    except LeanProofInputError:
+        raise ApiError(
+            400,
+            "invalid_lean_input",
+            "The proof contains unsupported Lean syntax or exceeds the configured limits.",
+        ) from None
+    except LeanProofBusy:
+        raise ApiError(
+            429,
+            "lean_busy",
+            "The proof checker is busy. Please try again shortly.",
+            retry_after_seconds=2,
+        ) from None
+    except LeanRuntimeUnavailable:
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.error(
+            "lean_runtime_unavailable request_id=%s",
+            request_id,
+        )
+        raise ApiError(
+            503,
+            "lean_unavailable",
+            "Formal proof checking is unavailable right now.",
+        ) from None

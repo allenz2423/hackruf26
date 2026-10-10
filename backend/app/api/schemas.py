@@ -33,6 +33,24 @@ class CalculatorResponse(BaseModel):
     result: str = Field(min_length=1, max_length=512)
 
 
+class LeanProofRequest(BaseModel):
+    """A formal proposition and tactic proof checked by the backend's Lean runtime."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    proposition: str = Field(min_length=1, max_length=4_000, strict=True)
+    proof: str = Field(min_length=1, max_length=8_000, strict=True)
+
+
+class LeanProofResponse(BaseModel):
+    """Outcome of checking a formal proof; diagnostics are bounded and sanitized."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal["verified", "rejected", "timed_out"]
+    diagnostics: str = Field(min_length=1, max_length=4_000)
+
+
 class LiveTokenResponse(BaseModel):
     """Short-lived bearer credential returned to the requesting browser."""
 

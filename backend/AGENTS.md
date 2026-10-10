@@ -12,11 +12,12 @@ Read the repository [AGENTS.md](../AGENTS.md) and [backend design](../docs/backe
 
 - Keep `GEMINI_API_KEY` on the server. Load it from environment configuration; never return, log, or persist it.
 - Implement `POST /api/live-token` as a narrow token-provisioning endpoint. Validate input and output with Pydantic. Do not accept a model name, system instruction, or arbitrary tools from the caller.
-- Issue a short-lived ephemeral token constrained to the configured Live model and the approved session configuration/tool declarations where the Gemini API supports those constraints. The approved tool set is `google_search`, `calculate_expression`, and `add_annotations`.
+- Issue a short-lived ephemeral token constrained to the configured Live model and the approved session configuration/tool declarations where the Gemini API supports those constraints. The approved tool set is `google_search`, `calculate_expression`, `verify_lean_proof`, and `add_annotations`.
 - Return only `access_token`, `model`, and `expires_at` to the browser. Do not log or persist the ephemeral token.
 - Keep screen frames, microphone audio, tutor audio, transcripts, and annotation payloads out of backend requests, logs, and storage. The browser connects directly to Gemini Live.
 - Add origin checks, rate limits, request-size limits, and sanitized error responses to capability endpoints such as token issuance and calculator execution. Public deployments require an authenticated app session or an explicit demo gate.
 - The calculator accepts only bounded numeric or symbolic expressions through its allow-listed parser. Never use SymPy's string parser on user input; never log or persist calculator expressions or results.
+- Lean proof checking accepts only a bounded formal proposition and tactic proof, rejects metaprogramming and admission syntax, runs with a timeout and OS resource limits, and never logs or stores submitted proofs. Keep the local runner behind authenticated access; isolate it before public multi-tenant deployment.
 - Keep backend-specific settings and Python dependencies under backend ownership. `.env` is local and ignored; `.env.example` contains names and safe defaults only.
 
 ## Shared API contract

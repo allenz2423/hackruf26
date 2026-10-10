@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
-from uuid import UUID
 from urllib.parse import urlsplit
+from uuid import UUID
 
 import asyncpg
 from fastapi import Request
@@ -176,5 +176,25 @@ async def enforce_calculator_request_policy(request: Request, settings: Settings
             429,
             "calculator_rate_limited",
             "Too many calculator requests. Please wait before trying again.",
+            retry_after_seconds=retry_after,
+        )
+
+
+async def enforce_lean_request_policy(request: Request, settings: Settings) -> None:
+    """Apply app access checks and the more restrictive Lean CPU budget."""
+    await enforce_app_request_policy(request, settings)
+    limiter: InMemoryRateLimiter = request.app.state.lean_rate_limiter
+    identity = str(getattr(request.state, "user_id", None) or _client_identity(request))
+    retry_after = await limiter.check(identity)
+    if retry_after is not None:
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.warning(
+            "request_rejected request_id=%s category=lean_rate_limited",
+            request_id,
+        )
+        raise ApiError(
+            429,
+            "lean_rate_limited",
+            "Too many proof checks. Please wait before trying again.",
             retry_after_seconds=retry_after,
         )

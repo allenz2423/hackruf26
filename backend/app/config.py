@@ -65,6 +65,13 @@ class Settings(BaseSettings):
     token_rate_window_seconds: int = 60
     calculator_rate_limit: int = 30
     calculator_rate_window_seconds: int = 60
+    lean_tool_enabled: bool = True
+    lean_rate_limit: int = 3
+    lean_rate_window_seconds: int = 60
+    lean_timeout_seconds: float = 12.0
+    lean_request_max_bytes: int = 65_536
+    lean_project_dir: str = "backend/lean"
+    lean_lake_executable: str = "lake"
     upload_rate_limit: int = 10
     upload_rate_window_seconds: int = 3600
     generation_rate_limit: int = 10
@@ -140,12 +147,18 @@ class Settings(BaseSettings):
             raise ValueError("Token rate limit and window must both be positive.")
         if self.calculator_rate_limit < 1 or self.calculator_rate_window_seconds < 1:
             raise ValueError("Calculator rate limit and window must both be positive.")
+        if self.lean_rate_limit < 1 or self.lean_rate_window_seconds < 1:
+            raise ValueError("Lean rate limit and window must both be positive.")
+        if not 1 <= self.lean_timeout_seconds <= 60:
+            raise ValueError("LEAN_TIMEOUT_SECONDS must be between 1 and 60.")
         if self.upload_rate_limit < 1 or self.upload_rate_window_seconds < 1:
             raise ValueError("Upload rate limit and window must both be positive.")
         if self.generation_rate_limit < 1 or self.generation_rate_window_seconds < 1:
             raise ValueError("Generation rate limit and window must both be positive.")
         if not 1 <= self.request_body_max_bytes <= 16_384:
             raise ValueError("REQUEST_BODY_MAX_BYTES must be between 1 and 16384.")
+        if not 1_024 <= self.lean_request_max_bytes <= 131_072:
+            raise ValueError("LEAN_REQUEST_MAX_BYTES must be between 1024 and 131072.")
         if not 1_024 <= self.library_json_body_max_bytes <= 16_777_216:
             raise ValueError("LIBRARY_JSON_BODY_MAX_BYTES must be between 1024 and 16777216.")
         if not 1 <= self.max_upload_mb <= 2_048:
@@ -172,6 +185,9 @@ class Settings(BaseSettings):
                     "FILE_URL_SIGNING_SECRET must contain at least 32 characters when the database is configured."
                 )
 
+        if not self.lean_lake_executable.strip():
+            raise ValueError("LEAN_LAKE_EXECUTABLE must be a non-empty executable name or path.")
+
         if self.app_env == "production":
             origins = self.allowed_origins
             if any(not origin.startswith("https://") for origin in origins):
@@ -197,6 +213,11 @@ class Settings(BaseSettings):
     @property
     def storage_dir_path(self) -> Path:
         path = Path(self.storage_dir)
+        return path if path.is_absolute() else REPOSITORY_ROOT / path
+
+    @property
+    def lean_project_dir_path(self) -> Path:
+        path = Path(self.lean_project_dir)
         return path if path.is_absolute() else REPOSITORY_ROOT / path
 
     @property

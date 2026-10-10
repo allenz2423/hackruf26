@@ -13,8 +13,8 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api.errors import ApiError
 from app.api.class_library import router as class_library_router
+from app.api.errors import ApiError
 from app.api.routes import router
 from app.api.schemas import ErrorResponse
 from app.config import Settings, get_settings
@@ -24,6 +24,7 @@ from app.security.rate_limit import InMemoryRateLimiter
 from app.services.database import create_database_pool
 from app.services.gemini_content import GeminiContentService
 from app.services.gemini_tokens import GeminiTokenService, create_genai_client
+from app.services.lean_proofs import LeanProofService, LeanRuntimeUnavailable
 from app.services.storage import LocalPrivateStorage
 from app.services.supabase_auth import SupabaseJWTVerifier
 
@@ -51,6 +52,10 @@ def create_app(
             settings.calculator_rate_limit,
             settings.calculator_rate_window_seconds,
         )
+        application.state.lean_rate_limiter = InMemoryRateLimiter(
+            settings.lean_rate_limit,
+            settings.lean_rate_window_seconds,
+        )
         application.state.upload_rate_limiter = InMemoryRateLimiter(
             settings.upload_rate_limit,
             settings.upload_rate_window_seconds,
@@ -59,6 +64,19 @@ def create_app(
             settings.generation_rate_limit,
             settings.generation_rate_window_seconds,
         )
+
+        lean_proof_service = LeanProofService(settings)
+        if settings.lean_tool_enabled:
+            try:
+                await lean_proof_service.ensure_ready()
+            except LeanRuntimeUnavailable:
+                raise RuntimeError(
+                    "Lean proof checking is enabled but Lean/Mathlib is not installed or prepared. "
+                    "Follow the backend README setup steps or set LEAN_TOOL_ENABLED=false."
+                ) from None
+            application.state.lean_proof_service = lean_proof_service
+        else:
+            application.state.lean_proof_service = None
 
         application.state.database_pool = await create_database_pool(settings)
         application.state.private_storage = (
@@ -82,7 +100,10 @@ def create_app(
                 timeout_seconds=settings.gemini_content_timeout_seconds,
             )
             application.state.gemini_content_client = content_client
-            application.state.gemini_content_service = GeminiContentService(content_client, settings)
+            application.state.gemini_content_service = GeminiContentService(
+                content_client,
+                settings,
+            )
 
         try:
             yield
@@ -98,7 +119,8 @@ def create_app(
         title="Screen Tutor API",
         description=(
             "Authenticated class library, Gemini content processing, constrained Live token service, "
-            "and bounded symbolic calculator. Live media remains browser-to-Gemini."
+            "bounded symbolic calculator, and Lean proof checker. "
+            "Live media remains browser-to-Gemini."
         ),
         version="0.1.0",
         lifespan=lifespan,
@@ -170,6 +192,7 @@ def create_app(
     application.add_middleware(
         RequestSizeLimitMiddleware,
         capability_max_bytes=cors_settings.request_body_max_bytes,
+        lean_max_bytes=cors_settings.lean_request_max_bytes,
         library_json_max_bytes=cors_settings.library_json_body_max_bytes,
         upload_max_bytes=cors_settings.max_upload_bytes,
     )

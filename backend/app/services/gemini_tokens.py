@@ -56,7 +56,10 @@ class GeminiTokenService:
             # set fixed; callers cannot expand the session's capabilities.
             live_connect_constraints=types.LiveConnectConstraints(
                 model=self._settings.gemini_model,
-                config=live_connect_config(class_context),
+                config=live_connect_config(
+                    class_context,
+                    include_lean_tool=self._settings.lean_tool_enabled,
+                ),
             ),
         )
         provision = partial(self._client.auth_tokens.create, config=config)
