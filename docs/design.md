@@ -160,14 +160,14 @@ The tool should have no capability beyond adding or clearing this overlay. In pa
 
 ## Risks and mitigations
 
-| Risk | Mitigation |
-| --- | --- |
-| Model points to the wrong line or object | Anchor marks to a specific sent frame, keep marks temporary, and let the student dismiss them. When uncertain, answer in words instead. |
-| Screen sharing exposes unrelated private content | Let the student choose a window/display, show a persistent indicator, and provide immediate pause/end controls. |
-| Live API latency or disconnect interrupts tutoring | Use concise turns, expose connection state, and implement session resumption/recovery. |
-| Exposed client API key | Use a backend-issued ephemeral token constrained to the Live model and session configuration. |
-| Frequent frames increase cost and context usage | Respect the documented frame-rate limit, sample only when needed, and avoid resending unchanged content. |
-| Screen-capture support and behavior vary by browser | Prototype on the target desktop browser early, detect unavailable capture APIs, and offer a clear error with transcript-only fallback. |
+| Risk                                                    | Mitigation                                                                                                                                                                        |
+| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Model points to the wrong line or object                | Anchor marks to a specific sent frame, keep marks temporary, and let the student dismiss them. When uncertain, answer in words instead.                                           |
+| Screen sharing exposes unrelated private content        | Let the student choose a window/display, show a persistent indicator, and provide immediate pause/end controls.                                                                   |
+| Live API latency or disconnect interrupts tutoring      | Use concise turns, expose connection state, and implement session resumption/recovery.                                                                                            |
+| Exposed client API key                                  | Use a backend-issued ephemeral token constrained to the Live model and session configuration.                                                                                     |
+| Frequent frames increase cost and context usage         | Respect the documented frame-rate limit, sample only when needed, and avoid resending unchanged content.                                                                          |
+| Screen-capture support and behavior vary by browser     | Prototype on the target desktop browser early, detect unavailable capture APIs, and offer a clear error with transcript-only fallback.                                            |
 | A student expects marks to appear over the external app | Keep the preview and annotations visible together, and state that marks are in the web UI. A system-wide overlay would require a separate native client and is outside MVP scope. |
 
 ## Open implementation decisions
