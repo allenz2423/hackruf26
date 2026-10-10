@@ -14,7 +14,7 @@ class LiveTokenRequest(BaseModel):
 
 
 class CalculatorRequest(BaseModel):
-    """Numeric expression received from the Live client for safe evaluation."""
+    """Bounded numeric or symbolic expression from a Live calculator call."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
@@ -22,11 +22,11 @@ class CalculatorRequest(BaseModel):
 
 
 class CalculatorResponse(BaseModel):
-    """Normalized decimal result returned as text to preserve its digits."""
+    """Exact or symbolic calculator result returned as text."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    result: str = Field(min_length=1, max_length=160)
+    result: str = Field(min_length=1, max_length=512)
 
 
 class LiveTokenResponse(BaseModel):

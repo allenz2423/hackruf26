@@ -66,7 +66,8 @@ credentials are never returned. The token response is marked `no-store`.
 The fixed Live configuration enables Gemini Google Search grounding,
 `calculate_expression`, and `add_annotations`. Search runs within Gemini and
 returns its source metadata over the Live connection. The calculator function
-is executed by `POST /api/tools/calculate`; see the
+is executed by `POST /api/tools/calculate` using bounded SymPy numeric and
+symbolic math; see the
 [backend design](../docs/backend-design.md#approved-live-tools) for the request,
 response, input limits, and client function-response contract.
 

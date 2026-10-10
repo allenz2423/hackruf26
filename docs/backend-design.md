@@ -19,6 +19,7 @@ The backend also runs the **class library**: it stores each student's classes an
 - Pydantic v2 for request, settings, and response validation.
 - `pydantic-settings` for environment-based configuration, including local `.env` loading.
 - Google's `google-genai` Python SDK to provision ephemeral Live API tokens.
+- SymPy for exact numeric arithmetic and bounded symbolic simplification; user expressions are converted from a small Python AST allowlist rather than passed to SymPy's string parser.
 - Uvicorn as the ASGI server.
 - Supabase Auth and its managed PostgreSQL database. Supabase Auth owns login sessions; the app schema stores class-library data and refers to the Supabase Auth user ID for ownership. The initial schema is versioned in [the Supabase migration](../supabase/migrations/20261010120000_initial_class_library.sql); the FastAPI database connection and class-library endpoints will be added in a later implementation step.
 - Private object storage for original uploaded files (local disk for a demo; S3-compatible or Supabase/Firebase storage for deployment).
@@ -145,7 +146,7 @@ The backend creates one immutable tool set inside the server-owned `LiveConnectC
 | Tool | Type | Purpose and execution |
 | --- | --- | --- |
 | `google_search` | Gemini built-in grounding tool | Verify current or uncertain facts. Gemini performs the search and returns grounded response content and source metadata over the direct Live connection; there is no backend search proxy or search-results database. |
-| `calculate_expression` | Blocking custom function declaration | Evaluate a short numeric arithmetic expression. The Live API sends the function call to the browser; the browser calls `POST /api/tools/calculate` and returns the API result to the same Live session using the original function-call ID and name. Gemini waits for the response before continuing. |
+| `calculate_expression` | Blocking custom function declaration | Evaluate exact arithmetic or bounded symbolic expressions. The Live API sends the function call to the browser; the browser calls `POST /api/tools/calculate` and returns the API result to the same Live session using the original function-call ID and name. Gemini waits for the response before continuing. |
 | `add_annotations` | Blocking custom function declaration | Request a temporary mark over the matching shared-screen frame. This remains the only visual action. The browser validates and renders the call over its in-page preview, then replies to the matching function call. Gemini waits for the response before continuing. |
 
 The function-call declarations and their schemas are fixed by the backend. The caller cannot add tools, change descriptions or schemas, or send tool configuration with `/api/live-token`. Google Search grounding is for fact checking and current information; it does not grant general browsing, arbitrary URL fetching, or application control. The Live service performs Search internally. It does not send search queries or results through the Screen Tutor backend.
@@ -160,7 +161,7 @@ This endpoint is the executor for the `calculate_expression` Live function. The 
 
 ```json
 {
-  "expression": "(18.5 * 4) / 2"
+  "expression": "factor(x**2 - 1)"
 }
 ```
 
@@ -168,11 +169,13 @@ This endpoint is the executor for the `calculate_expression` Live function. The 
 
 ```json
 {
-  "result": "37"
+  "result": "(x - 1)*(x + 1)"
 }
 ```
 
-The result is a normalized decimal string (up to 160 characters), avoiding a conversion through JavaScript floating-point numbers. The evaluator supports numeric literals, `pi`, `e`, parentheses, unary `+`/`-`, and `+`, `-`, `*`, `/`, `//`, `%`, and integer powers using `**`. It uses decimal arithmetic at 28 significant digits; it is a numeric calculator, not a symbolic algebra system. Inputs are limited to 256 characters and 64 expression-tree nodes. Integer powers are limited to absolute exponent 100, and intermediate/final nonzero magnitudes must be between `1e-100` and `1e100`. Function calls, variables, attributes, imports, strings, and all unsupported Python syntax are rejected. The evaluator interprets an allow-listed AST and never calls Python `eval` or executes submitted code.
+The result is an exact numeric or symbolic string (up to 512 characters), so fractions and radicals do not lose precision through JavaScript floating-point conversion. Numeric literals are converted to exact SymPy rationals. The parser supports named symbols (up to 16), `pi`, `e`, parentheses, unary `+`/`-`, `+`, `-`, `*`, `/`, `//`, `%`, and powers using `**`. It supports `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `log`, `abs`, `simplify`, `factor`, and `expand`. Use `simplify(expression)`, `factor(expression)`, or `expand(expression)` for those explicit symbolic transformations; ordinary arithmetic remains exact. This provides symbolic expression manipulation, but does not solve equations or accept arbitrary SymPy/Python syntax.
+
+Inputs are limited to 256 characters, 64 AST nodes, 32 AST levels, and 16 distinct symbols. Numeric literals and all-numeric intermediate results must be finite and within magnitudes `1e-100` through `1e100`, with zero allowed; numeric exponents are limited to absolute value 100. Results are capped at 128 operations and 512 characters. Function calls are accepted only when the function name is in the explicit allowlist, with no keyword arguments. Attribute access, imports, strings, containers, and all other Python syntax are rejected. The service constructs SymPy expressions from the validated AST; it does not pass user strings to SymPy's `parse_expr` or execute submitted code.
 
 The request uses the same configured app authorization gate and allow-listed Origin check as token issuance. In the current token-service prototype, that is the optional development gate and the configured production demo gate; the planned Supabase integration will replace that gate with verified user authentication. It has a separate per-IP, per-process rate limit, with defaults in `.env.example`. The response never echoes the expression; the endpoint does not log or store expressions or results.
 
@@ -180,7 +183,7 @@ The request uses the same configured app authorization gate and allow-listed Ori
 
 | Status | Meaning |
 | --- | --- |
-| `400` | Invalid syntax, unsupported expression, division by zero, or a numeric limit was exceeded |
+| `400` | Invalid syntax, unsupported expression, division by zero, or an expression limit was exceeded |
 | `401` | App authentication required or expired |
 | `403` | Request origin or policy rejected |
 | `413` | Request body exceeds the configured limit (default 1,024 bytes) |
@@ -313,7 +316,8 @@ Do not put the Gemini API key in frontend config, rendered HTML, client-side env
 - Invalid requests cannot choose another model or add tools.
 - Every Live token uses the server-approved Google Search, calculator, and annotation tool set; the caller cannot expand it.
 - Google Search grounding is available for fact checking, and the client can display returned citation metadata without routing search results through the backend.
-- Calculator expressions are evaluated by a bounded numeric-only parser; invalid or over-limit expressions return sanitized errors and submitted expressions are not logged or stored.
+- Calculator expressions are parsed with a bounded AST allowlist into SymPy; exact numeric and symbolic results are supported without evaluating user-supplied code.
+- Invalid or over-limit calculator expressions return sanitized errors, and submitted expressions are not logged or stored.
 - Missing configuration, Google API failure, rate limiting, and origin rejection return stable, sanitized errors.
 - Screen/audio streams never transit the backend and are never stored by it.
 - Same-origin static frontend and API routes work over HTTPS in the deployed environment.
@@ -333,6 +337,8 @@ Do not put the Gemini API key in frontend config, rendered HTML, client-side env
 - [Live API session management](https://ai.google.dev/gemini-api/docs/live-api/session-management)
 - [FastAPI](https://fastapi.tiangolo.com/)
 - [Pydantic](https://docs.pydantic.dev/latest/)
+- [SymPy parsing](https://docs.sympy.org/latest/modules/parsing.html)
+- [SymPy simplification](https://docs.sympy.org/latest/tutorials/intro-tutorial/simplification.html)
 - [Google Gen AI Python SDK](https://github.com/googleapis/python-genai)
 - [Supabase Auth sessions](https://supabase.com/docs/guides/auth/sessions)
 - [Supabase JWT verification](https://supabase.com/docs/guides/auth/jwts)

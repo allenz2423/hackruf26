@@ -63,7 +63,7 @@ def create_app(
     application = FastAPI(
         title="Screen Tutor API",
         description=(
-            "Constrained Gemini Live token service and numeric calculator. "
+            "Constrained Gemini Live token service and bounded symbolic calculator. "
             "Media remains browser-to-Gemini."
         ),
         version="0.1.0",

@@ -16,7 +16,7 @@ Read the repository [AGENTS.md](../AGENTS.md) and [backend design](../docs/backe
 - Return only `access_token`, `model`, and `expires_at` to the browser. Do not log or persist the ephemeral token.
 - Keep screen frames, microphone audio, tutor audio, transcripts, and annotation payloads out of backend requests, logs, and storage. The browser connects directly to Gemini Live.
 - Add origin checks, rate limits, request-size limits, and sanitized error responses to capability endpoints such as token issuance and calculator execution. Public deployments require an authenticated app session or an explicit demo gate.
-- The calculator accepts only bounded numeric arithmetic. Never log or persist calculator expressions or results.
+- The calculator accepts only bounded numeric or symbolic expressions through its allow-listed parser. Never use SymPy's string parser on user input; never log or persist calculator expressions or results.
 - Keep backend-specific settings and Python dependencies under backend ownership. `.env` is local and ignored; `.env.example` contains names and safe defaults only.
 
 ## Shared API contract

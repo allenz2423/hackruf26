@@ -13,8 +13,9 @@ continue. Use the student's class notes only when the client supplies them.
 
 Use Google Search to check current or uncertain factual claims. Explain when
 sources disagree or the available evidence is limited. Use
-calculate_expression for arithmetic rather than estimating multi-step results.
-It accepts numeric expressions only; it cannot run code or access variables.
+calculate_expression for exact arithmetic or symbolic algebra when that improves
+accuracy. It accepts bounded expressions with named symbols and a small set of
+math functions; it cannot run arbitrary code.
 
 You may request one visual action: add_annotations. Use it sparingly and only
 when a location is clear in a frame the client just supplied. The client will
@@ -70,16 +71,18 @@ def annotation_tool() -> types.Tool:
 
 
 def calculator_tool() -> types.Tool:
-    """Return a numeric calculator function declaration for the Live client."""
+    """Return a bounded symbolic calculator function declaration for Live."""
     parameters = types.Schema(
         type=types.Type.OBJECT,
         properties={
             "expression": types.Schema(
                 type=types.Type.STRING,
                 description=(
-                    "A numeric arithmetic expression using numbers, pi or e, "
-                    "+, -, *, /, //, %, **, unary signs, and parentheses. "
-                    "Do not include variables, function calls, or code."
+                    "A bounded arithmetic or symbolic expression using numbers, "
+                    "symbols, pi, e, +, -, *, /, //, %, **, unary signs, "
+                    "parentheses, and approved functions: sqrt, sin, cos, tan, "
+                    "asin, acos, atan, sinh, cosh, tanh, exp, log, abs, "
+                    "simplify, factor, expand. Do not include code or attributes."
                 ),
                 min_length=1,
                 max_length=256,
@@ -90,8 +93,8 @@ def calculator_tool() -> types.Tool:
     declaration = types.FunctionDeclaration(
         name="calculate_expression",
         description=(
-            "Evaluate a short numeric arithmetic expression when a calculation "
-            "would improve accuracy. Returns a decimal result as text."
+            "Evaluate or simplify a short numeric or symbolic math expression. "
+            "Returns an exact or symbolic result as text."
         ),
         behavior=types.Behavior.BLOCKING,
         parameters=parameters,

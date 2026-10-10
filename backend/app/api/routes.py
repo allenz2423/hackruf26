@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Body, Request, Response
@@ -103,16 +104,16 @@ async def calculate_expression(
     response: Response,
     payload: CalculatorRequest,
 ) -> CalculatorResponse:
-    """Evaluate bounded arithmetic for a Live function call; do not log inputs."""
+    """Evaluate bounded symbolic math for a Live function call; do not log inputs."""
     await enforce_calculator_request_policy(request, _settings(request))
     response.headers["Cache-Control"] = "no-store, private"
     response.headers["Pragma"] = "no-cache"
     try:
-        result = evaluate_expression(payload.expression)
+        result = await asyncio.to_thread(evaluate_expression, payload.expression)
     except CalculatorInputError:
         raise ApiError(
             400,
             "invalid_expression",
-            "The calculator accepts only bounded numeric arithmetic expressions.",
+            "The calculator accepts only bounded numeric or symbolic math expressions.",
         ) from None
     return CalculatorResponse(result=result)
