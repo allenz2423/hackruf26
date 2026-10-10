@@ -1,0 +1,2 @@
+# Install the backend project and its local development tools from pyproject.toml.
+-e .[dev]

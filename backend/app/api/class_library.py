@@ -8,9 +8,9 @@ import logging
 import re
 import unicodedata
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import quote
 from uuid import UUID
 
@@ -25,6 +25,8 @@ from app.api.dependencies import (
 )
 from app.api.errors import ApiError
 from app.api.schemas import (
+    AssessmentDetail,
+    AssessmentSummary,
     AttemptResult,
     AttemptSubmission,
     ClassCreate,
@@ -67,6 +69,7 @@ FILE_TYPES: dict[str, tuple[str, str]] = {
 }
 LECTURE_KINDS = {"lecture_video", "lecture_audio"}
 NOTE_KINDS = {"notes", "document", "syllabus", "slides", "lecture_video", "lecture_audio"}
+ASSESSMENT_EXTENSIONS = {".pdf", ".docx", ".pptx", ".txt", ".md", ".png", ".jpg", ".jpeg"}
 
 
 async def _authorize(request: Request) -> tuple[UUID, asyncpg.Pool, Settings]:
@@ -121,6 +124,44 @@ def _upload_summary(row: asyncpg.Record) -> UploadSummary:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _assessment_summary(row: asyncpg.Record) -> AssessmentSummary:
+    questions = json_value(row["questions"], [])
+    question_count = len(questions) if isinstance(questions, list) else 0
+    return AssessmentSummary(
+        id=row["id"],
+        class_id=row["class_id"],
+        note_id=row["note_id"],
+        title=row["title"],
+        original_filename=row["original_filename"],
+        status=row["processing_status"],
+        has_student_responses=row["has_student_responses"],
+        question_count=question_count,
+        grading_mode=row["grading_mode"],
+        score_percent=float(row["score_percent"]) if row["score_percent"] is not None else None,
+        grade_confidence=(
+            float(row["grade_confidence"]) if row["grade_confidence"] is not None else None
+        ),
+        failure_code=row["failure_code"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        processed_at=row["processed_at"],
+    )
+
+
+async def _reset_assessment_for_processing(
+    connection: asyncpg.Connection, note_id: UUID
+) -> UUID | None:
+    row = await connection.fetchrow(
+        "UPDATE public.uploaded_assessments SET processing_status = 'processing', "
+        "has_student_responses = false, questions = '[]'::jsonb, grading_mode = 'not_graded', "
+        "score_percent = NULL, grading_result = NULL, grade_confidence = NULL, "
+        "failure_code = NULL, processed_at = NULL, graded_at = NULL "
+        "WHERE note_id = $1 RETURNING id",
+        note_id,
+    )
+    return row["id"] if row is not None else None
 
 
 def _material_item_count(content: object, kind: str, fallback: int = 0) -> int:
@@ -393,6 +434,169 @@ async def create_upload(
     return _upload_summary(row)
 
 
+@router.post("/api/classes/{class_id}/assessments", status_code=202)
+async def create_assessment(
+    class_id: UUID,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    file: Annotated[UploadFile | None, File()] = None,
+    title: Annotated[str | None, Form()] = None,
+) -> AssessmentSummary:
+    """Store one private existing test and queue extraction/grading."""
+    user_id, pool, settings = await _authorize(request)
+    if getattr(request.app.state, "gemini_content_service", None) is None:
+        raise ApiError(
+            503,
+            "content_processing_unavailable",
+            "Assessment processing is unavailable.",
+        )
+    await _owned_class(pool, class_id, user_id)
+    await _rate_limit(request, "upload_rate_limiter", user_id)
+    await _rate_limit(request, "generation_rate_limiter", user_id)
+    upload_count = await pool.fetchval(
+        "SELECT count(*) FROM public.course_notes WHERE class_id = $1",
+        class_id,
+    )
+    if upload_count >= settings.max_uploads_per_class:
+        raise ApiError(
+            409,
+            "class_upload_limit_reached",
+            "This class has reached its upload limit.",
+        )
+    if file is None:
+        raise ApiError(400, "invalid_assessment_upload", "Send one existing test file.")
+
+    filename = Path((file.filename or "").replace("\\", "/")).name.strip()
+    extension = Path(filename).suffix.casefold()
+    if not filename or extension not in ASSESSMENT_EXTENSIONS:
+        await file.close()
+        raise ApiError(
+            415,
+            "unsupported_assessment_file_type",
+            "Existing tests must be PDF, DOCX, PPTX, TXT, Markdown, PNG, or JPEG files.",
+        )
+    mime_type, note_kind = FILE_TYPES[extension]
+    note_title = (title if title is not None else filename).strip()
+    if not note_title or len(note_title) > 255:
+        await file.close()
+        raise ApiError(400, "invalid_upload_title", "Enter a title of 1 to 255 characters.")
+
+    storage = private_storage(request)
+    try:
+        storage_key, file_size = await storage.save_upload(file, settings.max_upload_bytes)
+    except UploadTooLarge:
+        raise ApiError(
+            413,
+            "upload_too_large",
+            "This file exceeds the configured upload limit.",
+        ) from None
+    except ValueError:
+        raise ApiError(400, "invalid_upload", "The uploaded file is empty or invalid.") from None
+    if not _validate_file_signature(storage.path_for(storage_key), extension):
+        storage.delete(storage_key)
+        raise ApiError(
+            415,
+            "invalid_file_content",
+            "The file content does not match its file type.",
+        )
+
+    try:
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                note = await connection.fetchrow(
+                    "INSERT INTO public.course_notes "
+                    "(class_id, title, kind, source_type, original_filename, mime_type, "
+                    "storage_key, file_size_bytes, status, processing_progress) "
+                    "VALUES ($1, $2, $3::course_note_kind, 'file', $4, $5, $6, $7, "
+                    "'processing', 0) "
+                    "RETURNING id",
+                    class_id,
+                    note_title,
+                    note_kind,
+                    filename,
+                    mime_type,
+                    storage_key,
+                    file_size,
+                )
+                assessment = await connection.fetchrow(
+                    "INSERT INTO public.uploaded_assessments (class_id, note_id) "
+                    "VALUES ($1, $2) RETURNING *",
+                    class_id,
+                    note["id"],
+                )
+    except Exception:
+        storage.delete(storage_key)
+        raise
+
+    background_tasks.add_task(_process_assessment_job, request.app, assessment["id"])
+    return AssessmentSummary(
+        id=assessment["id"],
+        class_id=assessment["class_id"],
+        note_id=assessment["note_id"],
+        title=note_title,
+        original_filename=filename,
+        status="processing",
+        has_student_responses=False,
+        question_count=0,
+        grading_mode="not_graded",
+        score_percent=None,
+        grade_confidence=None,
+        failure_code=None,
+        created_at=assessment["created_at"],
+        updated_at=assessment["updated_at"],
+        processed_at=None,
+    )
+
+
+@router.get("/api/classes/{class_id}/assessments")
+async def list_assessments(
+    class_id: UUID, request: Request
+) -> dict[str, list[AssessmentSummary]]:
+    user_id, pool, _ = await _authorize(request)
+    await _owned_class(pool, class_id, user_id)
+    rows = await pool.fetch(
+        "SELECT a.*, n.title, n.original_filename FROM public.uploaded_assessments a "
+        "JOIN public.course_notes n ON n.id = a.note_id "
+        "WHERE a.class_id = $1 ORDER BY a.created_at DESC, a.id",
+        class_id,
+    )
+    return {"items": [_assessment_summary(row) for row in rows]}
+
+
+@router.get("/api/assessments/{assessment_id}")
+async def get_assessment(assessment_id: UUID, request: Request) -> AssessmentDetail:
+    user_id, pool, _ = await _authorize(request)
+    row = await pool.fetchrow(
+        "SELECT a.*, n.title, n.original_filename, n.storage_key "
+        "FROM public.uploaded_assessments a "
+        "JOIN public.course_notes n ON n.id = a.note_id AND n.class_id = a.class_id "
+        "JOIN public.course_classes c ON c.id = a.class_id "
+        "WHERE a.id = $1 AND c.owner_id = $2",
+        assessment_id,
+        user_id,
+    )
+    if row is None:
+        raise ApiError(404, "not_found", "The requested resource was not found.")
+
+    questions = json_value(row["questions"], [])
+    if not isinstance(questions, list):
+        questions = []
+    grading_result = json_value(row["grading_result"])
+    if not isinstance(grading_result, dict):
+        grading_result = None
+    file_url, expires = private_storage(request).signed_url(
+        str(request.base_url).rstrip("/"), row["note_id"]
+    )
+    return AssessmentDetail(
+        **_assessment_summary(row).model_dump(),
+        questions=questions,
+        grading_result=grading_result,
+        review_reason=(grading_result or {}).get("review_reason"),
+        file_url=file_url,
+        file_url_expires_at=datetime.fromtimestamp(expires, UTC),
+    )
+
+
 @router.get("/api/classes/{class_id}/uploads")
 async def list_uploads(class_id: UUID, request: Request) -> dict[str, list[UploadSummary]]:
     user_id, pool, _ = await _authorize(request)
@@ -424,7 +628,7 @@ async def get_upload(upload_id: UUID, request: Request) -> UploadDetail:
     if row["storage_key"]:
         storage = private_storage(request)
         file_url, expires = storage.signed_url(str(request.base_url).rstrip("/"), upload_id)
-        expires_at = datetime.fromtimestamp(expires, timezone.utc)
+        expires_at = datetime.fromtimestamp(expires, UTC)
     return UploadDetail(
         **_upload_summary(row).model_dump(),
         extracted_text=row["extracted_text"],
@@ -510,6 +714,7 @@ async def patch_upload(
             cast = "::course_note_kind" if key == "kind" else ""
             fields.append(f"{key} = ${len(values)}{cast}")
     reprocess = "kind" in patch or "extracted_text" in patch
+    assessment_id: UUID | None = None
     if reprocess and getattr(request.app.state, "gemini_content_service", None) is None:
         raise ApiError(503, "content_processing_unavailable", "Course material processing is unavailable.")
     if reprocess:
@@ -530,13 +735,22 @@ async def patch_upload(
                     "SELECT material_id FROM public.study_material_sources WHERE note_id = $1)",
                     upload_id,
                 )
+                assessment_id = await _reset_assessment_for_processing(connection, upload_id)
     if reprocess:
-        background_tasks.add_task(
-            _reprocess_upload_job,
-            request.app,
-            upload_id,
-            "extracted_text" in patch,
-        )
+        if assessment_id is not None:
+            background_tasks.add_task(
+                _process_assessment_job,
+                request.app,
+                assessment_id,
+                "extracted_text" in patch,
+            )
+        else:
+            background_tasks.add_task(
+                _reprocess_upload_job,
+                request.app,
+                upload_id,
+                "extracted_text" in patch,
+            )
     return _upload_summary(row)
 
 
@@ -564,25 +778,34 @@ async def retry_upload(upload_id: UUID, request: Request, background_tasks: Back
     user_id, pool, _ = await _authorize(request)
     if getattr(request.app.state, "gemini_content_service", None) is None:
         raise ApiError(503, "content_processing_unavailable", "Course material processing is unavailable.")
-    row = await pool.fetchrow(
-        "UPDATE public.course_notes n SET status = 'processing', processing_progress = 0, "
-        "failure_code = NULL, updated_at = now() FROM public.course_classes c "
-        "WHERE n.class_id = c.id AND n.id = $1 AND c.owner_id = $2 AND n.status = 'failed' "
-        "RETURNING n.*",
-        upload_id,
-        user_id,
-    )
-    if row is None:
-        current = await pool.fetchrow(
-            "SELECT n.status FROM public.course_notes n JOIN public.course_classes c ON c.id = n.class_id "
-            "WHERE n.id = $1 AND c.owner_id = $2",
-            upload_id,
-            user_id,
-        )
-        if current is None:
-            raise ApiError(404, "not_found", "The requested resource was not found.")
-        raise ApiError(409, "upload_not_failed", "Only failed uploads can be retried.")
-    background_tasks.add_task(_process_upload_job, request.app, upload_id)
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            current = await connection.fetchrow(
+                "SELECT n.status, a.id AS assessment_id FROM public.course_notes n "
+                "JOIN public.course_classes c ON c.id = n.class_id "
+                "LEFT JOIN public.uploaded_assessments a ON a.note_id = n.id "
+                "WHERE n.id = $1 AND c.owner_id = $2 FOR UPDATE OF n",
+                upload_id,
+                user_id,
+            )
+            if current is None:
+                raise ApiError(404, "not_found", "The requested resource was not found.")
+            if current["status"] != "failed":
+                raise ApiError(409, "upload_not_failed", "Only failed uploads can be retried.")
+            row = await connection.fetchrow(
+                "UPDATE public.course_notes SET status = 'processing', processing_progress = 0, "
+                "failure_code = NULL, processed_at = NULL WHERE id = $1 RETURNING *",
+                upload_id,
+            )
+            assessment_id = (
+                await _reset_assessment_for_processing(connection, upload_id)
+                if current["assessment_id"] is not None
+                else None
+            )
+    if assessment_id is not None:
+        background_tasks.add_task(_process_assessment_job, request.app, assessment_id)
+    else:
+        background_tasks.add_task(_process_upload_job, request.app, upload_id)
     return _upload_summary(row)
 
 
@@ -634,6 +857,149 @@ async def _process_upload_job(application: Any, upload_id: UUID) -> None:
             )
         except Exception:
             logger.error("upload_failure_state_update_failed upload_id=%s", upload_id)
+
+
+async def _process_assessment_job(
+    application: Any, assessment_id: UUID, use_extracted_text: bool = False
+) -> None:
+    """Extract and grade one imported test, keeping its upload and assessment states aligned."""
+    pool: asyncpg.Pool | None = getattr(application.state, "database_pool", None)
+    content_service: GeminiContentService | None = getattr(
+        application.state, "gemini_content_service", None
+    )
+    storage: LocalPrivateStorage | None = getattr(application.state, "private_storage", None)
+    if pool is None or content_service is None or storage is None:
+        return
+
+    active_updated_at = None
+    note_id = None
+    try:
+        row = await pool.fetchrow(
+            "SELECT a.id AS assessment_id, a.class_id, a.note_id, n.kind, n.storage_key, "
+            "n.mime_type, n.extracted_text, n.updated_at AS note_updated_at "
+            "FROM public.uploaded_assessments a "
+            "JOIN public.course_notes n ON n.id = a.note_id AND n.class_id = a.class_id "
+            "WHERE a.id = $1 AND a.processing_status = 'processing' AND n.status = 'processing'",
+            assessment_id,
+        )
+        if row is None:
+            return
+        note_id = row["note_id"]
+        active_updated_at = row["note_updated_at"]
+        progress = await pool.fetchrow(
+            "UPDATE public.course_notes SET processing_progress = 10 "
+            "WHERE id = $1 AND status = 'processing' AND updated_at = $2 RETURNING updated_at",
+            note_id,
+            active_updated_at,
+        )
+        if progress is None:
+            return
+        active_updated_at = progress["updated_at"]
+
+        if use_extracted_text and row["extracted_text"]:
+            extracted = await asyncio.to_thread(
+                content_service.process_text, row["extracted_text"], row["kind"]
+            )
+        else:
+            extracted = await asyncio.to_thread(
+                content_service.process_upload,
+                storage.path_for(row["storage_key"]),
+                row["kind"],
+                row["mime_type"],
+            )
+        progress = await pool.fetchrow(
+            "UPDATE public.course_notes SET processing_progress = 55 "
+            "WHERE id = $1 AND status = 'processing' AND updated_at = $2 RETURNING updated_at",
+            note_id,
+            active_updated_at,
+        )
+        if progress is None:
+            return
+        active_updated_at = progress["updated_at"]
+
+        class_note_rows = await pool.fetch(
+            "SELECT n.id, n.title, n.extracted_text, n.summary FROM public.course_notes n "
+            "WHERE n.class_id = $1 AND n.status = 'ready' "
+            "AND (n.extracted_text IS NOT NULL OR n.summary IS NOT NULL) "
+            "AND NOT EXISTS (SELECT 1 FROM public.uploaded_assessments a WHERE a.note_id = n.id) "
+            "ORDER BY n.updated_at DESC, n.id",
+            row["class_id"],
+        )
+        analysis = await asyncio.to_thread(
+            content_service.process_assessment,
+            extracted["extracted_text"],
+            [dict(note) for note in class_note_rows],
+        )
+
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                saved_note = await connection.fetchrow(
+                    "UPDATE public.course_notes SET extracted_text = $2, summary = $3, "
+                    "key_topics = $4::jsonb, transcript_segments = $5::jsonb, "
+                    "duration_seconds = $6, syllabus_outline = $7::jsonb, status = 'ready', "
+                    "processing_progress = 100, failure_code = NULL, processed_at = now() "
+                    "WHERE id = $1 AND status = 'processing' AND updated_at = $8 RETURNING id",
+                    note_id,
+                    extracted["extracted_text"],
+                    extracted["summary"],
+                    json.dumps(extracted["key_topics"]),
+                    json.dumps(extracted["transcript_segments"]),
+                    extracted["duration_seconds"],
+                    json.dumps(extracted["syllabus_outline"])
+                    if extracted["syllabus_outline"] is not None
+                    else None,
+                    active_updated_at,
+                )
+                if saved_note is None:
+                    return
+                await connection.execute(
+                    "UPDATE public.uploaded_assessments SET processing_status = $2, "
+                    "has_student_responses = $3, questions = $4::jsonb, grading_mode = $5, "
+                    "score_percent = $6, grading_result = $7::jsonb, grade_confidence = $8, "
+                    "failure_code = NULL, processed_at = now(), "
+                    "graded_at = CASE WHEN $5 IN ('answer_key', 'class_notes_estimated') "
+                    "THEN now() ELSE NULL END WHERE id = $1 AND processing_status = 'processing'",
+                    assessment_id,
+                    analysis["processing_status"],
+                    analysis["has_student_responses"],
+                    json.dumps(analysis["questions"]),
+                    analysis["grading_mode"],
+                    analysis["score_percent"],
+                    json.dumps(analysis["grading_result"])
+                    if analysis["grading_result"] is not None
+                    else None,
+                    analysis["grade_confidence"],
+                )
+    except Exception as exc:
+        logger.error(
+            "assessment_processing_failed assessment_id=%s category=%s",
+            assessment_id,
+            type(exc).__name__,
+        )
+        if note_id is None:
+            return
+        try:
+            async with pool.acquire() as connection:
+                async with connection.transaction():
+                    failed_note = await connection.fetchrow(
+                        "UPDATE public.course_notes SET status = 'failed', "
+                        "failure_code = 'processing_failed' WHERE id = $1 "
+                        "AND status = 'processing' "
+                        "AND updated_at = $2 RETURNING id",
+                        note_id,
+                        active_updated_at,
+                    )
+                    if failed_note is not None:
+                        await connection.execute(
+                            "UPDATE public.uploaded_assessments SET processing_status = 'failed', "
+                            "score_percent = NULL, grade_confidence = NULL, grading_result = NULL, "
+                            "failure_code = 'processing_failed', processed_at = NULL, "
+                            "graded_at = NULL "
+                            "WHERE id = $1 AND processing_status = 'processing'",
+                            assessment_id,
+                        )
+        except Exception:
+            logger.error("assessment_failure_state_update_failed assessment_id=%s", assessment_id)
 
 
 async def _reprocess_upload_job(application: Any, upload_id: UUID, use_extracted_text: bool) -> None:
