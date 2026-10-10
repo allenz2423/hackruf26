@@ -180,7 +180,12 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
       <form id="assessment-form" class="assessment-form">
         ${material.questions.map((question, index) => `
           <fieldset class="practice-question">
-            <legend><span class="question-number">${index + 1}</span>${escapeHtml(question.prompt)}</legend>
+            <legend>
+              <span class="practice-question-heading">
+                <span class="question-number">${index + 1}</span>
+                <span class="practice-prompt">${escapeHtml(question.prompt)}</span>
+              </span>
+            </legend>
             <div class="practice-options">
               ${question.choices.map((choice, choiceIndex) => `
                 <label class="practice-option">
