@@ -1,4 +1,4 @@
-"""Server-owned Gemini Live configuration and annotation tool declaration."""
+"""Server-owned Gemini Live configuration and approved tutor tools."""
 
 from __future__ import annotations
 
@@ -11,6 +11,11 @@ Explain only what you can see or what the student tells you, and say when
 visual text is unclear. Keep spoken turns brief and invite the student to
 continue. Use the student's class notes only when the client supplies them.
 
+Use Google Search to check current or uncertain factual claims. Explain when
+sources disagree or the available evidence is limited. Use
+calculate_expression for arithmetic rather than estimating multi-step results.
+It accepts numeric expressions only; it cannot run code or access variables.
+
 You may request one visual action: add_annotations. Use it sparingly and only
 when a location is clear in a frame the client just supplied. The client will
 validate the frame ID and geometry. If location is uncertain, explain in words
@@ -20,7 +25,7 @@ or control of the student's computer or applications.
 
 
 def annotation_tool() -> types.Tool:
-    """Return the single supported model tool, with a narrow JSON schema."""
+    """Return the approved visual tool with a narrow JSON schema."""
     number = types.Schema(type=types.Type.NUMBER, minimum=0, maximum=1)
     region = types.Schema(
         type=types.Type.OBJECT,
@@ -58,9 +63,45 @@ def annotation_tool() -> types.Tool:
             "Request a small number of temporary marks over the exact recently-sent screen frame. "
             "Use normalized coordinates from 0 to 1 and a short explanatory label."
         ),
+        behavior=types.Behavior.BLOCKING,
         parameters=parameters,
     )
     return types.Tool(function_declarations=[declaration])
+
+
+def calculator_tool() -> types.Tool:
+    """Return a numeric calculator function declaration for the Live client."""
+    parameters = types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "expression": types.Schema(
+                type=types.Type.STRING,
+                description=(
+                    "A numeric arithmetic expression using numbers, pi or e, "
+                    "+, -, *, /, //, %, **, unary signs, and parentheses. "
+                    "Do not include variables, function calls, or code."
+                ),
+                min_length=1,
+                max_length=256,
+            )
+        },
+        required=["expression"],
+    )
+    declaration = types.FunctionDeclaration(
+        name="calculate_expression",
+        description=(
+            "Evaluate a short numeric arithmetic expression when a calculation "
+            "would improve accuracy. Returns a decimal result as text."
+        ),
+        behavior=types.Behavior.BLOCKING,
+        parameters=parameters,
+    )
+    return types.Tool(function_declarations=[declaration])
+
+
+def google_search_tool() -> types.Tool:
+    """Return Gemini's built-in web-grounding tool."""
+    return types.Tool(google_search=types.GoogleSearch())
 
 
 def live_connect_config() -> types.LiveConnectConfig:
@@ -72,5 +113,5 @@ def live_connect_config() -> types.LiveConnectConfig:
         response_modalities=[types.Modality.AUDIO],
         output_audio_transcription=types.AudioTranscriptionConfig(),
         session_resumption=types.SessionResumptionConfig(),
-        tools=[annotation_tool()],
+        tools=[google_search_tool(), calculator_tool(), annotation_tool()],
     )

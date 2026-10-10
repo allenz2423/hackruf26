@@ -1,4 +1,4 @@
-"""Request policy dependencies for token issuance."""
+"""Shared origin, authentication, and rate-limit request policies."""
 
 from __future__ import annotations
 
@@ -37,8 +37,8 @@ def _client_identity(request: Request) -> str:
     return request.client.host
 
 
-async def enforce_token_request_policy(request: Request, settings: Settings) -> None:
-    """Require an allow-listed browser origin, configured gate, and rate budget."""
+async def enforce_app_request_policy(request: Request, settings: Settings) -> None:
+    """Require an allow-listed browser origin and the configured app gate."""
     request_id = getattr(request.state, "request_id", "unknown")
     origin_header = request.headers.get("origin")
     origin = _normalized_origin(origin_header) if origin_header else None
@@ -65,6 +65,11 @@ async def enforce_token_request_policy(request: Request, settings: Settings) -> 
             )
             raise ApiError(401, "authentication_required", "A valid app session is required.")
 
+
+async def enforce_token_request_policy(request: Request, settings: Settings) -> None:
+    """Apply app access checks and the Live token issuance rate budget."""
+    await enforce_app_request_policy(request, settings)
+    request_id = getattr(request.state, "request_id", "unknown")
     limiter: InMemoryRateLimiter = request.app.state.rate_limiter
     retry_after = await limiter.check(_client_identity(request))
     if retry_after is not None:
@@ -76,5 +81,24 @@ async def enforce_token_request_policy(request: Request, settings: Settings) -> 
             429,
             "rate_limited",
             "Too many token requests. Please wait before trying again.",
+            retry_after_seconds=retry_after,
+        )
+
+
+async def enforce_calculator_request_policy(request: Request, settings: Settings) -> None:
+    """Apply app access checks and the calculator request rate budget."""
+    await enforce_app_request_policy(request, settings)
+    limiter: InMemoryRateLimiter = request.app.state.calculator_rate_limiter
+    retry_after = await limiter.check(_client_identity(request))
+    if retry_after is not None:
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.warning(
+            "request_rejected request_id=%s category=calculator_rate_limited",
+            request_id,
+        )
+        raise ApiError(
+            429,
+            "calculator_rate_limited",
+            "Too many calculator requests. Please wait before trying again.",
             retry_after_seconds=retry_after,
         )

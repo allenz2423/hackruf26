@@ -13,6 +13,22 @@ class LiveTokenRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class CalculatorRequest(BaseModel):
+    """Numeric expression received from the Live client for safe evaluation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    expression: str = Field(min_length=1, max_length=256, strict=True)
+
+
+class CalculatorResponse(BaseModel):
+    """Normalized decimal result returned as text to preserve its digits."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    result: str = Field(min_length=1, max_length=160)
+
+
 class LiveTokenResponse(BaseModel):
     """Short-lived bearer credential returned to the requesting browser."""
 

@@ -61,6 +61,8 @@ class Settings(BaseSettings):
 
     token_rate_limit: int = 5
     token_rate_window_seconds: int = 60
+    calculator_rate_limit: int = 30
+    calculator_rate_window_seconds: int = 60
     request_body_max_bytes: int = 1024
     frontend_dist: str = "frontend/dist"
 
@@ -92,6 +94,8 @@ class Settings(BaseSettings):
             raise ValueError("NEW_SESSION_EXPIRATION_SECONDS must be between 10 and 120.")
         if self.token_rate_limit < 1 or self.token_rate_window_seconds < 1:
             raise ValueError("Token rate limit and window must both be positive.")
+        if self.calculator_rate_limit < 1 or self.calculator_rate_window_seconds < 1:
+            raise ValueError("Calculator rate limit and window must both be positive.")
         if not 1 <= self.request_body_max_bytes <= 16_384:
             raise ValueError("REQUEST_BODY_MAX_BYTES must be between 1 and 16384.")
 

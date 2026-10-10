@@ -6,7 +6,7 @@
 
 ## Purpose and scope
 
-The backend exists to protect the long-lived Gemini API key and issue short-lived Gemini Live credentials to the browser. The browser connects directly to the Gemini Live API so real-time screen and audio streams do not pass through or get stored by Screen Tutor's server.
+The backend exists to protect the long-lived Gemini API key and issue short-lived Gemini Live credentials to the browser. The browser connects directly to the Gemini Live API so real-time screen and audio streams do not pass through or get stored by Screen Tutor's server. The server fixes the Live model's approved tool set and provides the bounded calculator function endpoint; Google Search runs as Gemini's built-in grounding tool.
 
 For the MVP, the backend does not receive screen frames, microphone audio, tutor audio, transcripts, or annotation data. It does not proxy the Live WebSocket.
 
@@ -59,7 +59,8 @@ The frontend can be plain HTML/CSS/JS bundled by Vite. In development, Vite prox
 - Load and validate `GEMINI_API_KEY` and the server-selected `GEMINI_MODEL`.
 - Verify Supabase Auth access tokens and derive the caller's user ID from verified claims.
 - Create ephemeral tokens with short session-start and token expiration windows.
-- Lock token constraints to the approved Live model and the app's fixed session configuration/tool declarations where supported by the API.
+- Lock token constraints to the approved Live model and the app's fixed session configuration, Google Search grounding, and function declarations where supported by the API.
+- Execute only the bounded `calculate_expression` function through the calculator endpoint; the browser handles Live tool calls and annotation rendering.
 - Apply request-size limits, origin checks, rate limits, and sanitized errors.
 - Serve the frontend and a health endpoint, if the selected deployment uses a same-origin host.
 - Supabase Auth sign-in/session management, and scoping every class, upload, and study material to the verified owner's Supabase user ID.
@@ -93,7 +94,10 @@ sequenceDiagram
     App-->>Browser: Validated short-lived token response
     Browser->>Live: Connect using token and fixed Live config
     Browser->>Live: Send frames, optional mic audio, and questions
-    Live-->>Browser: Audio, transcript, and annotation function calls
+    Live-->>Browser: Audio, transcript, search grounding, and function calls
+    Browser->>App: POST /api/tools/calculate for calculator function calls only
+    App-->>Browser: Bounded numeric result
+    Browser->>Live: Function response with matching call ID
 ```
 
 The server token request occurs after the student begins the session. It is independent of the media stream. The browser sends media directly to Gemini and handles all Live events.
@@ -133,6 +137,84 @@ Requires a valid Supabase access token in the `Authorization: Bearer <access-tok
 | `429` | Token issuance rate limit reached |
 | `503` | Server is missing Gemini configuration |
 | `502` | Gemini token provisioning failed |
+
+### Approved Live tools
+
+The backend creates one immutable tool set inside the server-owned `LiveConnectConfig` and locks it into the ephemeral token where supported:
+
+| Tool | Type | Purpose and execution |
+| --- | --- | --- |
+| `google_search` | Gemini built-in grounding tool | Verify current or uncertain facts. Gemini performs the search and returns grounded response content and source metadata over the direct Live connection; there is no backend search proxy or search-results database. |
+| `calculate_expression` | Blocking custom function declaration | Evaluate a short numeric arithmetic expression. The Live API sends the function call to the browser; the browser calls `POST /api/tools/calculate` and returns the API result to the same Live session using the original function-call ID and name. Gemini waits for the response before continuing. |
+| `add_annotations` | Blocking custom function declaration | Request a temporary mark over the matching shared-screen frame. This remains the only visual action. The browser validates and renders the call over its in-page preview, then replies to the matching function call. Gemini waits for the response before continuing. |
+
+The function-call declarations and their schemas are fixed by the backend. The caller cannot add tools, change descriptions or schemas, or send tool configuration with `/api/live-token`. Google Search grounding is for fact checking and current information; it does not grant general browsing, arbitrary URL fetching, or application control. The Live service performs Search internally. It does not send search queries or results through the Screen Tutor backend.
+
+The frontend receives grounded answer parts and any grounding metadata directly from Gemini. A Live `serverContent` event may include `groundingMetadata`; accumulate its `groundingChunks` in order across the turn because later streamed metadata can contain only newly added chunks. Use `groundingSupports[].groundingChunkIndices` to associate supported text segments with their source chunks. Show source titles and links using the source URIs supplied by Gemini. Follow the API's grounding attribution requirements, including its Search Suggestions entry point when one is returned. If metadata is absent, do not invent citations from spoken text. Search metadata and citations remain in frontend session state only and are discarded when the tutoring session ends.
+
+### `POST /api/tools/calculate`
+
+This endpoint is the executor for the `calculate_expression` Live function. The browser calls it only after receiving that function call from Gemini, then sends the returned `result` object back through the same Live session. It accepts a JSON body with one expression and does not accept model names, tool declarations, or instructions.
+
+**Request**
+
+```json
+{
+  "expression": "(18.5 * 4) / 2"
+}
+```
+
+**Success response**
+
+```json
+{
+  "result": "37"
+}
+```
+
+The result is a normalized decimal string (up to 160 characters), avoiding a conversion through JavaScript floating-point numbers. The evaluator supports numeric literals, `pi`, `e`, parentheses, unary `+`/`-`, and `+`, `-`, `*`, `/`, `//`, `%`, and integer powers using `**`. It uses decimal arithmetic at 28 significant digits; it is a numeric calculator, not a symbolic algebra system. Inputs are limited to 256 characters and 64 expression-tree nodes. Integer powers are limited to absolute exponent 100, and intermediate/final nonzero magnitudes must be between `1e-100` and `1e100`. Function calls, variables, attributes, imports, strings, and all unsupported Python syntax are rejected. The evaluator interprets an allow-listed AST and never calls Python `eval` or executes submitted code.
+
+The request uses the same configured app authorization gate and allow-listed Origin check as token issuance. In the current token-service prototype, that is the optional development gate and the configured production demo gate; the planned Supabase integration will replace that gate with verified user authentication. It has a separate per-IP, per-process rate limit, with defaults in `.env.example`. The response never echoes the expression; the endpoint does not log or store expressions or results.
+
+**Failure responses**
+
+| Status | Meaning |
+| --- | --- |
+| `400` | Invalid syntax, unsupported expression, division by zero, or a numeric limit was exceeded |
+| `401` | App authentication required or expired |
+| `403` | Request origin or policy rejected |
+| `413` | Request body exceeds the configured limit (default 1,024 bytes) |
+| `429` | Calculator rate limit reached |
+
+Errors use the shared `{ "code", "message", "request_id" }` response shape. Calculator-specific codes are `invalid_expression` for a rejected expression and `calculator_rate_limited` for `429`; shared request codes include `invalid_request`, `request_too_large`, `authentication_required`, and `origin_not_allowed`.
+
+Live reports custom calls in `toolCall.functionCalls[]`. Both custom functions are declared with `behavior: BLOCKING`, so Gemini waits for their responses. The browser should dispatch each call only by its approved name, then return the matching `functionResponses[]` with the original function-call ID and name. If one event contains several calls, return a response for each one in the same response message. Track call IDs so a cancellation event can stop an outstanding calculator fetch and prevent its late response from being sent. Never execute an unknown function name. For a failed calculator call, return only the sanitized `code` and `message` as a short structured function error so the tutor can ask for a clearer expression or explain the limit. If the HTTP request itself fails, use a generic `calculator_unavailable` error; do not retry in a loop. For success, return `{ "result": "37" }` as the function response. `google_search` is Gemini's built-in tool and does not use this custom function-call path. Live function calls are not executed automatically by the API; the client must execute and answer them.
+
+The browser's execution outline is:
+
+```javascript
+const response = await fetch("/api/tools/calculate", {
+  method: "POST",
+  headers: {
+    "Authorization": `Bearer ${appAccessToken}`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({ expression: functionCall.args.expression }),
+});
+
+const result = await response.json();
+session.sendToolResponse({
+  functionResponses: [{
+    id: functionCall.id,
+    name: functionCall.name,
+    response: response.ok
+      ? result
+      : { error: { code: result.code, message: result.message } },
+  }],
+});
+```
+
+Use the application's current authorization token in the example above; do not use the Gemini ephemeral token for the Screen Tutor HTTP API. Check the function name against the approved set before executing it. Handle `add_annotations` locally and leave `google_search` execution to Gemini's built-in tool service.
 
 ### Class library endpoints
 
@@ -177,7 +259,7 @@ The backend creates ephemeral tokens through the Gemini API's Live token provisi
 - Use `GEMINI_API_KEY` only on the server.
 - Set `uses` to one for a new Live session and use short, explicit expiration values allowed by the API.
 - Constrain the model to `GEMINI_MODEL` (default `gemini-3.8-live`).
-- Constrain supported Live configuration to audio responses, output transcription, screen input, session resumption if enabled, and only the `add_annotations` function.
+- Constrain supported Live configuration to audio responses, output transcription, screen input, session resumption if enabled, the built-in `google_search` tool, and exactly the `calculate_expression` and `add_annotations` functions.
 - Reject or ignore client attempts to provide a different model, arbitrary instructions, or additional tools.
 
 Keep the token configuration in one server-side module so frontend and backend settings do not drift. The browser must send the matching setup configuration when it connects. Verify all constraint fields against the current [ephemeral token documentation](https://ai.google.dev/gemini-api/docs/live-api/ephemeral-tokens) during implementation.
@@ -191,7 +273,8 @@ Read these values from the process environment, with `pydantic-settings` loading
 | `GEMINI_API_KEY` | Yes | Server-only credential for token provisioning |
 | `GEMINI_MODEL` | No | Allowed Live model; defaults to `gemini-3.8-live` |
 | `APP_ORIGINS` | Deployment-dependent | Allowed browser origins for API requests |
-| `TOKEN_RATE_LIMIT` | No | Maximum token requests per identity/window |
+| `TOKEN_RATE_LIMIT` / `TOKEN_RATE_WINDOW_SECONDS` | No | Token requests per socket peer/window; defaults to 5 per 60 seconds per process |
+| `CALCULATOR_RATE_LIMIT` / `CALCULATOR_RATE_WINDOW_SECONDS` | No | Calculator requests per socket peer/window; defaults to 30 per 60 seconds per process |
 | `GEMINI_TEXT_MODEL` | Yes, for the class library | Standard Gemini model for text extraction, transcription, and study-material generation |
 | `SUPABASE_URL` | Yes | Supabase project URL; used to identify the Auth issuer and signing-key endpoint |
 | `SUPABASE_PUBLISHABLE_KEY` | Yes, for the frontend | Public project key used by the browser Supabase Auth client; never treat it as a user identity |
@@ -228,6 +311,9 @@ Do not put the Gemini API key in frontend config, rendered HTML, client-side env
 
 - The frontend can request a constrained ephemeral token and connect to `gemini-3.8-live` without exposing the long-lived API key.
 - Invalid requests cannot choose another model or add tools.
+- Every Live token uses the server-approved Google Search, calculator, and annotation tool set; the caller cannot expand it.
+- Google Search grounding is available for fact checking, and the client can display returned citation metadata without routing search results through the backend.
+- Calculator expressions are evaluated by a bounded numeric-only parser; invalid or over-limit expressions return sanitized errors and submitted expressions are not logged or stored.
 - Missing configuration, Google API failure, rate limiting, and origin rejection return stable, sanitized errors.
 - Screen/audio streams never transit the backend and are never stored by it.
 - Same-origin static frontend and API routes work over HTTPS in the deployed environment.
@@ -240,6 +326,9 @@ Do not put the Gemini API key in frontend config, rendered HTML, client-side env
 
 - [Gemini Live API getting started](https://ai.google.dev/gemini-api/docs/live-api/get-started-sdk)
 - [Gemini Live API tools](https://ai.google.dev/gemini-api/docs/live-api/tools)
+- [Gemini 3.8 Live model capabilities](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live)
+- [Live WebSockets server messages and grounding metadata](https://ai.google.dev/api/live.md)
+- [Google Search grounding and attribution metadata](https://ai.google.dev/gemini-api/docs/generate-content/google-search)
 - [Ephemeral tokens](https://ai.google.dev/gemini-api/docs/live-api/ephemeral-tokens)
 - [Live API session management](https://ai.google.dev/gemini-api/docs/live-api/session-management)
 - [FastAPI](https://fastapi.tiangolo.com/)

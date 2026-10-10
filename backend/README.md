@@ -28,7 +28,7 @@ stores no user content.
 The API listens on port 8000. A Vite development server can proxy `/api` to
 `http://localhost:8000`. If `frontend/dist` exists, FastAPI serves it from the
 same origin. The API is available at `POST /api/live-token`; health is at
-`GET /healthz`.
+`GET /healthz`. The calculator endpoint is `POST /api/tools/calculate`.
 
 ## Production configuration
 
@@ -62,6 +62,13 @@ headers only from that proxy; the app does not trust arbitrary
 The request cannot select a model, prompt, or tool. Failures return a stable
 `code`, user-safe `message`, and `request_id`; raw upstream errors and
 credentials are never returned. The token response is marked `no-store`.
+
+The fixed Live configuration enables Gemini Google Search grounding,
+`calculate_expression`, and `add_annotations`. Search runs within Gemini and
+returns its source metadata over the Live connection. The calculator function
+is executed by `POST /api/tools/calculate`; see the
+[backend design](../docs/backend-design.md#approved-live-tools) for the request,
+response, input limits, and client function-response contract.
 
 ## Supabase database
 

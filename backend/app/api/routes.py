@@ -6,10 +6,20 @@ import logging
 
 from fastapi import APIRouter, Body, Request, Response
 
-from app.api.dependencies import enforce_token_request_policy
+from app.api.dependencies import (
+    enforce_calculator_request_policy,
+    enforce_token_request_policy,
+)
 from app.api.errors import ApiError
-from app.api.schemas import HealthResponse, LiveTokenRequest, LiveTokenResponse
+from app.api.schemas import (
+    CalculatorRequest,
+    CalculatorResponse,
+    HealthResponse,
+    LiveTokenRequest,
+    LiveTokenResponse,
+)
 from app.config import Settings
+from app.services.calculator import CalculatorInputError, evaluate_expression
 from app.services.gemini_tokens import GeminiTokenService
 
 logger = logging.getLogger("screen_tutor.api")
@@ -74,3 +84,35 @@ async def create_live_token(
         model=result.model,
         expires_at=result.expires_at,
     )
+
+
+@router.post(
+    "/api/tools/calculate",
+    response_model=CalculatorResponse,
+    tags=["tools"],
+    responses={
+        400: {"description": "The expression is invalid or outside calculator limits."},
+        401: {"description": "The configured app gate was not satisfied."},
+        403: {"description": "The request origin is not allow-listed."},
+        413: {"description": "The request body exceeds the configured limit."},
+        429: {"description": "The calculator rate limit was reached."},
+    },
+)
+async def calculate_expression(
+    request: Request,
+    response: Response,
+    payload: CalculatorRequest,
+) -> CalculatorResponse:
+    """Evaluate bounded arithmetic for a Live function call; do not log inputs."""
+    await enforce_calculator_request_policy(request, _settings(request))
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Pragma"] = "no-cache"
+    try:
+        result = evaluate_expression(payload.expression)
+    except CalculatorInputError:
+        raise ApiError(
+            400,
+            "invalid_expression",
+            "The calculator accepts only bounded numeric arithmetic expressions.",
+        ) from None
+    return CalculatorResponse(result=result)

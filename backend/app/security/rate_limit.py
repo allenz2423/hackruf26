@@ -1,4 +1,4 @@
-"""Single-process sliding-window rate limiter for the token endpoint."""
+"""Single-process sliding-window rate limiter for lightweight API endpoints."""
 
 from __future__ import annotations
 

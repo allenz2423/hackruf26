@@ -42,6 +42,10 @@ def create_app(
             settings.token_rate_limit,
             settings.token_rate_window_seconds,
         )
+        application.state.calculator_rate_limiter = InMemoryRateLimiter(
+            settings.calculator_rate_limit,
+            settings.calculator_rate_window_seconds,
+        )
 
         client = None
         if token_service_override is not None:
@@ -58,7 +62,10 @@ def create_app(
 
     application = FastAPI(
         title="Screen Tutor API",
-        description="Short-lived Gemini Live token service. Media remains browser-to-Gemini.",
+        description=(
+            "Constrained Gemini Live token service and numeric calculator. "
+            "Media remains browser-to-Gemini."
+        ),
         version="0.1.0",
         lifespan=lifespan,
     )

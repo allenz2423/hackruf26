@@ -56,7 +56,8 @@ class GeminiTokenService:
             expire_time=expiration,
             new_session_expire_time=new_session_expiration,
             # Omitting lock_additional_fields locks the full LiveConnectConfig.
-            # This keeps model, instructions, modalities, and the one tool fixed.
+            # This keeps model, instructions, modalities, and the approved tool
+            # set fixed; callers cannot expand the session's capabilities.
             live_connect_constraints=self._constraints,
         )
         provision = partial(self._client.auth_tokens.create, config=config)
