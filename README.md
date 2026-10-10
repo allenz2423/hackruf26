@@ -12,13 +12,17 @@ See the [product overview](docs/design.md), [frontend design](docs/frontend-desi
 
 ## Status
 
-Design draft. No application code or setup instructions exist yet.
+The backend token-service boilerplate is in place. The frontend and the
+separate notes and study-material services are not implemented yet.
 
 ## Proposed stack
 
 - HTML, CSS, and JavaScript for the browser UI, with Google's JavaScript SDK for Gemini Live.
 - Python, FastAPI, and Pydantic for the token service.
 - Gemini Live API using `gemini-3.8-live` for real-time multimodal tutoring.
-- A small backend that issues short-lived Gemini Live credentials (the long-lived API key stays server-side), stores classes and notes, and generates study materials with the Gemini API.
+- A small backend that issues constrained, short-lived Gemini Live credentials; the long-lived API key stays server-side. The current backend MVP has no database and does not yet implement note storage or study-material generation.
+
+See [backend setup and configuration](backend/README.md) to run the token
+service locally.
 
 The MVP annotates the shared-screen preview inside the web page. It does not draw over other applications outside the browser. The current Gemini model and API behavior are linked in the [design doc](docs/design.md#gemini-live-integration).
