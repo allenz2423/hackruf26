@@ -16,6 +16,7 @@ import { renderLibraryTab } from "./library.js";
 import { createRouter } from "./router.js";
 import { ScreenCaptureController } from "./screen-capture.js";
 import { renderStudyTab } from "./study.js";
+import { renderGuestStudy } from "./guest-study.js";
 import { deleteUploadedFile, deleteUploadedFiles } from "./file-store.js";
 import { escapeHtml, openDialog, toast } from "./ui.js";
 import {
@@ -80,15 +81,20 @@ function syncTutorControls() {
 function shell(content, { section = "classes" } = {}) {
   const isGuest = !currentUser?.email;
   const userLabel = currentUser?.email ? currentUser.email.split("@")[0] : "Guest";
+  const brandHref = isGuest ? "#/study" : "#/classes";
 
   app.innerHTML = `
     <header class="app-header">
-      <a class="brand" href="#/classes">
+      <a class="brand" href="${brandHref}">
         <span class="brand-mark">${icon("monitor", { size: 18 })}</span>
         Screen Tutor
       </a>
       <nav class="primary-nav" aria-label="Primary">
-        <a href="#/classes" ${section === "classes" ? 'aria-current="page"' : ""}>Classes</a>
+        ${isGuest ? `
+          <a href="#/study" ${section === "study" ? 'aria-current="page"' : ""}>Quick study</a>
+        ` : `
+          <a href="#/classes" ${section === "classes" ? 'aria-current="page"' : ""}>Classes</a>
+        `}
         <a href="#/tutor" ${section === "tutor" ? 'aria-current="page"' : ""}>Quick tutor</a>
         <a href="#/auth" ${section === "auth" ? 'aria-current="page"' : ""} class="nav-account-link" style="display: inline-flex; align-items: center; gap: 0.4rem;">
           ${icon("user", { size: 16 })} <span>${escapeHtml(userLabel)}</span>
@@ -103,7 +109,22 @@ function shell(content, { section = "classes" } = {}) {
   `;
 }
 
+async function renderGuestWorkspace() {
+  if (currentUser) {
+    window.location.hash = "#/classes";
+    return;
+  }
+  shell(`
+    <div id="guest-study-mount"></div>
+  `, { section: "study" });
+  renderGuestStudy(document.querySelector("#guest-study-mount"));
+}
+
 async function renderClasses() {
+  if (!currentUser) {
+    window.location.hash = "#/study";
+    return;
+  }
   const classes = getClasses();
   const totalUploads = classes.reduce((sum, klass) => sum + (klass.uploads?.length || 0), 0);
   const totalMaterials = classes.reduce((sum, klass) => sum + (klass.materials?.length || 0), 0);
@@ -217,6 +238,10 @@ const CLASS_TABS = [
 ];
 
 async function renderClassTab({ id, tab }) {
+  if (!currentUser) {
+    window.location.hash = "#/study";
+    return;
+  }
   const klass = getClassById(id);
   if (!klass) {
     window.location.hash = "#/classes";
@@ -493,7 +518,7 @@ async function renderAuth() {
             <li><span class="feature-warn">✕</span> <strong>Lost on browser cache clear</strong></li>
             <li><span class="feature-warn">✕</span> No cross-device progress sync</li>
           </ul>
-          <a href="#/classes" class="btn btn-secondary" style="justify-content: center; width: 100%;">
+          <a href="#/study" class="btn btn-secondary" style="justify-content: center; width: 100%;">
             Continue as Guest
           </a>
         </div>
@@ -655,12 +680,22 @@ async function renderAuth() {
 
 const router = createRouter(
   [
+    { path: "/study", render: renderGuestWorkspace },
+    { path: "/guest", render: renderGuestWorkspace },
     { path: "/classes", render: renderClasses },
     { path: "/classes/:id/:tab", render: renderClassTab },
     { path: "/tutor", render: () => renderTutor() },
     { path: "/auth", render: renderAuth }
   ],
-  { render: renderClasses }
+  {
+    render: () => {
+      if (currentUser) {
+        renderClasses();
+      } else {
+        renderGuestWorkspace();
+      }
+    }
+  }
 );
 
 // Initialize authentication and startup sync
@@ -675,11 +710,20 @@ const router = createRouter(
   }
 
   onAuthStateChange(async (event, session) => {
+    const wasGuest = !currentUser;
     currentUser = session?.user || null;
     if (currentUser) {
       await syncClassesFromApi();
+      if (wasGuest && (window.location.hash.includes("/study") || window.location.hash.includes("/guest"))) {
+        window.location.hash = "#/classes";
+      }
     }
+    router.render();
   });
 
-  router.render();
+  if (!currentUser && (!window.location.hash || window.location.hash === "#" || window.location.hash === "#/classes")) {
+    window.location.hash = "#/study";
+  } else {
+    router.render();
+  }
 })();
