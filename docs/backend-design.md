@@ -28,7 +28,9 @@ The backend also runs the **class library**: it stores each student's classes an
 
 ### Supabase PostgreSQL schema
 
-The initial migration covers Supabase Auth user ownership, classes, course notes/materials, generated quizzes and practice exams (as well as the other planned study-material types), source-note links, and completed attempts. Class `owner_id` references `auth.users(id)` directly with `ON DELETE CASCADE`; the app does not keep a duplicate user identity table. Foreign keys cascade class deletion through its notes, generated materials, and attempts. Composite class keys prevent source-note link rows from crossing class boundaries; backend validation must also keep citations inside the generated JSON content consistent with those links. Deleting a source note deletes generated materials derived from it. Original file bytes remain in private object storage; PostgreSQL holds the storage key, extracted text, lecture transcript segments, and parsed syllabus outline. Live screen/audio media, live-session transcripts, annotation events, and tutoring conversations are not stored.
+The Supabase migrations cover Auth user ownership, classes, course notes/materials, uploaded assessments, generated quizzes and practice exams (as well as the other planned study-material types), source-note links, and completed attempts. Class `owner_id` references `auth.users(id)` directly with `ON DELETE CASCADE`; the app does not keep a duplicate user identity table. Foreign keys cascade class deletion through its notes, generated materials, and attempts. Composite class keys prevent source-note link rows from crossing class boundaries; backend validation must also keep citations inside the generated JSON content consistent with those links. Deleting a source note deletes generated materials derived from it. Original file bytes remain in private object storage; PostgreSQL holds the storage key, extracted text, lecture transcript segments, and parsed syllabus outline. Live screen/audio media, live-session transcripts, annotation events, and tutoring conversations are not stored.
+
+Uploaded existing tests are stored as course-note uploads plus an `uploaded_assessments` record, defined in [the uploaded assessment migration](../supabase/migrations/20261010150000_uploaded_assessment_workflow.sql). The course note retains the original file and extracted text; the assessment record retains parsed questions, detected student responses, and per-question grading details. A blank test is stored as an ungraded reference. A completed test with an answer key is graded against that key. Without a key, the backend can produce an explicitly estimated grade from the owning class's notes. If responses cannot be read reliably or there are no usable class notes for grading, the record moves to `needs_review` and has no score. Generated practice quizzes and exams remain separate `study_materials`; their source-note links can reference uploaded tests so later practice generation can use them.
 
 ### Supabase Auth sessions
 
@@ -231,14 +233,16 @@ All of these require a valid Supabase access token and only return the caller's 
 | `GET /api/classes/{class_id}/uploads` | List uploads with kind, status, and progress |
 | `GET /api/uploads/{upload_id}` | Upload detail: extracted text, lecture transcript segments, and a short-lived signed URL for the original file |
 | `PATCH /api/uploads/{upload_id}` · `DELETE /api/uploads/{upload_id}` | Rename, change kind, edit extracted text, or delete (removes file and text) |
+| `POST /api/classes/{class_id}/assessments` | Upload an existing test. Creates the source upload and an assessment extraction/grading job; returns processing state |
+| `GET /api/classes/{class_id}/assessments` · `GET /api/assessments/{id}` | List imported tests or fetch parsed questions, detected responses, grading mode, score, and per-question results |
 | `GET /api/classes/{class_id}/syllabus` · `PUT …/syllabus` | Read or correct the parsed topic/exam outline |
-| `POST /api/classes/{class_id}/study-materials` | Start generating a `quiz`, `practice_exam`, `study_guide`, or `flashcards` with a scope (all, upload IDs, syllabus topics, or an exam) and options. Returns `status: generating` |
+| `POST /api/classes/{class_id}/study-materials` | Start generating a `quiz`, `practice_exam`, `study_guide`, or `flashcards` with a scope (all, upload IDs—including imported tests—syllabus topics, or an exam) and options. Returns `status: generating` |
 | `GET /api/classes/{class_id}/study-materials` · `GET /api/study-materials/{id}` | List materials or fetch one (questions include source links: upload ID plus page, slide, or lecture timestamp) |
 | `DELETE /api/study-materials/{id}` | Delete a material |
 | `POST /api/study-materials/{id}/attempts` | Submit answers; the server scores them and returns the result with explanations |
 | `POST /api/study-materials/{id}/flags` | Flag a question or card as wrong |
 
-### Upload processing
+### Upload processing and imported test grading
 
 | Kind | Processing |
 | --- | --- |
@@ -246,6 +250,9 @@ All of these require a valid Supabase access token and only return the caller's 
 | Syllabus | Extract text, then ask Gemini for a structured outline (topics, weeks, exams with dates and topics) and save it |
 | Slides | Extract text per slide with `python-pptx`/`pypdf`; send image-heavy slides to Gemini |
 | Video / audio lectures | Upload to the Gemini Files API, ask for a timestamped transcript, summary, and key topics (including what's written on the board or slides for video), then save segments |
+| Existing tests | Preserve the original upload, extract questions and any answer key, and detect student responses. Store blank tests as ungraded references. Grade completed tests against a detected key; without one, use only that class's notes and mark the result as estimated. Send unreadable responses or unsupported grading cases to `needs_review` without inventing a score |
+
+Keep the answer key, detected responses, and grading result in server-controlled storage. Return the student's uploaded assessment and score to its owner, but do not expose generated quiz/exam answer keys before an attempt is submitted. A generated practice assessment records its source-note links, including links to imported tests, and is saved as its own immutable material so later attempts retain a stable scoring basis.
 
 Each job updates the upload's `status` (`processing → ready | failed`) and progress so the frontend can poll. Jobs must be safe to retry. Large lectures are the slowest and most expensive step, so transcribe each one once and reuse the transcript for every later generation and tutoring session.
 
