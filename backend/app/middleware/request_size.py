@@ -8,7 +8,9 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 ASGIApp = Callable[[dict[str, Any], Callable[..., Awaitable[Any]], Callable[..., Awaitable[Any]]], Awaitable[None]]
-CLASS_ID_PATH = re.compile(r"^/api/classes/[0-9a-fA-F-]{36}/uploads$")
+CLASS_ID_UPLOAD_PATH = re.compile(
+    r"^/api/classes/[0-9a-fA-F-]{36}/(?:uploads|assessments)$"
+)
 
 
 class _RequestTooLarge(Exception):
@@ -38,7 +40,7 @@ class RequestSizeLimitMiddleware:
         method = scope.get("method", "GET").upper()
         if path in {"/api/live-token", "/api/tools/calculate"}:
             return self.capability_max_bytes
-        if method == "POST" and CLASS_ID_PATH.fullmatch(path):
+        if method == "POST" and CLASS_ID_UPLOAD_PATH.fullmatch(path):
             return self.upload_max_bytes + 2 * 1024 * 1024
         if method in {"POST", "PATCH", "PUT", "DELETE"} and path.startswith(
             ("/api/classes", "/api/uploads", "/api/study-materials")

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date as calendar_date
+from datetime import datetime, timezone
 from typing import Annotated, Literal, Union
 from uuid import UUID
 
@@ -135,7 +136,7 @@ class SyllabusExam(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     id: str = Field(min_length=1, max_length=80)
     name: str = Field(min_length=1, max_length=200)
-    date: date | None = None
+    date: calendar_date | None = None
     topics: list[str] = Field(default_factory=list, max_length=100)
 
 
@@ -262,6 +263,99 @@ class ChoiceContent(BaseModel):
     text: str = Field(min_length=1, max_length=1000)
 
 
+AssessmentStatus = Literal["processing", "ready", "needs_review", "failed"]
+AssessmentGradingMode = Literal[
+    "not_graded", "answer_key", "class_notes_estimated", "needs_review"
+]
+
+
+class AssessmentQuestionAI(BaseModel):
+    """One question and any student response or key detected in an imported test."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    id: str = Field(min_length=1, max_length=100)
+    prompt: str = Field(min_length=1, max_length=5000)
+    choices: list[ChoiceContent] = Field(default_factory=list, max_length=20)
+    points: float = Field(default=1, gt=0, le=100)
+    student_response: str | None = Field(default=None, max_length=5000)
+    response_status: Literal["answered", "blank", "unreadable"]
+    answer_key: str | None = Field(default=None, max_length=5000)
+    answer_key_status: Literal["present", "missing", "unreadable"]
+
+    @model_validator(mode="after")
+    def validate_detected_fields(self) -> AssessmentQuestionAI:
+        choice_ids = [choice.id for choice in self.choices]
+        if len(choice_ids) != len(set(choice_ids)):
+            raise ValueError("Question choice IDs must be unique.")
+        if self.response_status == "answered" and not self.student_response:
+            raise ValueError("An answered question must include the detected response.")
+        if self.response_status != "answered" and self.student_response:
+            raise ValueError("Only answered questions may include a detected response.")
+        if self.answer_key_status == "present" and not self.answer_key:
+            raise ValueError("A present answer key must include its detected answer.")
+        if self.answer_key_status != "present" and self.answer_key:
+            raise ValueError("Only present answer keys may include a detected answer.")
+        return self
+
+
+class AssessmentExtractionAIOutput(BaseModel):
+    """Structured extraction from an uploaded existing test."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    document_readable: bool
+    questions: list[AssessmentQuestionAI] = Field(default_factory=list, max_length=100)
+
+
+class AssessmentQuestionGradeAI(BaseModel):
+    """Model grade for one detected answer, validated before persistence."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    question_id: str = Field(min_length=1, max_length=100)
+    earned_points: float = Field(ge=0, le=100)
+    correct_answer: str | None = Field(default=None, max_length=5000)
+    feedback: str = Field(min_length=1, max_length=5000)
+    confidence: float = Field(ge=0, le=1)
+    sources: list[SourceCitation] = Field(default_factory=list, max_length=10)
+
+
+class AssessmentGradingAIOutput(BaseModel):
+    """Structured per-question grading result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    overall_confidence: float = Field(ge=0, le=1)
+    grades: list[AssessmentQuestionGradeAI] = Field(min_length=1, max_length=100)
+
+
+class AssessmentSummary(BaseModel):
+    id: UUID
+    class_id: UUID
+    note_id: UUID
+    title: str
+    original_filename: str | None = None
+    status: AssessmentStatus
+    has_student_responses: bool
+    question_count: int = Field(ge=0)
+    grading_mode: AssessmentGradingMode
+    score_percent: float | None = Field(default=None, ge=0, le=100)
+    grade_confidence: float | None = Field(default=None, ge=0, le=1)
+    failure_code: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    processed_at: datetime | None = None
+
+
+class AssessmentDetail(AssessmentSummary):
+    questions: list[AssessmentQuestionAI] = Field(default_factory=list)
+    grading_result: dict | None = None
+    review_reason: str | None = None
+    file_url: str | None = None
+    file_url_expires_at: datetime | None = None
+
+
 class QuestionContent(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str = Field(min_length=1, max_length=100)
@@ -315,7 +409,7 @@ class SyllabusTopicAI(BaseModel):
 class SyllabusExamAI(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=200)
-    date: date | None = None
+    date: calendar_date | None = None
     topics: list[str] = Field(default_factory=list, max_length=100)
 
 

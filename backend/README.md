@@ -12,7 +12,8 @@ FastAPI owns the Gemini API key, provisions one-use Gemini Live tokens, verifies
    cd backend
    python -m venv .venv
    source .venv/bin/activate
-   pip install -e .
+   python -m pip install --upgrade pip
+   pip install -r requirements.txt
    cd ..
    uvicorn app.main:app --app-dir backend --reload
    ```
@@ -37,6 +38,9 @@ Without `SUPABASE_URL`, configure `DEMO_GATE_TOKEN` to use the token and calcula
 - `POST /api/uploads/{upload_id}/retry`
 - `GET|PUT /api/classes/{class_id}/syllabus`
 - `POST|GET /api/classes/{class_id}/study-materials`
+- `POST /api/classes/{class_id}/assessments`
+- `GET /api/classes/{class_id}/assessments`
+- `GET /api/assessments/{assessment_id}`
 - `GET|DELETE /api/study-materials/{material_id}`
 - `POST /api/study-materials/{material_id}/attempts`
 - `POST /api/study-materials/{material_id}/flags`

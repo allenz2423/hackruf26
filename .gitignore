@@ -4,6 +4,14 @@
 !.env.example
 **/.DS_Store
 
+# Python environments and private local uploads
+.venv/
+backend/.venv/
+backend/.local/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
 # Supabase CLI state is machine-local; keep config and migrations tracked.
 supabase/.temp/
 supabase/.branches/
