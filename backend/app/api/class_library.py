@@ -1239,6 +1239,15 @@ async def create_study_material(
     options = payload.options.model_dump(mode="json", exclude_none=True)
     if payload.kind != "practice_exam" and options.get("time_limit_minutes") is not None:
         raise ApiError(400, "invalid_options", "A time limit is available only for practice exams.")
+    if (
+        options.get("question_types") is not None
+        and payload.kind not in {"quiz", "practice_exam"}
+    ):
+        raise ApiError(
+            400,
+            "invalid_options",
+            "Question types are available only for quizzes and practice exams.",
+        )
     sources, scope = await _resolve_material_sources(pool, class_id, scope)
     title = f"{payload.kind.replace('_', ' ').title()}: {class_row['name']}"
     async with pool.acquire() as connection:

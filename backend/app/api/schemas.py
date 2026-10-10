@@ -200,6 +200,7 @@ MaterialsScope = Annotated[
 ]
 StudyMaterialKind = Literal["quiz", "practice_exam", "study_guide", "flashcards"]
 StudyDifficulty = Literal["mixed", "easier", "harder"]
+StudyQuestionKind = Literal["multiple_choice", "true_false", "short_answer"]
 
 
 class StudyOptions(BaseModel):
@@ -207,6 +208,18 @@ class StudyOptions(BaseModel):
     count: int = Field(default=10, ge=4, le=50)
     difficulty: StudyDifficulty = "mixed"
     time_limit_minutes: int | None = Field(default=None, ge=1, le=300)
+    question_types: list[StudyQuestionKind] | None = Field(
+        default=None, min_length=1, max_length=3
+    )
+
+    @field_validator("question_types")
+    @classmethod
+    def require_unique_question_types(
+        cls, value: list[StudyQuestionKind] | None
+    ) -> list[StudyQuestionKind] | None:
+        if value is not None and len(value) != len(set(value)):
+            raise ValueError("Question types must be unique.")
+        return value
 
 
 class StudyMaterialCreate(BaseModel):
@@ -377,7 +390,7 @@ class AssessmentDetail(AssessmentSummary):
 class QuestionContent(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str = Field(min_length=1, max_length=100)
-    kind: Literal["multiple_choice", "true_false", "short_answer"]
+    kind: StudyQuestionKind
     prompt: str = Field(min_length=1, max_length=5000)
     choices: list[ChoiceContent] = Field(default_factory=list, max_length=8)
     answer: str = Field(min_length=1, max_length=5000)
@@ -389,6 +402,14 @@ class QuestionContent(BaseModel):
 
 class QuizContent(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    format: Literal["quiz"]
+    questions: list[QuestionContent] = Field(min_length=1, max_length=50)
+
+
+class PracticeExamContent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    format: Literal["practice_exam"]
+    instructions: str = Field(min_length=1, max_length=2000)
     questions: list[QuestionContent] = Field(min_length=1, max_length=50)
 
 
@@ -402,6 +423,7 @@ class GuideSectionContent(BaseModel):
 
 class StudyGuideContent(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    format: Literal["study_guide"]
     sections: list[GuideSectionContent] = Field(min_length=1, max_length=50)
 
 
@@ -415,6 +437,7 @@ class FlashcardContent(BaseModel):
 
 class FlashcardsContent(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    format: Literal["flashcards"]
     cards: list[FlashcardContent] = Field(min_length=1, max_length=50)
 
 
