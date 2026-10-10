@@ -82,7 +82,7 @@ class Settings(BaseSettings):
 
     supabase_url: str | None = None
     supabase_jwt_secret: SecretStr | None = None
-    database_url: SecretStr | None = None
+    sqlite_path: str = "backend/.local/screen_tutor.sqlite3"
     storage_dir: str = "backend/.local/private_uploads"
     file_url_signing_secret: SecretStr | None = None
     max_upload_mb: int = 250
@@ -175,15 +175,14 @@ class Settings(BaseSettings):
         ) < 32:
             raise ValueError("DEMO_GATE_TOKEN must contain at least 32 characters when configured.")
 
-        if self.database_url is not None:
-            if self.supabase_url is None:
-                raise ValueError("SUPABASE_URL is required when DATABASE_URL is configured.")
-            if self.file_url_signing_secret is None or len(
-                self.file_url_signing_secret.get_secret_value().strip()
-            ) < 32:
-                raise ValueError(
-                    "FILE_URL_SIGNING_SECRET must contain at least 32 characters when the database is configured."
-                )
+        if not self.sqlite_path.strip():
+            raise ValueError("SQLITE_PATH must be a file path or :memory:.")
+        if self.file_url_signing_secret is None or len(
+            self.file_url_signing_secret.get_secret_value().strip()
+        ) < 32:
+            raise ValueError(
+                "FILE_URL_SIGNING_SECRET must contain at least 32 characters for private file storage."
+            )
 
         if not self.lean_lake_executable.strip():
             raise ValueError("LEAN_LAKE_EXECUTABLE must be a non-empty executable name or path.")
@@ -214,6 +213,14 @@ class Settings(BaseSettings):
     def storage_dir_path(self) -> Path:
         path = Path(self.storage_dir)
         return path if path.is_absolute() else REPOSITORY_ROOT / path
+
+    @property
+    def sqlite_path_value(self) -> str:
+        path = self.sqlite_path.strip()
+        if path == ":memory:":
+            return path
+        resolved = Path(path)
+        return str(resolved if resolved.is_absolute() else REPOSITORY_ROOT / resolved)
 
     @property
     def lean_project_dir_path(self) -> Path:

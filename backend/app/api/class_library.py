@@ -12,14 +12,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote
-from uuid import UUID
+from uuid import UUID, uuid4
 
-import asyncpg
 from fastapi import APIRouter, BackgroundTasks, File, Form, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 
 from app.api.dependencies import (
-    database_pool,
+    database,
     enforce_supabase_api_policy,
     private_storage,
 )
@@ -44,7 +43,7 @@ from app.api.schemas import (
     UploadSummary,
 )
 from app.config import Settings
-from app.services.database import json_value
+from app.services.database import SQLiteConnection, SQLiteDatabase, json_value
 from app.services.gemini_content import GeminiContentService
 from app.services.storage import LocalPrivateStorage, UploadTooLarge
 
@@ -72,16 +71,16 @@ NOTE_KINDS = {"notes", "document", "syllabus", "slides", "lecture_video", "lectu
 ASSESSMENT_EXTENSIONS = {".pdf", ".docx", ".pptx", ".txt", ".md", ".png", ".jpg", ".jpeg"}
 
 
-async def _authorize(request: Request) -> tuple[UUID, asyncpg.Pool, Settings]:
+async def _authorize(request: Request) -> tuple[UUID, SQLiteDatabase, Settings]:
     settings: Settings = request.app.state.settings
     user_id = await enforce_supabase_api_policy(request, settings)
-    return user_id, database_pool(request), settings
+    return user_id, database(request), settings
 
 
-async def _owned_class(pool: asyncpg.Pool, class_id: UUID, owner_id: UUID) -> asyncpg.Record:
-    row = await pool.fetchrow(
-        "SELECT id, name, created_at, updated_at FROM public.course_classes "
-        "WHERE id = $1 AND owner_id = $2",
+async def _owned_class(database: SQLiteDatabase, class_id: UUID, owner_id: UUID) -> dict[str, Any]:
+    row = await database.fetchrow(
+        "SELECT id, name, created_at, updated_at FROM course_classes "
+        "WHERE id = ?1 AND owner_id = ?2",
         class_id,
         owner_id,
     )
@@ -90,11 +89,11 @@ async def _owned_class(pool: asyncpg.Pool, class_id: UUID, owner_id: UUID) -> as
     return row
 
 
-async def _class_summary(pool: asyncpg.Pool, row: asyncpg.Record) -> ClassSummary:
-    counts = await pool.fetchrow(
+async def _class_summary(database: SQLiteDatabase, row: dict[str, Any]) -> ClassSummary:
+    counts = await database.fetchrow(
         "SELECT "
-        "(SELECT count(*) FROM public.course_notes WHERE class_id = $1) AS upload_count, "
-        "(SELECT count(*) FROM public.study_materials WHERE class_id = $1) AS material_count",
+        "(SELECT count(*) FROM course_notes WHERE class_id = ?1) AS upload_count, "
+        "(SELECT count(*) FROM study_materials WHERE class_id = ?1) AS material_count",
         row["id"],
     )
     return ClassSummary(
@@ -107,7 +106,7 @@ async def _class_summary(pool: asyncpg.Pool, row: asyncpg.Record) -> ClassSummar
     )
 
 
-def _upload_summary(row: asyncpg.Record) -> UploadSummary:
+def _upload_summary(row: dict[str, Any]) -> UploadSummary:
     return UploadSummary(
         id=row["id"],
         class_id=row["class_id"],
@@ -126,7 +125,7 @@ def _upload_summary(row: asyncpg.Record) -> UploadSummary:
     )
 
 
-def _assessment_summary(row: asyncpg.Record) -> AssessmentSummary:
+def _assessment_summary(row: dict[str, Any]) -> AssessmentSummary:
     questions = json_value(row["questions"], [])
     question_count = len(questions) if isinstance(questions, list) else 0
     return AssessmentSummary(
@@ -151,14 +150,15 @@ def _assessment_summary(row: asyncpg.Record) -> AssessmentSummary:
 
 
 async def _reset_assessment_for_processing(
-    connection: asyncpg.Connection, note_id: UUID
+    connection: SQLiteConnection, note_id: UUID
 ) -> UUID | None:
     row = await connection.fetchrow(
-        "UPDATE public.uploaded_assessments SET processing_status = 'processing', "
-        "has_student_responses = false, questions = '[]'::jsonb, grading_mode = 'not_graded', "
+        "UPDATE uploaded_assessments SET processing_status = 'processing', "
+        "has_student_responses = false, questions = '[]', grading_mode = 'not_graded', "
         "score_percent = NULL, grading_result = NULL, grade_confidence = NULL, "
-        "failure_code = NULL, processed_at = NULL, graded_at = NULL "
-        "WHERE note_id = $1 RETURNING id",
+        "failure_code = NULL, processed_at = NULL, graded_at = NULL, "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+        "WHERE note_id = ?1 RETURNING id",
         note_id,
     )
     return row["id"] if row is not None else None
@@ -173,7 +173,7 @@ def _material_item_count(content: object, kind: str, fallback: int = 0) -> int:
     return len(items) if isinstance(items, list) else fallback
 
 
-def _material_summary(row: asyncpg.Record) -> MaterialSummary:
+def _material_summary(row: dict[str, Any]) -> MaterialSummary:
     values = dict(row)
     latest = None
     if values.get("latest_score") is not None:
@@ -269,12 +269,12 @@ async def _rate_limit(request: Request, key: str, user_id: UUID) -> None:
 
 @router.get("/api/classes")
 async def list_classes(request: Request) -> dict[str, list[ClassSummary]]:
-    user_id, pool, _ = await _authorize(request)
-    rows = await pool.fetch(
+    user_id, database, _ = await _authorize(request)
+    rows = await database.fetch(
         "SELECT c.id, c.name, c.created_at, c.updated_at, "
-        "(SELECT count(*) FROM public.course_notes n WHERE n.class_id = c.id) AS upload_count, "
-        "(SELECT count(*) FROM public.study_materials m WHERE m.class_id = c.id) AS material_count "
-        "FROM public.course_classes c WHERE c.owner_id = $1 ORDER BY c.updated_at DESC, c.id",
+        "(SELECT count(*) FROM course_notes n WHERE n.class_id = c.id) AS upload_count, "
+        "(SELECT count(*) FROM study_materials m WHERE m.class_id = c.id) AS material_count "
+        "FROM course_classes c WHERE c.owner_id = ?1 ORDER BY c.updated_at DESC, c.id",
         user_id,
     )
     return {"items": [ClassSummary.model_validate(dict(row)) for row in rows]}
@@ -282,27 +282,29 @@ async def list_classes(request: Request) -> dict[str, list[ClassSummary]]:
 
 @router.post("/api/classes", status_code=201)
 async def create_class(payload: ClassCreate, request: Request) -> ClassSummary:
-    user_id, pool, settings = await _authorize(request)
+    user_id, database, settings = await _authorize(request)
     name = payload.name.strip()
     if not name or len(name) > settings.max_class_name_length:
         raise ApiError(400, "invalid_class_name", "Enter a class name within the allowed length.")
-    row = await pool.fetchrow(
-        "INSERT INTO public.course_classes (owner_id, name) VALUES ($1, $2) "
+    row = await database.fetchrow(
+        "INSERT INTO course_classes (id, owner_id, name) VALUES (?1, ?2, ?3) "
         "RETURNING id, name, created_at, updated_at",
+        uuid4(),
         user_id,
         name,
     )
-    return await _class_summary(pool, row)
+    return await _class_summary(database, row)
 
 
 @router.patch("/api/classes/{class_id}")
 async def rename_class(class_id: UUID, payload: ClassPatch, request: Request) -> ClassSummary:
-    user_id, pool, settings = await _authorize(request)
+    user_id, database, settings = await _authorize(request)
     name = payload.name.strip()
     if not name or len(name) > settings.max_class_name_length:
         raise ApiError(400, "invalid_class_name", "Enter a class name within the allowed length.")
-    row = await pool.fetchrow(
-        "UPDATE public.course_classes SET name = $3 WHERE id = $1 AND owner_id = $2 "
+    row = await database.fetchrow(
+        "UPDATE course_classes SET name = ?3, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+        "WHERE id = ?1 AND owner_id = ?2 "
         "RETURNING id, name, created_at, updated_at",
         class_id,
         user_id,
@@ -310,24 +312,24 @@ async def rename_class(class_id: UUID, payload: ClassPatch, request: Request) ->
     )
     if row is None:
         raise ApiError(404, "not_found", "The requested resource was not found.")
-    return await _class_summary(pool, row)
+    return await _class_summary(database, row)
 
 
 @router.delete("/api/classes/{class_id}", status_code=204)
 async def delete_class(class_id: UUID, request: Request) -> Response:
-    user_id, pool, _ = await _authorize(request)
+    user_id, database, _ = await _authorize(request)
     storage = private_storage(request)
-    async with pool.acquire() as connection:
+    async with database.acquire() as connection:
         async with connection.transaction():
             rows = await connection.fetch(
-                "SELECT n.storage_key FROM public.course_notes n "
-                "JOIN public.course_classes c ON c.id = n.class_id "
-                "WHERE c.id = $1 AND c.owner_id = $2 AND n.storage_key IS NOT NULL",
+                "SELECT n.storage_key FROM course_notes n "
+                "JOIN course_classes c ON c.id = n.class_id "
+                "WHERE c.id = ?1 AND c.owner_id = ?2 AND n.storage_key IS NOT NULL",
                 class_id,
                 user_id,
             )
             result = await connection.execute(
-                "DELETE FROM public.course_classes WHERE id = $1 AND owner_id = $2",
+                "DELETE FROM course_classes WHERE id = ?1 AND owner_id = ?2",
                 class_id,
                 user_id,
             )
@@ -348,13 +350,13 @@ async def create_upload(
     title: str | None = Form(default=None),
     kind: str | None = Form(default=None),
 ) -> UploadSummary:
-    user_id, pool, settings = await _authorize(request)
+    user_id, database, settings = await _authorize(request)
     if getattr(request.app.state, "gemini_content_service", None) is None:
         raise ApiError(503, "content_processing_unavailable", "Course material processing is unavailable.")
-    await _owned_class(pool, class_id, user_id)
+    await _owned_class(database, class_id, user_id)
     await _rate_limit(request, "upload_rate_limiter", user_id)
-    upload_count = await pool.fetchval(
-        "SELECT count(*) FROM public.course_notes WHERE class_id = $1",
+    upload_count = await database.fetchval(
+        "SELECT count(*) FROM course_notes WHERE class_id = ?1",
         class_id,
     )
     if upload_count >= settings.max_uploads_per_class:
@@ -410,12 +412,13 @@ async def create_upload(
         raise ApiError(400, "invalid_upload_title", "Enter a title of 1 to 255 characters.")
 
     try:
-        row = await pool.fetchrow(
-            "INSERT INTO public.course_notes "
-            "(class_id, title, kind, source_type, original_filename, mime_type, storage_key, "
+        row = await database.fetchrow(
+            "INSERT INTO course_notes "
+            "(id, class_id, title, kind, source_type, original_filename, mime_type, storage_key, "
             "file_size_bytes, extracted_text, status, processing_progress) "
-            "VALUES ($1, $2, $3::course_note_kind, $4::note_source_type, $5, $6, $7, $8, $9, 'processing', 0) "
+            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'processing', 0) "
             "RETURNING *",
+            uuid4(),
             class_id,
             note_title,
             chosen_kind,
@@ -443,18 +446,18 @@ async def create_assessment(
     title: Annotated[str | None, Form()] = None,
 ) -> AssessmentSummary:
     """Store one private existing test and queue extraction/grading."""
-    user_id, pool, settings = await _authorize(request)
+    user_id, database, settings = await _authorize(request)
     if getattr(request.app.state, "gemini_content_service", None) is None:
         raise ApiError(
             503,
             "content_processing_unavailable",
             "Assessment processing is unavailable.",
         )
-    await _owned_class(pool, class_id, user_id)
+    await _owned_class(database, class_id, user_id)
     await _rate_limit(request, "upload_rate_limiter", user_id)
     await _rate_limit(request, "generation_rate_limiter", user_id)
-    upload_count = await pool.fetchval(
-        "SELECT count(*) FROM public.course_notes WHERE class_id = $1",
+    upload_count = await database.fetchval(
+        "SELECT count(*) FROM course_notes WHERE class_id = ?1",
         class_id,
     )
     if upload_count >= settings.max_uploads_per_class:
@@ -501,15 +504,16 @@ async def create_assessment(
         )
 
     try:
-        async with pool.acquire() as connection:
+        async with database.acquire() as connection:
             async with connection.transaction():
                 note = await connection.fetchrow(
-                    "INSERT INTO public.course_notes "
-                    "(class_id, title, kind, source_type, original_filename, mime_type, "
+                    "INSERT INTO course_notes "
+                    "(id, class_id, title, kind, source_type, original_filename, mime_type, "
                     "storage_key, file_size_bytes, status, processing_progress) "
-                    "VALUES ($1, $2, $3::course_note_kind, 'file', $4, $5, $6, $7, "
+                    "VALUES (?1, ?2, ?3, ?4, 'file', ?5, ?6, ?7, ?8, "
                     "'processing', 0) "
                     "RETURNING id",
+                    uuid4(),
                     class_id,
                     note_title,
                     note_kind,
@@ -519,8 +523,9 @@ async def create_assessment(
                     file_size,
                 )
                 assessment = await connection.fetchrow(
-                    "INSERT INTO public.uploaded_assessments (class_id, note_id) "
-                    "VALUES ($1, $2) RETURNING *",
+                    "INSERT INTO uploaded_assessments (id, class_id, note_id) "
+                    "VALUES (?1, ?2, ?3) RETURNING *",
+                    uuid4(),
                     class_id,
                     note["id"],
                 )
@@ -552,12 +557,12 @@ async def create_assessment(
 async def list_assessments(
     class_id: UUID, request: Request
 ) -> dict[str, list[AssessmentSummary]]:
-    user_id, pool, _ = await _authorize(request)
-    await _owned_class(pool, class_id, user_id)
-    rows = await pool.fetch(
-        "SELECT a.*, n.title, n.original_filename FROM public.uploaded_assessments a "
-        "JOIN public.course_notes n ON n.id = a.note_id "
-        "WHERE a.class_id = $1 ORDER BY a.created_at DESC, a.id",
+    user_id, database, _ = await _authorize(request)
+    await _owned_class(database, class_id, user_id)
+    rows = await database.fetch(
+        "SELECT a.*, n.title, n.original_filename FROM uploaded_assessments a "
+        "JOIN course_notes n ON n.id = a.note_id "
+        "WHERE a.class_id = ?1 ORDER BY a.created_at DESC, a.id",
         class_id,
     )
     return {"items": [_assessment_summary(row) for row in rows]}
@@ -565,13 +570,13 @@ async def list_assessments(
 
 @router.get("/api/assessments/{assessment_id}")
 async def get_assessment(assessment_id: UUID, request: Request) -> AssessmentDetail:
-    user_id, pool, _ = await _authorize(request)
-    row = await pool.fetchrow(
+    user_id, database, _ = await _authorize(request)
+    row = await database.fetchrow(
         "SELECT a.*, n.title, n.original_filename, n.storage_key "
-        "FROM public.uploaded_assessments a "
-        "JOIN public.course_notes n ON n.id = a.note_id AND n.class_id = a.class_id "
-        "JOIN public.course_classes c ON c.id = a.class_id "
-        "WHERE a.id = $1 AND c.owner_id = $2",
+        "FROM uploaded_assessments a "
+        "JOIN course_notes n ON n.id = a.note_id AND n.class_id = a.class_id "
+        "JOIN course_classes c ON c.id = a.class_id "
+        "WHERE a.id = ?1 AND c.owner_id = ?2",
         assessment_id,
         user_id,
     )
@@ -599,12 +604,12 @@ async def get_assessment(assessment_id: UUID, request: Request) -> AssessmentDet
 
 @router.get("/api/classes/{class_id}/uploads")
 async def list_uploads(class_id: UUID, request: Request) -> dict[str, list[UploadSummary]]:
-    user_id, pool, _ = await _authorize(request)
-    await _owned_class(pool, class_id, user_id)
-    rows = await pool.fetch(
-        "SELECT n.* FROM public.course_notes n "
-        "JOIN public.course_classes c ON c.id = n.class_id "
-        "WHERE c.id = $1 AND c.owner_id = $2 ORDER BY n.created_at DESC, n.id",
+    user_id, database, _ = await _authorize(request)
+    await _owned_class(database, class_id, user_id)
+    rows = await database.fetch(
+        "SELECT n.* FROM course_notes n "
+        "JOIN course_classes c ON c.id = n.class_id "
+        "WHERE c.id = ?1 AND c.owner_id = ?2 ORDER BY n.created_at DESC, n.id",
         class_id,
         user_id,
     )
@@ -613,11 +618,11 @@ async def list_uploads(class_id: UUID, request: Request) -> dict[str, list[Uploa
 
 @router.get("/api/uploads/{upload_id}")
 async def get_upload(upload_id: UUID, request: Request) -> UploadDetail:
-    user_id, pool, _ = await _authorize(request)
-    row = await pool.fetchrow(
-        "SELECT n.* FROM public.course_notes n "
-        "JOIN public.course_classes c ON c.id = n.class_id "
-        "WHERE n.id = $1 AND c.owner_id = $2",
+    user_id, database, _ = await _authorize(request)
+    row = await database.fetchrow(
+        "SELECT n.* FROM course_notes n "
+        "JOIN course_classes c ON c.id = n.class_id "
+        "WHERE n.id = ?1 AND c.owner_id = ?2",
         upload_id,
         user_id,
     )
@@ -651,9 +656,9 @@ async def download_upload_file(
     storage = private_storage(request)
     if not storage.verify_url(upload_id, expires, signature):
         raise ApiError(403, "file_link_expired", "This file link is invalid or has expired.")
-    pool = database_pool(request)
-    row = await pool.fetchrow(
-        "SELECT storage_key, original_filename, mime_type FROM public.course_notes WHERE id = $1",
+    db = database(request)
+    row = await db.fetchrow(
+        "SELECT storage_key, original_filename, mime_type FROM course_notes WHERE id = ?1",
         upload_id,
     )
     if row is None or not row["storage_key"]:
@@ -676,16 +681,16 @@ async def patch_upload(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> UploadSummary:
-    user_id, pool, _ = await _authorize(request)
+    user_id, database, _ = await _authorize(request)
     patch = payload.model_dump(exclude_unset=True)
     if not patch or any(value is None for value in patch.values()):
         raise ApiError(400, "invalid_upload_update", "Provide one or more non-empty upload fields.")
     if "extracted_text" in patch and not patch["extracted_text"].strip():
         raise ApiError(400, "invalid_upload_update", "Extracted text cannot be empty.")
-    current = await pool.fetchrow(
-        "SELECT n.* FROM public.course_notes n "
-        "JOIN public.course_classes c ON c.id = n.class_id "
-        "WHERE n.id = $1 AND c.owner_id = $2",
+    current = await database.fetchrow(
+        "SELECT n.* FROM course_notes n "
+        "JOIN course_classes c ON c.id = n.class_id "
+        "WHERE n.id = ?1 AND c.owner_id = ?2",
         upload_id,
         user_id,
     )
@@ -711,28 +716,28 @@ async def patch_upload(
             if key == "kind" and value in LECTURE_KINDS and current["kind"] not in LECTURE_KINDS:
                 raise ApiError(400, "invalid_upload_kind", "Only audio or video files can be lectures.")
             values.append(value)
-            cast = "::course_note_kind" if key == "kind" else ""
-            fields.append(f"{key} = ${len(values)}{cast}")
+            fields.append(f"{key} = ?{len(values)}")
     reprocess = "kind" in patch or "extracted_text" in patch
     assessment_id: UUID | None = None
     if reprocess and getattr(request.app.state, "gemini_content_service", None) is None:
         raise ApiError(503, "content_processing_unavailable", "Course material processing is unavailable.")
     if reprocess:
         fields.extend(["status = 'processing'", "processing_progress = 0", "failure_code = NULL", "processed_at = NULL"])
+    fields.append("updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')")
     query = (
-        "UPDATE public.course_notes AS n SET " + ", ".join(fields)
-        + " FROM public.course_classes AS c WHERE n.id = $1 AND n.class_id = c.id "
-        "AND c.owner_id = $2 RETURNING n.*"
+        "UPDATE course_notes SET " + ", ".join(fields)
+        + " WHERE id = ?1 AND class_id IN "
+        "(SELECT id FROM course_classes WHERE owner_id = ?2) RETURNING *"
     )
-    async with pool.acquire() as connection:
+    async with database.acquire() as connection:
         async with connection.transaction():
             row = await connection.fetchrow(query, *values)
             if row is None:
                 raise ApiError(404, "not_found", "The requested resource was not found.")
             if reprocess:
                 await connection.execute(
-                    "DELETE FROM public.study_materials WHERE id IN ("
-                    "SELECT material_id FROM public.study_material_sources WHERE note_id = $1)",
+                    "DELETE FROM study_materials WHERE id IN ("
+                    "SELECT material_id FROM study_material_sources WHERE note_id = ?1)",
                     upload_id,
                 )
                 assessment_id = await _reset_assessment_for_processing(connection, upload_id)
@@ -756,35 +761,35 @@ async def patch_upload(
 
 @router.delete("/api/uploads/{upload_id}", status_code=204)
 async def delete_upload(upload_id: UUID, request: Request) -> Response:
-    user_id, pool, _ = await _authorize(request)
-    async with pool.acquire() as connection:
+    user_id, database, _ = await _authorize(request)
+    async with database.acquire() as connection:
         async with connection.transaction():
             row = await connection.fetchrow(
-                "SELECT n.storage_key FROM public.course_notes n "
-                "JOIN public.course_classes c ON c.id = n.class_id "
-                "WHERE n.id = $1 AND c.owner_id = $2 FOR UPDATE OF n",
+                "SELECT n.storage_key FROM course_notes n "
+                "JOIN course_classes c ON c.id = n.class_id "
+                "WHERE n.id = ?1 AND c.owner_id = ?2",
                 upload_id,
                 user_id,
             )
             if row is None:
                 raise ApiError(404, "not_found", "The requested resource was not found.")
-            await connection.execute("DELETE FROM public.course_notes WHERE id = $1", upload_id)
+            await connection.execute("DELETE FROM course_notes WHERE id = ?1", upload_id)
     private_storage(request).delete(row["storage_key"])
     return Response(status_code=204)
 
 
 @router.post("/api/uploads/{upload_id}/retry", status_code=202)
 async def retry_upload(upload_id: UUID, request: Request, background_tasks: BackgroundTasks) -> UploadSummary:
-    user_id, pool, _ = await _authorize(request)
+    user_id, database, _ = await _authorize(request)
     if getattr(request.app.state, "gemini_content_service", None) is None:
         raise ApiError(503, "content_processing_unavailable", "Course material processing is unavailable.")
-    async with pool.acquire() as connection:
+    async with database.acquire() as connection:
         async with connection.transaction():
             current = await connection.fetchrow(
-                "SELECT n.status, a.id AS assessment_id FROM public.course_notes n "
-                "JOIN public.course_classes c ON c.id = n.class_id "
-                "LEFT JOIN public.uploaded_assessments a ON a.note_id = n.id "
-                "WHERE n.id = $1 AND c.owner_id = $2 FOR UPDATE OF n",
+                "SELECT n.status, a.id AS assessment_id FROM course_notes n "
+                "JOIN course_classes c ON c.id = n.class_id "
+                "LEFT JOIN uploaded_assessments a ON a.note_id = n.id "
+                "WHERE n.id = ?1 AND c.owner_id = ?2",
                 upload_id,
                 user_id,
             )
@@ -793,8 +798,10 @@ async def retry_upload(upload_id: UUID, request: Request, background_tasks: Back
             if current["status"] != "failed":
                 raise ApiError(409, "upload_not_failed", "Only failed uploads can be retried.")
             row = await connection.fetchrow(
-                "UPDATE public.course_notes SET status = 'processing', processing_progress = 0, "
-                "failure_code = NULL, processed_at = NULL WHERE id = $1 RETURNING *",
+                "UPDATE course_notes SET status = 'processing', processing_progress = 0, "
+                "failure_code = NULL, processed_at = NULL, "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE id = ?1 RETURNING *",
                 upload_id,
             )
             assessment_id = (
@@ -811,14 +818,15 @@ async def retry_upload(upload_id: UUID, request: Request, background_tasks: Back
 
 async def _process_upload_job(application: Any, upload_id: UUID) -> None:
     """Extract or transcribe one upload, updating only the active processing attempt."""
-    pool: asyncpg.Pool | None = getattr(application.state, "database_pool", None)
+    database: SQLiteDatabase | None = getattr(application.state, "database", None)
     content_service = getattr(application.state, "gemini_content_service", None)
     storage: LocalPrivateStorage | None = getattr(application.state, "private_storage", None)
-    if pool is None or content_service is None or storage is None:
+    if database is None or content_service is None or storage is None:
         return
     try:
-        row = await pool.fetchrow(
-            "UPDATE public.course_notes SET processing_progress = 10 WHERE id = $1 "
+        row = await database.fetchrow(
+            "UPDATE course_notes SET processing_progress = 10, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1 "
             "AND status = 'processing' RETURNING id, kind, source_type, storage_key, mime_type, extracted_text, updated_at",
             upload_id,
         )
@@ -829,11 +837,12 @@ async def _process_upload_job(application: Any, upload_id: UUID) -> None:
         else:
             path = storage.path_for(row["storage_key"])
             result = await asyncio.to_thread(content_service.process_upload, path, row["kind"], row["mime_type"])
-        await pool.execute(
-            "UPDATE public.course_notes SET extracted_text = $2, summary = $3, key_topics = $4::jsonb, "
-            "transcript_segments = $5::jsonb, duration_seconds = $6, syllabus_outline = $7::jsonb, "
-            "status = 'ready', processing_progress = 100, failure_code = NULL, processed_at = now() "
-            "WHERE id = $1 AND status = 'processing' AND updated_at = $8",
+        await database.execute(
+            "UPDATE course_notes SET extracted_text = ?2, summary = ?3, key_topics = ?4, "
+            "transcript_segments = ?5, duration_seconds = ?6, syllabus_outline = ?7, "
+            "status = 'ready', processing_progress = 100, failure_code = NULL, processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+            "WHERE id = ?1 AND status = 'processing' AND updated_at = ?8",
             upload_id,
             result["extracted_text"],
             result["summary"],
@@ -850,9 +859,10 @@ async def _process_upload_job(application: Any, upload_id: UUID) -> None:
             type(exc).__name__,
         )
         try:
-            await pool.execute(
-                "UPDATE public.course_notes SET status = 'failed', failure_code = 'processing_failed' "
-                "WHERE id = $1 AND status = 'processing'",
+            await database.execute(
+                "UPDATE course_notes SET status = 'failed', failure_code = 'processing_failed', "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE id = ?1 AND status = 'processing'",
                 upload_id,
             )
         except Exception:
@@ -863,32 +873,33 @@ async def _process_assessment_job(
     application: Any, assessment_id: UUID, use_extracted_text: bool = False
 ) -> None:
     """Extract and grade one imported test, keeping its upload and assessment states aligned."""
-    pool: asyncpg.Pool | None = getattr(application.state, "database_pool", None)
+    database: SQLiteDatabase | None = getattr(application.state, "database", None)
     content_service: GeminiContentService | None = getattr(
         application.state, "gemini_content_service", None
     )
     storage: LocalPrivateStorage | None = getattr(application.state, "private_storage", None)
-    if pool is None or content_service is None or storage is None:
+    if database is None or content_service is None or storage is None:
         return
 
     active_updated_at = None
     note_id = None
     try:
-        row = await pool.fetchrow(
+        row = await database.fetchrow(
             "SELECT a.id AS assessment_id, a.class_id, a.note_id, n.kind, n.storage_key, "
             "n.mime_type, n.extracted_text, n.updated_at AS note_updated_at "
-            "FROM public.uploaded_assessments a "
-            "JOIN public.course_notes n ON n.id = a.note_id AND n.class_id = a.class_id "
-            "WHERE a.id = $1 AND a.processing_status = 'processing' AND n.status = 'processing'",
+            "FROM uploaded_assessments a "
+            "JOIN course_notes n ON n.id = a.note_id AND n.class_id = a.class_id "
+            "WHERE a.id = ?1 AND a.processing_status = 'processing' AND n.status = 'processing'",
             assessment_id,
         )
         if row is None:
             return
         note_id = row["note_id"]
         active_updated_at = row["note_updated_at"]
-        progress = await pool.fetchrow(
-            "UPDATE public.course_notes SET processing_progress = 10 "
-            "WHERE id = $1 AND status = 'processing' AND updated_at = $2 RETURNING updated_at",
+        progress = await database.fetchrow(
+            "UPDATE course_notes SET processing_progress = 10, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+            "WHERE id = ?1 AND status = 'processing' AND updated_at = ?2 RETURNING updated_at",
             note_id,
             active_updated_at,
         )
@@ -907,9 +918,10 @@ async def _process_assessment_job(
                 row["kind"],
                 row["mime_type"],
             )
-        progress = await pool.fetchrow(
-            "UPDATE public.course_notes SET processing_progress = 55 "
-            "WHERE id = $1 AND status = 'processing' AND updated_at = $2 RETURNING updated_at",
+        progress = await database.fetchrow(
+            "UPDATE course_notes SET processing_progress = 55, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+            "WHERE id = ?1 AND status = 'processing' AND updated_at = ?2 RETURNING updated_at",
             note_id,
             active_updated_at,
         )
@@ -917,11 +929,11 @@ async def _process_assessment_job(
             return
         active_updated_at = progress["updated_at"]
 
-        class_note_rows = await pool.fetch(
-            "SELECT n.id, n.title, n.extracted_text, n.summary FROM public.course_notes n "
-            "WHERE n.class_id = $1 AND n.status = 'ready' "
+        class_note_rows = await database.fetch(
+            "SELECT n.id, n.title, n.extracted_text, n.summary FROM course_notes n "
+            "WHERE n.class_id = ?1 AND n.status = 'ready' "
             "AND (n.extracted_text IS NOT NULL OR n.summary IS NOT NULL) "
-            "AND NOT EXISTS (SELECT 1 FROM public.uploaded_assessments a WHERE a.note_id = n.id) "
+            "AND NOT EXISTS (SELECT 1 FROM uploaded_assessments a WHERE a.note_id = n.id) "
             "ORDER BY n.updated_at DESC, n.id",
             row["class_id"],
         )
@@ -931,14 +943,15 @@ async def _process_assessment_job(
             [dict(note) for note in class_note_rows],
         )
 
-        async with pool.acquire() as connection:
+        async with database.acquire() as connection:
             async with connection.transaction():
                 saved_note = await connection.fetchrow(
-                    "UPDATE public.course_notes SET extracted_text = $2, summary = $3, "
-                    "key_topics = $4::jsonb, transcript_segments = $5::jsonb, "
-                    "duration_seconds = $6, syllabus_outline = $7::jsonb, status = 'ready', "
-                    "processing_progress = 100, failure_code = NULL, processed_at = now() "
-                    "WHERE id = $1 AND status = 'processing' AND updated_at = $8 RETURNING id",
+                    "UPDATE course_notes SET extracted_text = ?2, summary = ?3, "
+                    "key_topics = ?4, transcript_segments = ?5, "
+                    "duration_seconds = ?6, syllabus_outline = ?7, status = 'ready', "
+                    "processing_progress = 100, failure_code = NULL, processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
+                    "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                    "WHERE id = ?1 AND status = 'processing' AND updated_at = ?8 RETURNING id",
                     note_id,
                     extracted["extracted_text"],
                     extracted["summary"],
@@ -953,12 +966,13 @@ async def _process_assessment_job(
                 if saved_note is None:
                     return
                 await connection.execute(
-                    "UPDATE public.uploaded_assessments SET processing_status = $2, "
-                    "has_student_responses = $3, questions = $4::jsonb, grading_mode = $5, "
-                    "score_percent = $6, grading_result = $7::jsonb, grade_confidence = $8, "
-                    "failure_code = NULL, processed_at = now(), "
-                    "graded_at = CASE WHEN $5 IN ('answer_key', 'class_notes_estimated') "
-                    "THEN now() ELSE NULL END WHERE id = $1 AND processing_status = 'processing'",
+                    "UPDATE uploaded_assessments SET processing_status = ?2, "
+                    "has_student_responses = ?3, questions = ?4, grading_mode = ?5, "
+                    "score_percent = ?6, grading_result = ?7, grade_confidence = ?8, "
+                    "failure_code = NULL, processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
+                    "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
+                    "graded_at = CASE WHEN ?5 IN ('answer_key', 'class_notes_estimated') "
+                    "THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE NULL END WHERE id = ?1 AND processing_status = 'processing'",
                     assessment_id,
                     analysis["processing_status"],
                     analysis["has_student_responses"],
@@ -979,23 +993,24 @@ async def _process_assessment_job(
         if note_id is None:
             return
         try:
-            async with pool.acquire() as connection:
+            async with database.acquire() as connection:
                 async with connection.transaction():
                     failed_note = await connection.fetchrow(
-                        "UPDATE public.course_notes SET status = 'failed', "
-                        "failure_code = 'processing_failed' WHERE id = $1 "
+                        "UPDATE course_notes SET status = 'failed', "
+                        "failure_code = 'processing_failed', "
+                        "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1 "
                         "AND status = 'processing' "
-                        "AND updated_at = $2 RETURNING id",
+                        "AND updated_at = ?2 RETURNING id",
                         note_id,
                         active_updated_at,
                     )
                     if failed_note is not None:
                         await connection.execute(
-                            "UPDATE public.uploaded_assessments SET processing_status = 'failed', "
+                            "UPDATE uploaded_assessments SET processing_status = 'failed', "
                             "score_percent = NULL, grade_confidence = NULL, grading_result = NULL, "
                             "failure_code = 'processing_failed', processed_at = NULL, "
-                            "graded_at = NULL "
-                            "WHERE id = $1 AND processing_status = 'processing'",
+                            "graded_at = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                            "WHERE id = ?1 AND processing_status = 'processing'",
                             assessment_id,
                         )
         except Exception:
@@ -1004,14 +1019,15 @@ async def _process_assessment_job(
 
 async def _reprocess_upload_job(application: Any, upload_id: UUID, use_extracted_text: bool) -> None:
     """Rebuild summaries/outlines after a user edits the text or kind."""
-    pool: asyncpg.Pool | None = getattr(application.state, "database_pool", None)
+    database: SQLiteDatabase | None = getattr(application.state, "database", None)
     content_service = getattr(application.state, "gemini_content_service", None)
     storage: LocalPrivateStorage | None = getattr(application.state, "private_storage", None)
-    if pool is None or content_service is None or storage is None:
+    if database is None or content_service is None or storage is None:
         return
     try:
-        row = await pool.fetchrow(
-            "UPDATE public.course_notes SET processing_progress = 10 WHERE id = $1 "
+        row = await database.fetchrow(
+            "UPDATE course_notes SET processing_progress = 10, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1 "
             "AND status = 'processing' RETURNING id, kind, source_type, storage_key, mime_type, extracted_text, updated_at",
             upload_id,
         )
@@ -1026,11 +1042,12 @@ async def _reprocess_upload_job(application: Any, upload_id: UUID, use_extracted
                 row["kind"],
                 row["mime_type"],
             )
-        await pool.execute(
-            "UPDATE public.course_notes SET extracted_text = $2, summary = $3, key_topics = $4::jsonb, "
-            "transcript_segments = $5::jsonb, duration_seconds = $6, syllabus_outline = $7::jsonb, "
-            "status = 'ready', processing_progress = 100, failure_code = NULL, processed_at = now() "
-            "WHERE id = $1 AND status = 'processing' AND updated_at = $8",
+        await database.execute(
+            "UPDATE course_notes SET extracted_text = ?2, summary = ?3, key_topics = ?4, "
+            "transcript_segments = ?5, duration_seconds = ?6, syllabus_outline = ?7, "
+            "status = 'ready', processing_progress = 100, failure_code = NULL, processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+            "WHERE id = ?1 AND status = 'processing' AND updated_at = ?8",
             upload_id,
             result["extracted_text"],
             result["summary"],
@@ -1047,9 +1064,10 @@ async def _reprocess_upload_job(application: Any, upload_id: UUID, use_extracted
             type(exc).__name__,
         )
         try:
-            await pool.execute(
-                "UPDATE public.course_notes SET status = 'failed', failure_code = 'processing_failed' "
-                "WHERE id = $1 AND status = 'processing'",
+            await database.execute(
+                "UPDATE course_notes SET status = 'failed', failure_code = 'processing_failed', "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE id = ?1 AND status = 'processing'",
                 upload_id,
             )
         except Exception:
@@ -1058,11 +1076,11 @@ async def _reprocess_upload_job(application: Any, upload_id: UUID, use_extracted
 
 @router.get("/api/classes/{class_id}/syllabus")
 async def get_syllabus(class_id: UUID, request: Request) -> SyllabusOutline:
-    user_id, pool, _ = await _authorize(request)
-    await _owned_class(pool, class_id, user_id)
-    row = await pool.fetchrow(
-        "SELECT n.id, n.syllabus_outline FROM public.course_notes n "
-        "WHERE n.class_id = $1 AND n.kind = 'syllabus' AND n.status = 'ready' "
+    user_id, database, _ = await _authorize(request)
+    await _owned_class(database, class_id, user_id)
+    row = await database.fetchrow(
+        "SELECT n.id, n.syllabus_outline FROM course_notes n "
+        "WHERE n.class_id = ?1 AND n.kind = 'syllabus' AND n.status = 'ready' "
         "ORDER BY n.updated_at DESC LIMIT 1",
         class_id,
     )
@@ -1080,10 +1098,10 @@ async def update_syllabus(
     payload: SyllabusOutlineUpdate,
     request: Request,
 ) -> SyllabusOutline:
-    user_id, pool, _ = await _authorize(request)
-    await _owned_class(pool, class_id, user_id)
-    row = await pool.fetchrow(
-        "SELECT id FROM public.course_notes WHERE class_id = $1 AND kind = 'syllabus' "
+    user_id, database, _ = await _authorize(request)
+    await _owned_class(database, class_id, user_id)
+    row = await database.fetchrow(
+        "SELECT id FROM course_notes WHERE class_id = ?1 AND kind = 'syllabus' "
         "AND status = 'ready' ORDER BY updated_at DESC LIMIT 1",
         class_id,
     )
@@ -1095,8 +1113,9 @@ async def update_syllabus(
     for exam in outline["exams"]:
         if any(reference not in topic_ids and reference.casefold() not in topic_names for reference in exam["topics"]):
             raise ApiError(400, "invalid_syllabus_outline", "An exam refers to a topic outside this syllabus.")
-    await pool.execute(
-        "UPDATE public.course_notes SET syllabus_outline = $2::jsonb WHERE id = $1",
+    await database.execute(
+        "UPDATE course_notes SET syllabus_outline = ?2, "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
         row["id"],
         json.dumps(outline),
     )
@@ -1104,32 +1123,33 @@ async def update_syllabus(
 
 
 async def _resolve_material_sources(
-    pool: asyncpg.Pool,
+    database: SQLiteDatabase,
     class_id: UUID,
     scope: dict,
-) -> tuple[list[asyncpg.Record], dict]:
+) -> tuple[list[dict[str, Any]], dict]:
     scope_kind = scope.get("kind")
     if scope_kind == "all":
-        rows = await pool.fetch(
-            "SELECT id, title, kind, extracted_text, summary, status FROM public.course_notes "
-            "WHERE class_id = $1 AND status = 'ready' ORDER BY created_at",
+        rows = await database.fetch(
+            "SELECT id, title, kind, extracted_text, summary, status FROM course_notes "
+            "WHERE class_id = ?1 AND status = 'ready' ORDER BY created_at",
             class_id,
         )
     elif scope_kind == "uploads":
         ids = [UUID(value) for value in scope.get("upload_ids", [])]
-        rows = await pool.fetch(
-            "SELECT id, title, kind, extracted_text, summary, status FROM public.course_notes "
-            "WHERE class_id = $1 AND id = ANY($2::uuid[]) ORDER BY created_at",
+        placeholders = ", ".join(f"?{index + 2}" for index in range(len(ids)))
+        rows = await database.fetch(
+            "SELECT id, title, kind, extracted_text, summary, status FROM course_notes "
+            f"WHERE class_id = ?1 AND id IN ({placeholders}) ORDER BY created_at",
             class_id,
-            ids,
+            *ids,
         )
         if len(rows) != len(ids):
             raise ApiError(404, "not_found", "The requested resource was not found.")
         if any(row["status"] != "ready" for row in rows):
             raise ApiError(409, "uploads_not_ready", "Wait for the selected uploads to finish processing.")
     elif scope_kind in {"topics", "exam"}:
-        syllabus = await pool.fetchrow(
-            "SELECT syllabus_outline FROM public.course_notes WHERE class_id = $1 "
+        syllabus = await database.fetchrow(
+            "SELECT syllabus_outline FROM course_notes WHERE class_id = ?1 "
             "AND kind = 'syllabus' AND status = 'ready' ORDER BY updated_at DESC LIMIT 1",
             class_id,
         )
@@ -1159,9 +1179,9 @@ async def _resolve_material_sources(
             if found_exam is None:
                 raise ApiError(400, "invalid_scope", "The selected exam is not in this class syllabus.")
             scope = {"kind": "exam", "exam_name": found_exam["name"]}
-        rows = await pool.fetch(
-            "SELECT id, title, kind, extracted_text, summary, status FROM public.course_notes "
-            "WHERE class_id = $1 AND status = 'ready' ORDER BY created_at",
+        rows = await database.fetch(
+            "SELECT id, title, kind, extracted_text, summary, status FROM course_notes "
+            "WHERE class_id = ?1 AND status = 'ready' ORDER BY created_at",
             class_id,
         )
     else:
@@ -1175,23 +1195,23 @@ async def _create_material_job(
     application: Any,
     material_id: UUID,
 ) -> None:
-    pool: asyncpg.Pool | None = getattr(application.state, "database_pool", None)
+    database: SQLiteDatabase | None = getattr(application.state, "database", None)
     service: GeminiContentService | None = getattr(application.state, "gemini_content_service", None)
-    if pool is None or service is None:
+    if database is None or service is None:
         return
     try:
-        material = await pool.fetchrow(
+        material = await database.fetchrow(
             "SELECT m.id, m.class_id, m.kind, m.scope, m.options, c.name AS class_name "
-            "FROM public.study_materials m JOIN public.course_classes c ON c.id = m.class_id "
-            "WHERE m.id = $1",
+            "FROM study_materials m JOIN course_classes c ON c.id = m.class_id "
+            "WHERE m.id = ?1",
             material_id,
         )
         if material is None:
             return
-        source_rows = await pool.fetch(
-            "SELECT n.id, n.title, n.extracted_text, n.summary FROM public.study_material_sources s "
-            "JOIN public.course_notes n ON n.id = s.note_id AND n.class_id = s.class_id "
-            "WHERE s.material_id = $1 ORDER BY s.position",
+        source_rows = await database.fetch(
+            "SELECT n.id, n.title, n.extracted_text, n.summary FROM study_material_sources s "
+            "JOIN course_notes n ON n.id = s.note_id AND n.class_id = s.class_id "
+            "WHERE s.material_id = ?1 ORDER BY s.position",
             material_id,
         )
         sources = [dict(row) for row in source_rows]
@@ -1203,9 +1223,10 @@ async def _create_material_job(
             options=json_value(material["options"], {}),
             sources=sources,
         )
-        await pool.execute(
-            "UPDATE public.study_materials SET title = $2, content = $3::jsonb, status = 'ready', "
-            "failure_code = NULL, generated_at = now(), updated_at = now() WHERE id = $1",
+        await database.execute(
+            "UPDATE study_materials SET title = ?2, content = ?3, status = 'ready', "
+        "failure_code = NULL, generated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
             material_id,
             title,
             json.dumps(content),
@@ -1216,9 +1237,9 @@ async def _create_material_job(
             material_id,
             type(exc).__name__,
         )
-        await pool.execute(
-            "UPDATE public.study_materials SET status = 'failed', failure_code = 'generation_failed', "
-            "updated_at = now() WHERE id = $1 AND status = 'generating'",
+        await database.execute(
+            "UPDATE study_materials SET status = 'failed', failure_code = 'generation_failed', "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1 AND status = 'generating'",
             material_id,
         )
 
@@ -1230,8 +1251,8 @@ async def create_study_material(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> MaterialSummary:
-    user_id, pool, _ = await _authorize(request)
-    class_row = await _owned_class(pool, class_id, user_id)
+    user_id, database, _ = await _authorize(request)
+    class_row = await _owned_class(database, class_id, user_id)
     if getattr(request.app.state, "gemini_content_service", None) is None:
         raise ApiError(503, "content_processing_unavailable", "Study material generation is unavailable.")
     await _rate_limit(request, "generation_rate_limiter", user_id)
@@ -1248,14 +1269,15 @@ async def create_study_material(
             "invalid_options",
             "Question types are available only for quizzes and practice exams.",
         )
-    sources, scope = await _resolve_material_sources(pool, class_id, scope)
+    sources, scope = await _resolve_material_sources(database, class_id, scope)
     title = f"{payload.kind.replace('_', ' ').title()}: {class_row['name']}"
-    async with pool.acquire() as connection:
+    async with database.acquire() as connection:
         async with connection.transaction():
             row = await connection.fetchrow(
-                "INSERT INTO public.study_materials (class_id, kind, title, status, scope, options) "
-                "VALUES ($1, $2::study_material_kind, $3, 'generating', $4::jsonb, $5::jsonb) "
+                "INSERT INTO study_materials (id, class_id, kind, title, status, scope, options) "
+                "VALUES (?1, ?2, ?3, ?4, 'generating', ?5, ?6) "
                 "RETURNING id, class_id, kind, title, scope, options, status, failure_code, created_at, generated_at",
+                uuid4(),
                 class_id,
                 payload.kind,
                 title,
@@ -1263,8 +1285,8 @@ async def create_study_material(
                 json.dumps(options),
             )
             await connection.executemany(
-                "INSERT INTO public.study_material_sources (material_id, class_id, note_id, position) "
-                "VALUES ($1, $2, $3, $4)",
+                "INSERT INTO study_material_sources (material_id, class_id, note_id, position) "
+                "VALUES (?1, ?2, ?3, ?4)",
                 [(row["id"], class_id, source["id"], index) for index, source in enumerate(sources)],
             )
     background_tasks.add_task(_create_material_job, request.app, row["id"])
@@ -1285,15 +1307,16 @@ async def create_study_material(
 
 @router.get("/api/classes/{class_id}/study-materials")
 async def list_study_materials(class_id: UUID, request: Request) -> dict[str, list[MaterialSummary]]:
-    user_id, pool, _ = await _authorize(request)
-    await _owned_class(pool, class_id, user_id)
-    rows = await pool.fetch(
-        "SELECT m.*, COALESCE((m.options->>'count')::integer, 0) AS requested_count, "
-        "latest.score_percent AS latest_score, latest.completed_at AS latest_completed_at "
-        "FROM public.study_materials m "
-        "LEFT JOIN LATERAL (SELECT a.score_percent, a.completed_at FROM public.study_material_attempts a "
-        "WHERE a.material_id = m.id ORDER BY a.completed_at DESC LIMIT 1) latest ON true "
-        "WHERE m.class_id = $1 ORDER BY m.created_at DESC, m.id",
+    user_id, database, _ = await _authorize(request)
+    await _owned_class(database, class_id, user_id)
+    rows = await database.fetch(
+        "SELECT m.*, COALESCE(json_extract(m.options, '$.count'), 0) AS requested_count, "
+        "(SELECT a.score_percent FROM study_material_attempts a WHERE a.material_id = m.id "
+        "ORDER BY a.completed_at DESC LIMIT 1) AS latest_score, "
+        "(SELECT a.completed_at FROM study_material_attempts a WHERE a.material_id = m.id "
+        "ORDER BY a.completed_at DESC LIMIT 1) AS latest_completed_at "
+        "FROM study_materials m "
+        "WHERE m.class_id = ?1 ORDER BY m.created_at DESC, m.id",
         class_id,
     )
     return {"items": [_material_summary(row) for row in rows]}
@@ -1301,14 +1324,15 @@ async def list_study_materials(class_id: UUID, request: Request) -> dict[str, li
 
 @router.get("/api/study-materials/{material_id}")
 async def get_study_material(material_id: UUID, request: Request) -> MaterialDetail:
-    user_id, pool, _ = await _authorize(request)
-    row = await pool.fetchrow(
-        "SELECT m.*, COALESCE((m.options->>'count')::integer, 0) AS requested_count, "
-        "latest.score_percent AS latest_score, latest.completed_at AS latest_completed_at "
-        "FROM public.study_materials m JOIN public.course_classes c ON c.id = m.class_id "
-        "LEFT JOIN LATERAL (SELECT a.score_percent, a.completed_at FROM public.study_material_attempts a "
-        "WHERE a.material_id = m.id ORDER BY a.completed_at DESC LIMIT 1) latest ON true "
-        "WHERE m.id = $1 AND c.owner_id = $2",
+    user_id, database, _ = await _authorize(request)
+    row = await database.fetchrow(
+        "SELECT m.*, COALESCE(json_extract(m.options, '$.count'), 0) AS requested_count, "
+        "(SELECT a.score_percent FROM study_material_attempts a WHERE a.material_id = m.id "
+        "ORDER BY a.completed_at DESC LIMIT 1) AS latest_score, "
+        "(SELECT a.completed_at FROM study_material_attempts a WHERE a.material_id = m.id "
+        "ORDER BY a.completed_at DESC LIMIT 1) AS latest_completed_at "
+        "FROM study_materials m JOIN course_classes c ON c.id = m.class_id "
+        "WHERE m.id = ?1 AND c.owner_id = ?2",
         material_id,
         user_id,
     )
@@ -1323,10 +1347,10 @@ async def get_study_material(material_id: UUID, request: Request) -> MaterialDet
 
 @router.delete("/api/study-materials/{material_id}", status_code=204)
 async def delete_study_material(material_id: UUID, request: Request) -> Response:
-    user_id, pool, _ = await _authorize(request)
-    result = await pool.execute(
-        "DELETE FROM public.study_materials m USING public.course_classes c "
-        "WHERE m.class_id = c.id AND m.id = $1 AND c.owner_id = $2",
+    user_id, database, _ = await _authorize(request)
+    result = await database.execute(
+        "DELETE FROM study_materials WHERE id = ?1 AND class_id IN "
+        "(SELECT id FROM course_classes WHERE owner_id = ?2)",
         material_id,
         user_id,
     )
@@ -1346,11 +1370,11 @@ async def submit_attempt(
     payload: AttemptSubmission,
     request: Request,
 ) -> AttemptResult:
-    user_id, pool, _ = await _authorize(request)
-    row = await pool.fetchrow(
-        "SELECT m.id, m.kind, m.status, m.content FROM public.study_materials m "
-        "JOIN public.course_classes c ON c.id = m.class_id "
-        "WHERE m.id = $1 AND c.owner_id = $2",
+    user_id, database, _ = await _authorize(request)
+    row = await database.fetchrow(
+        "SELECT m.id, m.kind, m.status, m.content FROM study_materials m "
+        "JOIN course_classes c ON c.id = m.class_id "
+        "WHERE m.id = ?1 AND c.owner_id = ?2",
         material_id,
         user_id,
     )
@@ -1395,9 +1419,10 @@ async def submit_attempt(
             )
         )
     score = round(correct_count * 100 / len(question_by_id), 2)
-    attempt_id = await pool.fetchval(
-        "INSERT INTO public.study_material_attempts (material_id, answers, score_percent) "
-        "VALUES ($1, $2::jsonb, $3) RETURNING id",
+    attempt_id = await database.fetchval(
+        "INSERT INTO study_material_attempts (id, material_id, answers, score_percent) "
+        "VALUES (?1, ?2, ?3, ?4) RETURNING id",
+        uuid4(),
         material_id,
         json.dumps(payload.answers),
         score,
@@ -1416,11 +1441,11 @@ async def flag_study_item(
     payload: StudyMaterialFlagCreate,
     request: Request,
 ) -> dict[str, Any]:
-    user_id, pool, _ = await _authorize(request)
-    row = await pool.fetchrow(
-        "SELECT m.class_id, m.kind, m.status, m.content FROM public.study_materials m "
-        "JOIN public.course_classes c ON c.id = m.class_id "
-        "WHERE m.id = $1 AND c.owner_id = $2",
+    user_id, database, _ = await _authorize(request)
+    row = await database.fetchrow(
+        "SELECT m.class_id, m.kind, m.status, m.content FROM study_materials m "
+        "JOIN course_classes c ON c.id = m.class_id "
+        "WHERE m.id = ?1 AND c.owner_id = ?2",
         material_id,
         user_id,
     )
@@ -1432,10 +1457,11 @@ async def flag_study_item(
         items = content.get("questions", []) if row["kind"] in {"quiz", "practice_exam"} else content.get("cards", [])
     if payload.question_id not in {str(item.get("id")) for item in items}:
         raise ApiError(400, "invalid_question", "The selected item is not part of this study material.")
-    flag = await pool.fetchrow(
-        "INSERT INTO public.study_material_flags (material_id, class_id, reporter_id, question_id, reason) "
-        "VALUES ($1, $2, $3, $4, $5) ON CONFLICT (material_id, reporter_id, question_id) DO NOTHING "
+    flag = await database.fetchrow(
+        "INSERT INTO study_material_flags (id, material_id, class_id, reporter_id, question_id, reason) "
+        "VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (material_id, reporter_id, question_id) DO NOTHING "
         "RETURNING id, created_at",
+        uuid4(),
         material_id,
         row["class_id"],
         user_id,

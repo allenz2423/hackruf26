@@ -8,12 +8,12 @@ import logging
 from urllib.parse import urlsplit
 from uuid import UUID
 
-import asyncpg
 from fastapi import Request
 
 from app.api.errors import ApiError
 from app.config import Settings
 from app.security.rate_limit import InMemoryRateLimiter
+from app.services.database import SQLiteDatabase
 from app.services.supabase_auth import (
     SupabaseJWTVerifier,
     SupabaseTokenInvalid,
@@ -93,12 +93,12 @@ async def enforce_supabase_api_policy(request: Request, settings: Settings) -> U
     return user_id
 
 
-def database_pool(request: Request) -> asyncpg.Pool:
-    """Return the configured database pool or a stable configuration error."""
-    pool: asyncpg.Pool | None = getattr(request.app.state, "database_pool", None)
-    if pool is None:
-        raise ApiError(503, "database_not_configured", "The class library is temporarily unavailable.")
-    return pool
+def database(request: Request) -> SQLiteDatabase:
+    """Return the initialized SQLite database or a stable service error."""
+    connection: SQLiteDatabase | None = getattr(request.app.state, "database", None)
+    if connection is None:
+        raise ApiError(503, "database_unavailable", "The class library is temporarily unavailable.")
+    return connection
 
 
 def private_storage(request: Request) -> LocalPrivateStorage:
