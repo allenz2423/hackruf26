@@ -1,4 +1,4 @@
-export const SAMPLE_VERSION = 3;
+export const SAMPLE_VERSION = 4;
 
 const now = "2026-10-10T15:00:00.000Z";
 

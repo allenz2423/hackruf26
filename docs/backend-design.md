@@ -1,7 +1,7 @@
 # Backend Design
 
-**Project:** Screen Tutor  
-**Status:** Design draft  
+**Project:** Screen Tutor
+**Status:** Backend API contract and implementation
 **Service:** Python and Pydantic
 
 ## Purpose and scope
@@ -12,7 +12,7 @@ For the MVP, the backend does not receive screen frames, microphone audio, tutor
 
 The backend also runs the **class library**: it stores each student's classes and uploaded course materials (notes, documents, syllabi, lecture slides, and video/audio lectures), extracts text and transcribes lectures with the Gemini API, and generates quizzes, practice tests, study guides, and flashcards from them. This part uses Supabase Auth for sign-in, Supabase PostgreSQL for application data and Auth sessions, and private file storage.
 
-## Proposed backend stack
+## Backend stack
 
 - Python 3.12+
 - FastAPI for a small HTTP API and serving the built frontend on the same origin.
@@ -21,18 +21,22 @@ The backend also runs the **class library**: it stores each student's classes an
 - Google's `google-genai` Python SDK to provision ephemeral Live API tokens.
 - SymPy for exact numeric arithmetic and bounded symbolic simplification; user expressions are converted from a small Python AST allowlist rather than passed to SymPy's string parser.
 - Uvicorn as the ASGI server.
-- Supabase Auth and its managed PostgreSQL database. Supabase Auth owns login sessions; the app schema stores class-library data and refers to the Supabase Auth user ID for ownership. The initial schema is versioned in [the Supabase migration](../supabase/migrations/20261010120000_initial_class_library.sql); the FastAPI database connection and class-library endpoints will be added in a later implementation step.
-- Private object storage for original uploaded files (local disk for a demo; S3-compatible or Supabase/Firebase storage for deployment).
-- A background job runner for slow work such as lecture transcription and generation (FastAPI `BackgroundTasks` for the demo; a real queue such as RQ or Celery if needed later).
+- Supabase Auth and its managed PostgreSQL database. Supabase Auth owns login sessions; the app schema stores class-library data and refers to the Supabase Auth user ID for ownership. Schema changes live in timestamped files under `supabase/migrations/`.
+- Private local file storage for the single-instance hackathon backend (`backend/.local/private_uploads` by default), with short-lived signed download URLs. Deployments on ephemeral hosts need a persistent private volume or a private object-storage adapter.
+- In-process FastAPI `BackgroundTasks` for slow upload and generation work in this hackathon build. Jobs are not durable across restarts; use a persistent queue such as RQ or Celery before multi-instance or production deployment.
 - File parsers: `pypdf` for PDFs, `python-docx` for DOCX, `python-pptx` for PPTX. Images, scanned PDFs, and video/audio go to Gemini.
 
 ### Supabase PostgreSQL schema
 
-The initial migration covers Supabase Auth user ownership, classes, course notes/materials, generated quizzes and practice exams (as well as the other planned study-material types), source-note links, and completed attempts. Class `owner_id` references `auth.users(id)` directly with `ON DELETE CASCADE`; the app does not keep a duplicate user identity table. Foreign keys cascade class deletion through its notes, generated materials, and attempts. Composite class keys prevent source-note link rows from crossing class boundaries; backend validation must also keep citations inside the generated JSON content consistent with those links. Deleting a source note deletes generated materials derived from it. Original file bytes remain in private object storage; PostgreSQL holds the storage key, extracted text, lecture transcript segments, and parsed syllabus outline. Live screen/audio media, live-session transcripts, annotation events, and tutoring conversations are not stored.
+The migrations cover Supabase Auth user ownership and private application profiles, classes, course notes/materials, generated quizzes and practice exams (as well as the other study-material types), source-note links, completed attempts, student error flags, and uploaded assessments. `public.profiles.id` and class `owner_id` reference `auth.users(id)` directly with `ON DELETE CASCADE`. Supabase Auth remains the source of truth for email, credentials, and sessions; `public.profiles` stores optional app fields such as display name, username, and education level. Foreign keys cascade class deletion through its notes, generated materials, and attempts. Composite class keys prevent source-note link rows from crossing class boundaries; backend validation checks citations inside generated JSON. Deleting a source note removes generated materials derived from it. PostgreSQL holds private storage keys, extracted text, lecture transcript segments, and syllabus outlines. Original files live in private storage outside the static web root. Live screen/audio media, live-session transcripts, annotation events, and tutoring conversations are not stored.
+
+The profile table and signup trigger are defined in [the profile migration](../supabase/migrations/20261010180000_user_profiles.sql). A newly created Auth account receives one profile row; existing Auth accounts are backfilled when the migration runs. Authenticated users can read and update only their own profile fields through the Data API. Email is intentionally not copied into the profile table, so Auth remains authoritative when an address changes.
+
+The [uploaded assessment migration](../supabase/migrations/20261010150000_uploaded_assessment_workflow.sql) adds storage for parsed questions, detected student responses, grading mode, confidence, and results. Its API and processing workflow are specified below but are not implemented by the current backend commit. A blank test should be stored as an ungraded reference; a completed test should be graded against a detected answer key or explicitly labeled as an estimate based on that class's notes. If responses cannot be read reliably or no usable class notes are available, mark the assessment `needs_review` without a score. Generated practice quizzes and exams remain separate `study_materials` and can cite an imported test's course-note row as a source.
 
 ### Supabase Auth sessions
 
-Supabase Auth is the source of truth for browser sign-in sessions. It stores and manages those records in its protected `auth.sessions` table and issues a short-lived access-token JWT plus a rotating refresh token. Do not create a second `public.user_sessions` table, copy refresh tokens into application tables, or write directly to `auth.sessions`; use the Supabase Auth client/API for sign-in, refresh, and sign-out. The app schema only references the stable Supabase user UUID (`auth.users.id`) for ownership.
+Supabase Auth is the source of truth for browser sign-in sessions. It stores and manages those records in its protected `auth.sessions` table and issues a short-lived access-token JWT plus a rotating refresh token. Do not create a second `public.user_sessions` table, copy refresh tokens into application tables, or write directly to `auth.sessions`; use the Supabase Auth client/API for sign-in, refresh, and sign-out. `public.profiles.id` and class ownership reference the stable Supabase user UUID (`auth.users.id`); email and login credentials remain in Auth.
 
 | Event | Session behavior |
 | --- | --- |
@@ -45,7 +49,7 @@ The browser uses the Supabase JavaScript Auth client to sign in and refresh its 
 
 The Supabase Auth project settings control access-token lifetime and supported session timeouts. Access tokens default to a one-hour lifetime; sessions otherwise remain active until sign-out or another configured termination event. Keep the default JWT lifetime unless deployment needs justify a change, and choose session timeout settings before public deployment. If a future high-risk operation requires immediate session revocation, additionally check the token's `session_id` against Supabase Auth session state for that operation; do not make every request depend on querying internal Auth tables.
 
-Application tables have row-level security enabled with no browser-facing policies in the prototype. Class-library data is accessed through FastAPI, which verifies the caller and scopes every query by the verified owner UUID. Keep the database connection and any privileged Supabase key on the server. If the app later accesses application tables directly through Supabase's Data API, add and review user-scoped RLS policies before granting that access.
+The profile table has row-level security policies for selecting and updating the signed-in user's own profile. The class-library tables have row-level security enabled with no browser-facing policies in the prototype; class-library data is planned to go through FastAPI, which verifies the caller and scopes every query by the verified owner UUID. Keep the database connection and any privileged Supabase key on the server. The profile migration does not connect the browser's current local class storage to Supabase; cross-device file access still requires Auth UI/session wiring and persistent class and file APIs.
 
 Keep schema changes in timestamped `supabase/migrations/` files and apply them through the Supabase CLI. Obtain `DATABASE_URL` from the Supabase project's Connect dialog and store it only on the server. A persistent backend can use the direct connection where its network supports IPv6 (or the project's IPv4 add-on); an IPv4-only backend can use the session pooler. Use the project's selected Postgres major version when configuring local Supabase development.
 
@@ -105,9 +109,29 @@ The server token request occurs after the student begins the session. It is inde
 
 ## HTTP API
 
+### Frontend integration status
+
+The frontend on `main` was reviewed through commit `1145cf1`. Its current HTTP client in [`frontend/src/api.js`](../frontend/src/api.js) only calls `POST /api/live-token`, sends `{}`, and does not attach a Supabase access token. The class page still reads and writes classes in `localStorage` ([`frontend/src/classes.js`](../frontend/src/classes.js)); the library adds file metadata locally without uploading file bytes ([`frontend/src/library.js`](../frontend/src/library.js]); and the study page includes static, playable Math 151 algebra examples alongside local material state ([`frontend/src/sample-assessments.js`](../frontend/src/sample-assessments.js), [`frontend/src/study.js`](../frontend/src/study.js)). The quiz player scores those sample questions locally; it does not call the backend attempts API. The backend routes below are implemented, but the frontend screens do not yet consume them.
+
+The backend implements `GET /healthz`, `POST /api/live-token`, `POST /api/tools/calculate`, and the class-library routes below. With `SUPABASE_URL` configured, it verifies Supabase access-token signatures and claims and requires the verified user for API calls. Without Supabase configured, the standalone token and calculator prototype requires `DEMO_GATE_TOKEN`; protected requests return `503` if neither authentication option is configured. Class-library routes remain unavailable without Supabase Auth, PostgreSQL, and private storage.
+
+Before protected API calls can work, the frontend must initialize Supabase Auth and send `Authorization: Bearer <current-access-token>` on each `/api/*` request. Supabase Auth itself owns sign-in, refresh, and sign-out; FastAPI does not add duplicate auth-session endpoints. The tutor screen must also pass its selected `class_id` to `/api/live-token` if the model should receive class materials.
+
+The pulled `frontend/src/gemini-live.js` currently handles annotation requests locally, but it does not execute `calculate_expression` through `/api/tools/calculate` or send function responses back to Gemini. The class tutor currently starts the same empty token request as Quick tutor. The frontend integration must route approved calculator calls to the calculator endpoint, answer every custom Live function call using its matching call ID, and supply the selected class ID for class tutoring. `google_search` stays inside Gemini and `add_annotations` stays local to the browser.
+
+### Shared API conventions
+
+- Use same-origin `/api` requests and JSON unless the endpoint is a file upload.
+- The API's CORS allow-list must permit `GET`, `POST`, `PATCH`, `PUT`, `DELETE`, and `OPTIONS` for the configured frontend origins; do not enable wildcard credentialed CORS.
+- Class-library routes require a valid Supabase access token. Token and calculator routes use the same verified Supabase identity when configured, or the private demo gate when Supabase is not configured. `GET /healthz` is public. The short-lived signed file URL is a bearer link and does not require a Supabase header. FastAPI derives the owner from the verified JWT and checks ownership for every class, upload, and material ID. Never accept `owner_id` from the client.
+- IDs are UUID strings. Enum values in requests and responses use lowercase `snake_case`; the frontend can map them to its title-case labels (for example, `lecture_video` → “Lecture”).
+- Collection responses use `{"items": [...]}`. Mutations return the created or updated resource unless the contract says `204 No Content`.
+- Errors use `{"code": "...", "message": "...", "request_id": "..."}`. Messages are safe to show to a student and do not include raw upstream errors or submitted file/text contents.
+- Return `404` for both missing and non-owned resources so IDs cannot be used to discover another student's data.
+
 ### `POST /api/live-token`
 
-Requires a valid Supabase access token in the `Authorization: Bearer <access-token>` header. No caller-controlled model or tool configuration is accepted. The request body is empty (or `{}`), or contains only an optional `class_id`, so the server always chooses the model and configuration. When `class_id` is given, the server checks that the verified Supabase user owns the class and builds the session's system instructions from that class's materials on the server side; the client cannot supply its own instructions.
+When `SUPABASE_URL` is configured, this requires a valid Supabase access token in the `Authorization: Bearer <access-token>` header. In no-Supabase demo mode, the configured `DEMO_GATE_TOKEN` is required and `class_id` cannot be used. No caller-controlled model or tool configuration is accepted. The request body is empty (or `{}`), or contains only an optional `class_id`, so the server always chooses the model and configuration. When `class_id` is given, the server checks that the verified Supabase user owns the class and builds the session's system instructions from that class's materials on the server side; the client cannot supply its own instructions.
 
 **Success response**
 
@@ -177,7 +201,7 @@ The result is an exact numeric or symbolic string (up to 512 characters), so fra
 
 Inputs are limited to 256 characters, 64 AST nodes, 32 AST levels, and 16 distinct symbols. Numeric literals and all-numeric intermediate results must be finite and within magnitudes `1e-100` through `1e100`, with zero allowed; numeric exponents are limited to absolute value 100. Results are capped at 128 operations and 512 characters. Function calls are accepted only when the function name is in the explicit allowlist, with no keyword arguments. Attribute access, imports, strings, containers, and all other Python syntax are rejected. The service constructs SymPy expressions from the validated AST; it does not pass user strings to SymPy's `parse_expr` or execute submitted code.
 
-The request uses the same configured app authorization gate and allow-listed Origin check as token issuance. In the current token-service prototype, that is the optional development gate and the configured production demo gate; the planned Supabase integration will replace that gate with verified user authentication. It has a separate per-IP, per-process rate limit, with defaults in `.env.example`. The response never echoes the expression; the endpoint does not log or store expressions or results.
+The request uses the same configured app authorization gate and allow-listed Origin check as token issuance. With Supabase configured, the gate is a verified access token; otherwise it is `DEMO_GATE_TOKEN`. It has a separate per-IP, per-process rate limit, with defaults in `.env.example`. The response never echoes the expression; the endpoint does not log or store expressions or results.
 
 **Failure responses**
 
@@ -221,22 +245,120 @@ Use the application's current authorization token in the example above; do not u
 
 ### Class library endpoints
 
-All of these require a valid Supabase access token and only return the caller's own data. Responses use Pydantic models. FastAPI derives the owner ID from the verified JWT `sub` claim and applies that owner filter on every query; clients do not submit an authoritative owner ID.
+These routes provide the persistent data currently represented by frontend-local arrays. Class colors and initials are presentation details, not stored class data; the frontend derives them from the class name unless a later product decision makes them user-editable.
 
-| Method and path | Purpose |
+#### Classes
+
+`ClassSummary` is:
+
+```json
+{
+  "id": "9f66d1a2-4b9f-4ae2-bc26-38df0fb6b4dd",
+  "name": "Math 151",
+  "created_at": "2026-10-10T18:00:00Z",
+  "updated_at": "2026-10-10T18:00:00Z",
+  "upload_count": 3,
+  "material_count": 2
+}
+```
+
+| Method and path | Contract |
 | --- | --- |
-| `GET /api/classes` · `POST /api/classes` | List or create classes |
-| `PATCH /api/classes/{class_id}` · `DELETE /api/classes/{class_id}` | Rename or delete a class (delete removes its uploads, files, and study materials) |
-| `POST /api/classes/{class_id}/uploads` | Multipart upload of one file (or pasted text) with an optional `kind`: `notes`, `document`, `syllabus`, `slides`, `lecture_video`, `lecture_audio`. Returns the upload with `status: processing` and starts a background job |
-| `GET /api/classes/{class_id}/uploads` | List uploads with kind, status, and progress |
-| `GET /api/uploads/{upload_id}` | Upload detail: extracted text, lecture transcript segments, and a short-lived signed URL for the original file |
-| `PATCH /api/uploads/{upload_id}` · `DELETE /api/uploads/{upload_id}` | Rename, change kind, edit extracted text, or delete (removes file and text) |
-| `GET /api/classes/{class_id}/syllabus` · `PUT …/syllabus` | Read or correct the parsed topic/exam outline |
-| `POST /api/classes/{class_id}/study-materials` | Start generating a `quiz`, `practice_exam`, `study_guide`, or `flashcards` with a scope (all, upload IDs, syllabus topics, or an exam) and options. Returns `status: generating` |
-| `GET /api/classes/{class_id}/study-materials` · `GET /api/study-materials/{id}` | List materials or fetch one (questions include source links: upload ID plus page, slide, or lecture timestamp) |
-| `DELETE /api/study-materials/{id}` | Delete a material |
-| `POST /api/study-materials/{id}/attempts` | Submit answers; the server scores them and returns the result with explanations |
-| `POST /api/study-materials/{id}/flags` | Flag a question or card as wrong |
+| `GET /api/classes` | Return `{"items": [ClassSummary, ...]}` for the caller, newest or recently updated first. Empty accounts return an empty array; do not seed the frontend's demo classes on the server. |
+| `POST /api/classes` | Accept `{"name": "Math 151"}`; trim and validate a non-empty name up to `MAX_CLASS_NAME_LENGTH` characters (100 by default). Return `201` and the new `ClassSummary`. |
+| `PATCH /api/classes/{class_id}` | Accept `{"name": "Math 152"}` and return the updated `ClassSummary`. Reject unknown fields. |
+| `DELETE /api/classes/{class_id}` | Delete the class and cascade its database rows and private files. Return `204`. |
+
+#### Uploads and course materials
+
+`POST /api/classes/{class_id}/uploads` accepts `multipart/form-data`. For the current file picker, send one `file` and optional lowercase `kind` and `title` fields. If the paste-text UI is connected, send `text`, `title`, and optional `kind` instead of `file`; exactly one of `file` or `text` is allowed. A missing file `title` defaults to the original filename. The backend validates the extension, checks a file signature for supported binary formats, enforces the configured size limit regardless of client-side checks, writes original bytes to private storage, creates a note row, queues processing, and returns `202 Accepted`.
+
+```json
+{
+  "id": "0ff95e83-aea8-4fe7-9d01-1f0c01afde01",
+  "class_id": "9f66d1a2-4b9f-4ae2-bc26-38df0fb6b4dd",
+  "title": "Week 3 notes.pdf",
+  "kind": "notes",
+  "source_type": "file",
+  "original_filename": "Week 3 notes.pdf",
+  "mime_type": "application/pdf",
+  "file_size_bytes": 82731,
+  "status": "processing",
+  "processing_progress": 0,
+  "failure_code": null,
+  "created_at": "2026-10-10T18:04:00Z",
+  "updated_at": "2026-10-10T18:04:00Z"
+}
+```
+
+`kind` is one of `notes`, `document`, `syllabus`, `slides`, `lecture_video`, or `lecture_audio`. Map the frontend's displayed categories (“Notes”, “Document”, “Syllabus”, “Slides”, “Lecture”) to these values. The frontend's current 250 MiB check must be kept in sync with `MAX_UPLOAD_MB`; the backend limit is authoritative. The backend accepts one file or pasted-text item per request and caps each class at `MAX_UPLOADS_PER_CLASS` (100 by default; `409 class_upload_limit_reached` at the cap). Client-side byte-transfer progress is not a server status. Once upload completes, poll `GET /api/uploads/{upload_id}` for processing status; lecture processing may be labeled “transcribing” in the UI while the API status remains `processing`.
+
+| Method and path | Contract |
+| --- | --- |
+| `GET /api/classes/{class_id}/uploads` | Return `{"items": [UploadSummary, ...]}` newest first. Summaries include IDs, title, kind, original filename when applicable, file size, status, processing progress, safe failure code, duration, and timestamps. |
+| `GET /api/uploads/{upload_id}` | Return the summary fields plus `extracted_text`, `summary`, `key_topics`, `transcript_segments`, `syllabus_outline`, and a five-minute `file_url` with `file_url_expires_at`. The signed URL is issued only after ownership validation and is omitted for pasted text. `GET /api/uploads/{upload_id}/file` serves the original bytes through that short-lived HMAC-signed bearer URL; it does not require a Supabase header. |
+| `PATCH /api/uploads/{upload_id}` | Accept any non-empty subset of `title`, `kind`, and `extracted_text`; return the updated summary or detail. Do not permit client changes to IDs, ownership, status, storage keys, progress, or generated transcript fields. |
+| `DELETE /api/uploads/{upload_id}` | Remove the note, original private file, and derived materials that cite it. Return `204`. |
+| `POST /api/uploads/{upload_id}/retry` | Retry a failed processing job only; return `202` with status reset to `processing` and progress reset to `0`. Return `409` if the upload is already processing or ready. |
+
+Upload `status` is `processing`, `ready`, or `failed`. `processing_progress` is an integer from 0 to 100. `failure_code` is a safe stable code, not a stack trace. List endpoints must not return extracted text or signed file URLs; fetch detail only when the student opens an upload.
+
+#### Syllabus outline
+
+`GET /api/classes/{class_id}/syllabus` returns the parsed outline for the class's ready syllabus upload, or `{"note_id": null, "topics": [], "exams": []}` when none exists. If a class has more than one syllabus, return the selected/latest outline and include its `note_id` so the UI can identify the source.
+
+```json
+{
+  "note_id": "0ff95e83-aea8-4fe7-9d01-1f0c01afde01",
+  "topics": [{"id": "topic-1", "title": "Derivatives", "week": 3}],
+  "exams": [{"id": "exam-1", "name": "Midterm 1", "date": "2026-10-28", "topics": ["topic-1"]}]
+}
+```
+
+`PUT /api/classes/{class_id}/syllabus` accepts corrected `topics` and `exams` arrays for that class's syllabus and returns the saved outline. Validate IDs and lengths, and do not allow a syllabus outline to reference another student's uploads. The frontend design includes editing this outline; it is not present in the pulled UI yet.
+
+#### Study materials and attempts
+
+The API uses `kind: quiz | practice_exam | study_guide | flashcards`. Map the current UI labels “Quiz”, “Practice test”, “Study guide”, and “Flashcards” to those values. Generation requests use an explicit scope and options:
+
+```json
+{
+  "kind": "quiz",
+  "scope": {"kind": "all"},
+  "options": {"count": 10, "difficulty": "mixed"}
+}
+```
+
+`scope` is one of `{"kind":"all"}`, `{"kind":"uploads","upload_ids":[...]}`, `{"kind":"topics","topics":[...]}`, or `{"kind":"exam","exam_name":"Midterm 1"}`. Every selected upload/topic/exam must belong to the requested class. `options.count` is an integer from 4 to 50; `difficulty` is `mixed`, `easier`, or `harder`; `time_limit_minutes` is an optional bounded positive integer for practice exams. The current Study form exposes all four scope labels but does not yet collect selected upload IDs, topics, exam name, or a time limit. It must collect the corresponding values before those scope options can work.
+
+| Method and path | Contract |
+| --- | --- |
+| `POST /api/classes/{class_id}/study-materials` | Validate that the class has at least one ready source upload and the requested scope is non-empty. Start generation and return `202` with a `MaterialSummary` whose `status` is `generating`. |
+| `GET /api/classes/{class_id}/study-materials` | Return `{"items": [MaterialSummary, ...]}` newest first. Include latest attempt score/time when available. |
+| `GET /api/study-materials/{material_id}` | Return material metadata and its ready content. For quizzes and practice exams, omit answer keys and grading explanations before submission. Include citations as `{"upload_id", "page?", "slide?", "timestamp_seconds?"}`; each source must belong to this material's class and selected source set. |
+| `DELETE /api/study-materials/{material_id}` | Delete the material and its attempts. Return `204`. |
+| `POST /api/study-materials/{material_id}/attempts` | Accept `{"answers":{"question-id":"choice-id-or-short-answer", ...}}`; validate question IDs and answer types, score on the server, save the attempt, and return its result. The response includes `attempt_id`, `score_percent`, `correct_count`, and per-question submitted/correct answers, explanations, and sources. Short answers use Unicode-normalized, case-insensitive exact matching against server-held accepted answers; there is no semantic or AI grading. Do not accept a client-supplied score or answer key. |
+| `POST /api/study-materials/{material_id}/flags` | Accept `{"question_id":"question-id","reason":"optional short note"}` and record a student report that an item may be wrong. Return `201`, or `{"status":"already_flagged"}` if this student already flagged the item. The table is created by `20261010170000_study_material_flags.sql`. |
+
+`MaterialSummary` includes `id`, `class_id`, `kind`, `title`, `scope`, `options`, `status` (`generating`, `ready`, `failed`), `item_count`, `failure_code`, `created_at`, `generated_at`, and optional `latest_attempt: {score_percent, completed_at}`. The frontend can derive its display label from `kind` and count questions/cards from `item_count`.
+
+Ready content is type-specific: quizzes and practice exams contain questions with stable IDs, prompt, question kind, choices where relevant, and source citations; study guides contain ordered sections and citations; flashcards contain ordered cards with stable IDs, front/back text, and citations. Keep answer keys and scoring rubrics server-side until an attempt is submitted. Return a failed material with a safe `failure_code` so the UI can show a retry/regenerate action; never return model traces or raw exception text.
+
+The current Study page includes sample algebra quizzes and practice exams in local state. `quiz-player.js` scores those samples in the browser; it does not call the backend attempts API. Connecting generated material requires replacing the local path with generation submission, polling the material detail until `ready` or `failed`, and using the attempt endpoint for saved scoring. Flashcards are not yet connected to a backend material.
+
+#### Imported existing assessments (schema present, API not implemented)
+
+The uploaded-assessment migration defines the database record, but these endpoints and their grading worker are not part of the current backend implementation. Keep this boundary explicit until the workflow is built:
+
+| Method and path | Target contract |
+| --- | --- |
+| `POST /api/classes/{class_id}/assessments` | Accept one existing test file as `multipart/form-data`, create its course-note source and `uploaded_assessments` row, and return `202` with processing state. The source file remains private and processing uses the same limits as course uploads. |
+| `GET /api/classes/{class_id}/assessments` | Return `{"items": [...]}` with assessment summaries for the caller's class. |
+| `GET /api/assessments/{assessment_id}` | Return the owned assessment's parsed questions, detected responses, grading mode, optional score/confidence, per-question grading result, status, and safe failure code. |
+
+`processing_status` is `processing`, `ready`, `needs_review`, or `failed`. A blank test is a ready, ungraded reference (`grading_mode: not_graded`, no score). A completed test with a detected answer key uses `answer_key`; without a key, grading from notes in the same class must be labeled `class_notes_estimated` and include confidence. Unreadable responses or missing usable class notes result in `needs_review` and no score. The owner may view the answer key and grading result for their own uploaded test. Never treat an imported test's key as the answer key for a separately generated quiz.
+
+When implemented, imported-test source rows will be normal course notes and can be selected through the existing `uploads` study-material scope. Generated quizzes and practice exams remain separate materials with immutable content and source links.
 
 ### Upload processing
 
@@ -247,9 +369,9 @@ All of these require a valid Supabase access token and only return the caller's 
 | Slides | Extract text per slide with `python-pptx`/`pypdf`; send image-heavy slides to Gemini |
 | Video / audio lectures | Upload to the Gemini Files API, ask for a timestamped transcript, summary, and key topics (including what's written on the board or slides for video), then save segments |
 
-Each job updates the upload's `status` (`processing → ready | failed`) and progress so the frontend can poll. Jobs must be safe to retry. Large lectures are the slowest and most expensive step, so transcribe each one once and reuse the transcript for every later generation and tutoring session.
+Each job updates the upload's `status` (`processing → ready | failed`) and progress so the frontend can poll. Jobs run as in-process FastAPI background tasks and can be interrupted by a server restart; a failed upload can be retried through the API. Lecture duration is checked against `MAX_LECTURE_MINUTES` using the generated transcript timestamps, so an over-limit lecture is marked failed after transcription. Large lectures are the slowest and most expensive step, so transcribe each one once and reuse the transcript for every later generation and tutoring session. The original lecture file is sent to Gemini Files API temporarily and deleted after processing when possible; only the course transcript and derived summary/topics are kept in the app database.
 
-Generation sends only the in-scope uploads' text to a standard (non-Live) Gemini model with a response schema per material type, then rejects output with missing answers, a bad structure, or sources outside the class. If a class's text is too large for one request, summarize or chunk it per upload first.
+Generation sends the selected or syllabus-scoped uploads' text (capped at 250,000 characters per request) to `GEMINI_TEXT_MODEL`, a standard Generate Content model separate from Live, with a response schema per material type. The default is `gemini-3.8-flash`. It rejects output with missing answers, a bad structure, duplicate item IDs, or citations outside the selected class sources. If a class's text exceeds the request cap, the backend truncates source excerpts to the cap; chunked retrieval is a future improvement.
 
 ### `GET /healthz`
 
@@ -278,12 +400,19 @@ Read these values from the process environment, with `pydantic-settings` loading
 | `APP_ORIGINS` | Deployment-dependent | Allowed browser origins for API requests |
 | `TOKEN_RATE_LIMIT` / `TOKEN_RATE_WINDOW_SECONDS` | No | Token requests per socket peer/window; defaults to 5 per 60 seconds per process |
 | `CALCULATOR_RATE_LIMIT` / `CALCULATOR_RATE_WINDOW_SECONDS` | No | Calculator requests per socket peer/window; defaults to 30 per 60 seconds per process |
-| `GEMINI_TEXT_MODEL` | Yes, for the class library | Standard Gemini model for text extraction, transcription, and study-material generation |
-| `SUPABASE_URL` | Yes | Supabase project URL; used to identify the Auth issuer and signing-key endpoint |
+| `GEMINI_TEXT_MODEL` | No | Standard Gemini model for text extraction, transcription, syllabus parsing, and study-material generation; defaults to `gemini-3.8-flash` |
+| `SUPABASE_URL` | Yes, for the class library and signed-in API | Supabase project URL; used to identify the Auth issuer and signing-key endpoint |
 | `SUPABASE_PUBLISHABLE_KEY` | Yes, for the frontend | Public project key used by the browser Supabase Auth client; never treat it as a user identity |
 | `DATABASE_URL` | Yes, for the class library | Server-only connection string for the Supabase PostgreSQL database |
-| `STORAGE_BUCKET` / `STORAGE_DIR` | Yes, for the class library | Where original uploaded files are stored |
+| `STORAGE_DIR` | No | Private local upload directory; defaults to `backend/.local/private_uploads`. Use a persistent private volume or object-storage adapter in deployment. |
+| `FILE_URL_SIGNING_SECRET` | Yes, for the class library | Server-only secret of at least 32 characters for five-minute signed file URLs |
 | `MAX_UPLOAD_MB` / `MAX_LECTURE_MINUTES` | No | Upload size and lecture length limits |
+| `MAX_UPLOADS_PER_CLASS` | No | Upload cap for each class; defaults to 100 |
+| `UPLOAD_RATE_LIMIT` / `UPLOAD_RATE_WINDOW_SECONDS` | No | Upload requests per user/window; defaults to 10 per hour per process |
+| `GENERATION_RATE_LIMIT` / `GENERATION_RATE_WINDOW_SECONDS` | No | Study-material generation requests per user/window; defaults to 10 per hour per process |
+| `LIBRARY_JSON_BODY_MAX_BYTES` | No | Maximum JSON body size for library endpoints; defaults to 1,100,000 bytes |
+| `GEMINI_CONTENT_TIMEOUT_SECONDS` | No | Timeout for the separate Gemini content-generation client; defaults to 600 seconds |
+| `DEMO_GATE_TOKEN` | Yes when Supabase Auth is not configured | Private demo authorization for token and calculator endpoints; protected requests fail closed if neither auth option exists |
 
 Do not put the Gemini API key in frontend config, rendered HTML, client-side environment variables, source maps, or API responses. Use the repository's `.env.example` as the local template. Production deployment should inject secrets through its secret manager.
 
@@ -293,13 +422,13 @@ Do not put the Gemini API key in frontend config, rendered HTML, client-side env
 - Allow only configured origins. Do not use wildcard CORS with credentials.
 - Require an authenticated app session for public deployments. For a private hackathon demo without accounts, use a short-lived demo gate and strict IP/token rate limits; an unrestricted public token endpoint can be abused to incur API costs.
 - Verify Supabase JWT signatures and standard claims before using `sub`; decoding a JWT without signature verification is not authentication. Never accept the Supabase publishable key as proof of a signed-in user.
-- Apply limits to request body size, token issuance frequency, and simultaneous sessions per user/session.
+- Apply limits to request body size, token issuance frequency, upload volume per class, and upload/generation request frequency per user.
 - Do not log authorization headers, ephemeral tokens, API keys, request bodies containing credentials, or media (the backend should not receive media).
 - Return generic upstream failures to the browser; log only a request ID, status, and safe error category.
 - If abuse controls need counters, use short-lived in-memory counters for a single instance or a shared rate-limit store for multiple instances. Never store screen or microphone media as part of rate limiting.
 - Check ownership on every class, upload, and study-material request. Keep uploaded files in private storage and serve them only through short-lived signed URLs.
 - Keep Supabase secret/service-role keys and database credentials on the backend. The prototype enables RLS without browser-facing policies; do not expose class tables through the Data API until owner-scoped policies are in place.
-- Check uploads by content type and size, not only by file extension. Limit upload size, lecture length, uploads per class, and generation requests per student.
+- Check uploads by allowed extension and file signature, and enforce size limits. Limit upload size, lecture length, uploads per class, and generation requests per student.
 - Never log uploaded file contents, extracted text, or transcripts.
 
 ## Runtime behavior and errors
@@ -331,6 +460,7 @@ Do not put the Gemini API key in frontend config, rendered HTML, client-side env
 - [Gemini Live API getting started](https://ai.google.dev/gemini-api/docs/live-api/get-started-sdk)
 - [Gemini Live API tools](https://ai.google.dev/gemini-api/docs/live-api/tools)
 - [Gemini 3.8 Live model capabilities](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live)
+- [Gemini 3.8 Flash model](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash)
 - [Live WebSockets server messages and grounding metadata](https://ai.google.dev/api/live.md)
 - [Google Search grounding and attribution metadata](https://ai.google.dev/gemini-api/docs/generate-content/google-search)
 - [Ephemeral tokens](https://ai.google.dev/gemini-api/docs/live-api/ephemeral-tokens)

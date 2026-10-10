@@ -14,9 +14,11 @@ See the [product overview](docs/design.md), [frontend design](docs/frontend-desi
 
 The backend token-service boilerplate is in place. Supabase Auth and PostgreSQL
 are selected for sign-in, login sessions, and class-library data; the initial
-schema is in [the Supabase migration](supabase/migrations/20261010120000_initial_class_library.sql).
-The token service is not yet connected to Supabase, and the frontend and
-separate notes and study-material services are not implemented yet.
+class-library schema is in [the initial migration](supabase/migrations/20261010120000_initial_class_library.sql),
+with private student profile rows in [the profile migration](supabase/migrations/20261010180000_user_profiles.sql).
+Supabase Auth remains authoritative for email and login sessions. The backend
+and frontend are not yet connected to Supabase; class materials currently do
+not sync across devices.
 
 ## Proposed stack
 

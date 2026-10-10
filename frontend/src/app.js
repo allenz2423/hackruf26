@@ -228,6 +228,14 @@ function renderClassTab({ id, tab }) {
       onMaterialAdded: (material) => {
         updateClass(klass.id, { materials: [...klass.materials, material] });
         renderClassTab({ id, tab });
+      },
+      onAttemptCompleted: (materialId, attempt) => {
+        const currentClass = getClassById(klass.id);
+        if (!currentClass) return;
+        const materials = currentClass.materials.map((material) => material.id === materialId
+          ? { ...material, attempts: [...(material.attempts || []), attempt] }
+          : material);
+        updateClass(klass.id, { materials });
       }
     });
     return;

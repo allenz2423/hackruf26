@@ -47,9 +47,9 @@ Students can also upload their own course materials (notes, documents, syllabi, 
 ### Notes and study flow
 
 1. **Create a class.** The student creates a class such as “Math 151” or “Biology” from the Classes page.
-2. **Upload course materials.** The student uploads notes, documents, a syllabus, lecture slides, or a recorded video/audio lecture into that class, or pastes text. The app extracts text (and transcribes lectures) and shows each upload's processing status.
+2. **Upload course materials.** The student uploads notes, documents, a syllabus, lecture slides, a recorded video/audio lecture, or an existing test into that class, or pastes text. The app extracts text (and transcribes lectures) and shows each upload's processing status. A blank test is kept as a reference; a completed test is graded from an answer key when present, or against class notes with an estimated-grade label when no key is available.
 3. **Study with the class tutor.** When the student starts a tutoring session inside a class, the tutor gets that class's notes as reference material, alongside any shared screen.
-4. **Generate study materials.** The student picks a class (and optionally specific uploads, lectures, or syllabus topics) and asks for a quiz, study guide, practice exam, or flashcard set. The app generates it from those notes and opens it.
+4. **Generate study materials.** The student picks a class (and optionally specific uploads, including existing tests, lectures, or syllabus topics) and asks for a quiz, study guide, practice exam, or flashcard set. The app generates it from those sources, saves it separately from the original uploads, and opens it.
 5. **Practice and review.** The student takes a quiz or practice exam in the app, sees a score, and can ask the tutor to explain any question they missed.
 
 ## Product behavior
@@ -80,11 +80,12 @@ Students can also upload their own course materials (notes, documents, syllabi, 
 | --- | --- | --- |
 | Notes | Typed notes, photos/scans of handwritten notes, pasted text | Text parsing; Gemini for images and handwriting |
 | Documents | PDF, DOCX, TXT/Markdown readings, handouts, homework sheets | Text parsing; Gemini for scanned PDFs |
+| Existing tests | Blank or completed test PDFs, documents, or scans | Preserve the original and extract questions. Keep blank tests as references; grade completed tests using a provided answer key or, without one, class notes and an estimated-grade label |
 | Syllabus | Course syllabus (PDF/DOCX/text) | Text extraction plus a structured outline of topics, weeks, and exam dates |
 | Lecture slides | PDF or PPTX slide decks | Per-slide text extraction; Gemini for image-heavy slides |
 | Lecture video/audio | MP4/WebM/MOV video or MP3/M4A/WAV audio of a recorded lecture | Gemini transcription with timestamps, plus a summary and key-topic list; video frames used for board/slide content |
 
-The app keeps the original file and the extracted text or transcript. The student can view, rename, change the kind of, edit the extracted text of, or delete any upload. Lecture recordings show a timestamped transcript, and study materials built from a lecture link back to the moment they came from.
+The app keeps the original file and the extracted text or transcript. The student can view, rename, change the kind of, edit the extracted text of, or delete any upload. Lecture recordings show a timestamped transcript, and study materials built from a lecture link back to the moment they came from. Parsed existing tests remain linked as sources for future practice assessments; generated assessments are stored separately so their questions, answer keys, and attempt scores remain stable.
 
 **Syllabus as a study map.** When a class has a syllabus, the app shows its topic and exam outline. The student can generate materials scoped to a syllabus topic or an upcoming exam (for example, “practice exam for Midterm 1”), using only the uploads that cover those topics.
 
@@ -95,7 +96,7 @@ The app keeps the original file and the extracted text or transcript. The studen
 - Say when the notes don't cover something rather than presenting outside knowledge as if it came from the notes.
 - Keep classes separate: a Math session doesn't use Biology notes.
 
-**Generated study materials.** All materials are generated only from the selected class's notes (or a chosen subset):
+**Generated study materials.** Materials are generated only from selected source material in the current class, such as notes or uploaded tests (or a chosen subset):
 
 | Type | Contents | Options |
 | --- | --- | --- |
@@ -161,6 +162,7 @@ flowchart LR
 **Data model (sketch)**
 
 ```text
+Profile       { id -> auth.users.id, display_name?, username?, education_level?, created_at, updated_at }
 Class          { id, owner_id, name, created_at }
 Note           { id, class_id, title, kind: notes|document|syllabus|slides|lecture_video|lecture_audio,
                  file_url?, mime_type, duration_s?, extracted_text, transcript_segments[]? ({start_s, end_s, text}),
@@ -169,6 +171,8 @@ SyllabusOutline{ class_id, note_id, topics[] ({title, week?}), exams[] ({name, d
 StudyMaterial  { id, class_id, type: quiz|study_guide|practice_exam|flashcards, source_note_ids[], scope (topics/exam), options, content (JSON), created_at }
 Attempt        { id, material_id, answers, score, completed_at }
 ```
+
+Supabase Auth owns the account email, credentials, and login sessions. The app's `profiles` row stores optional profile details and shares the Auth user's stable UUID. `created_at` mirrors account creation time; email is not duplicated in the profile table.
 
 **Generated material format (quiz example)**
 
@@ -250,6 +254,7 @@ The tool should have no capability beyond adding or clearing this overlay. In pa
 - Pause immediately when the student pauses capture, the browser reports the track ended, permission is revoked, or the session ends. A change of source requires a new browser selection flow.
 - Avoid sending unchanged frames repeatedly. Provide a clear screen pause control for sensitive content.
 - Uploaded notes and generated study materials **are** stored, because the student explicitly saves them. They are private to the student's account, and the student can delete any note, material, or whole class. Deleting a note removes the file and its extracted text.
+- Student profiles are private to their own account. Supabase Auth owns email and multi-device login sessions; profile data does not duplicate credentials or refresh tokens.
 - Uploaded content, including lecture recordings, is sent to the Gemini API for text extraction, transcription, generation, and per-class tutoring. Tell the student this at upload time, and remind them to upload only recordings they are allowed to keep (some courses restrict lecture recordings).
 
 ## MVP acceptance criteria
@@ -263,6 +268,7 @@ The tool should have no capability beyond adding or clearing this overlay. In pa
 - The shipped client contains no long-lived Gemini API key, and the default flow stores no captured media.
 - A student can create at least two classes (for example, Math and Science), upload notes into each, and see them kept separate.
 - A student can generate a quiz and a study guide from a class's notes, take the quiz in the app, and see a score with explanations.
+- A student who signs in on another device can load the same account profile, classes, and saved course materials without seeing another student's data.
 - A tutoring session started in a class uses that class's notes and not another class's.
 - A student can delete a note or class, and it no longer appears or affects generation.
 

@@ -1,10 +1,12 @@
+import { SAMPLE_ALGEBRA_MATERIALS } from "./sample-assessments.js";
 import { SAMPLE_VERSION, starterClasses } from "./static-data.js";
 
 const STORE_KEY = "screen-tutor-classes";
 const VERSION_KEY = "screen-tutor-sample-version";
+const SAMPLE_SEED_KEY = `${STORE_KEY}-algebra-examples-v1`;
 
-function cloneClasses(classes) {
-  return JSON.parse(JSON.stringify(classes));
+function cloneData(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 function normalizeClass(klass) {
@@ -38,10 +40,41 @@ function migrateSampleClass(savedClass) {
   };
 }
 
+function addAlgebraExamples(classes) {
+  const nextClasses = cloneData(classes);
+  let mathClass = nextClasses.find((item) => item.id === "math-151")
+    || nextClasses.find((item) => item.name?.trim().toLowerCase() === "math 151");
+
+  if (!mathClass) {
+    mathClass = {
+      id: "math-151",
+      name: "Math 151",
+      color: "#2563eb",
+      icon: "M",
+      uploads: [],
+      materials: []
+    };
+    nextClasses.unshift(mathClass);
+  }
+
+  mathClass.uploads = Array.isArray(mathClass.uploads) ? mathClass.uploads : [];
+  mathClass.materials = Array.isArray(mathClass.materials) ? mathClass.materials : [];
+  const existingIds = new Set(mathClass.materials.map((material) => material.id));
+  const missingExamples = SAMPLE_ALGEBRA_MATERIALS
+    .filter((material) => !existingIds.has(material.id));
+  mathClass.materials.unshift(...cloneData(missingExamples));
+  return nextClasses;
+}
+
+function saveClasses(classes) {
+  localStorage.setItem(STORE_KEY, JSON.stringify(classes));
+}
+
 function seedClasses() {
-  const seeded = cloneClasses(starterClasses);
+  const seeded = addAlgebraExamples(cloneData(starterClasses));
   saveClasses(seeded);
   localStorage.setItem(VERSION_KEY, String(SAMPLE_VERSION));
+  localStorage.setItem(SAMPLE_SEED_KEY, "1");
   return seeded;
 }
 
@@ -54,24 +87,20 @@ function readClasses() {
     if (!Array.isArray(parsed)) return seedClasses();
 
     const version = Number(localStorage.getItem(VERSION_KEY) || 0);
-    const hasOnlyEmptyStarter = parsed.length <= 2 && parsed.every((klass) => !klass.uploads?.length && !klass.materials?.length);
-    if (version < SAMPLE_VERSION && hasOnlyEmptyStarter) return seedClasses();
+    let classes = parsed.map((klass) => version < SAMPLE_VERSION
+      ? migrateSampleClass(klass)
+      : normalizeClass(klass));
 
-    if (version < SAMPLE_VERSION) {
-      const migrated = parsed.map(migrateSampleClass);
-      saveClasses(migrated);
+    if (version < SAMPLE_VERSION || localStorage.getItem(SAMPLE_SEED_KEY) !== "1") {
+      classes = addAlgebraExamples(classes);
+      saveClasses(classes);
       localStorage.setItem(VERSION_KEY, String(SAMPLE_VERSION));
-      return migrated;
+      localStorage.setItem(SAMPLE_SEED_KEY, "1");
     }
-
-    return parsed.map(normalizeClass);
+    return classes;
   } catch {
     return seedClasses();
   }
-}
-
-function saveClasses(classes) {
-  localStorage.setItem(STORE_KEY, JSON.stringify(classes));
 }
 
 function makeId(name) {
@@ -121,8 +150,9 @@ export function deleteClass(classId) {
 
 export function resetSampleData() {
   const current = readClasses();
-  const sampleIds = new Set(starterClasses.map((item) => item.id));
-  const next = cloneClasses(starterClasses).map((sample) => {
+  const samples = addAlgebraExamples(cloneData(starterClasses));
+  const sampleIds = new Set(samples.map((item) => item.id));
+  const restored = samples.map((sample) => {
     const saved = current.find((item) => item.id === sample.id);
     if (!saved) return sample;
 
@@ -135,8 +165,9 @@ export function resetSampleData() {
     };
   });
   const customClasses = current.filter((item) => !sampleIds.has(item.id));
-  const restored = [...next, ...customClasses];
-  saveClasses(restored);
+  const next = [...restored, ...customClasses];
+  saveClasses(next);
   localStorage.setItem(VERSION_KEY, String(SAMPLE_VERSION));
-  return restored;
+  localStorage.setItem(SAMPLE_SEED_KEY, "1");
+  return next;
 }
