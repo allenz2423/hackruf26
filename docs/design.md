@@ -10,6 +10,8 @@ Screen Tutor is an AI tutor that runs in a browser and observes a screen the stu
 
 The browser owns screen capture and drawing. Gemini interprets the shared frames and returns speech, text transcription, and structured annotation requests. The web app validates those requests and draws the marks locally over its preview. It never gives the model general mouse, keyboard, shell, or application-control access.
 
+Students can also upload their own class notes and organize them by class (for example, Math, Biology, or History). Each class has its own tutor context: when the student studies in a class, the tutor grounds its answers in that class's notes, and it can generate quizzes, study guides, practice exams, and flashcards from them.
+
 **Scope note:** a regular web page can show annotations over the shared-screen preview inside that page. It cannot draw a persistent overlay over another desktop application. The MVP keeps the preview visible beside the conversation so the student can see the marks in context.
 
 ## Goals
@@ -19,12 +21,15 @@ The browser owns screen capture and drawing. Gemini interprets the shared frames
 - Make it easy to point at a particular equation, line of code, diagram, or UI element.
 - Keep the student in control of screen and microphone sharing, annotations, and session lifetime.
 - Make the first useful interaction short: share, ask, understand, continue working.
+- Let students upload their own notes and organize them by class.
+- Generate study materials (quizzes, study guides, practice exams, flashcards) from a class's notes.
+- Give each class a tutor that uses that class's notes as context, so answers match what the student is actually learning.
 
 ## Non-goals for the MVP
 
 - Editing the student's document, code, or application for them.
 - Clicking, typing, scrolling, or running commands on the student's behalf.
-- Recording a lesson, retaining screenshots, or building student profiles.
+- Recording a lesson, retaining screenshots or audio, or building behavioral student profiles. (Notes and study materials that the student explicitly uploads or saves are stored; see [Notes and study materials](#notes-and-study-materials).)
 - Supporting multiple students, classrooms, teacher dashboards, or assignment grading.
 - Guaranteeing perfect OCR or pixel-precise visual grounding. The student can correct or dismiss a mark.
 
@@ -36,6 +41,14 @@ The browser owns screen capture and drawing. Gemini interprets the shared frames
 4. **Get a grounded response.** Gemini sees recent sampled frames and the student's question. The tutor answers in voice, with a visible transcript or concise response card.
 5. **See a mark when useful.** The tutor can request a local pointer, underline, box, or note linked to the current shared frame. The page positions it over the preview and shows a matching short explanation.
 6. **Continue or clear.** Marks expire after a short time or can be dismissed individually. The student can ask a follow-up, pause sharing, or end the session.
+
+### Notes and study flow
+
+1. **Create a class.** The student creates a class such as “Math 151” or “Biology” from the Classes page.
+2. **Upload notes.** The student uploads files (PDF, image/photo of handwritten notes, plain text, Markdown, or DOCX) or pastes text into that class. The app extracts the text and shows each note's processing status.
+3. **Study with the class tutor.** When the student starts a tutoring session inside a class, the tutor gets that class's notes as reference material, alongside any shared screen.
+4. **Generate study materials.** The student picks a class (and optionally specific notes or topics) and asks for a quiz, study guide, practice exam, or flashcard set. The app generates it from those notes and opens it.
+5. **Practice and review.** The student takes a quiz or practice exam in the app, sees a score, and can ask the tutor to explain any question they missed.
 
 ## Product behavior
 
@@ -55,19 +68,49 @@ The browser owns screen capture and drawing. Gemini interprets the shared frames
 - Show when annotations are active. Let the student dismiss one mark or clear all marks.
 - On disconnect or permission loss, stop sending media and explain how to resume.
 
+### Notes and study materials
+
+**Classes.** Every note and generated material belongs to exactly one class. The student can create, rename, and delete classes, and move notes between them. Deleting a class deletes its notes and materials after a confirmation.
+
+**Notes.** Supported inputs for the MVP: PDF, PNG/JPEG (including photos of handwritten notes), TXT/Markdown, DOCX, and pasted text. The app extracts text (using Gemini for images and scanned PDFs) and keeps both the original file and the extracted text. The student can view, rename, edit the extracted text of, or delete any note.
+
+**Per-class tutor.** A tutoring session started inside a class includes that class's notes as reference context. The tutor should:
+
+- Prefer the student's notes for definitions, notation, and methods, so explanations match the course.
+- Say which note an explanation comes from when it relies on one.
+- Say when the notes don't cover something rather than presenting outside knowledge as if it came from the notes.
+- Keep classes separate: a Math session doesn't use Biology notes.
+
+**Generated study materials.** All materials are generated only from the selected class's notes (or a chosen subset):
+
+| Type | Contents | Options |
+| --- | --- | --- |
+| Quiz | Short set of multiple-choice, true/false, and short-answer questions with an answer key and explanations | Number of questions, topics, difficulty |
+| Study guide | Organized summary of key concepts, definitions, formulas, and examples | Topics, length |
+| Practice exam | Longer, timed mix of question types (including worked/free-response problems) with a scoring rubric | Length, time limit, topics, difficulty |
+| Flashcards | Term/definition or question/answer cards | Number of cards, topics |
+
+Each question or section links back to the note(s) it was drawn from. Materials are saved to the class so the student can retake or regenerate them. Generated content can be wrong, so the UI labels it as AI-generated and lets the student flag an incorrect question.
+
 ## System design
 
 ```mermaid
 flowchart LR
     U[Student]
     C[Browser UI\nCapture + audio + preview overlay]
-    T[Token service\nLong-lived API key]
+    T[Backend\nToken service + notes API\nLong-lived API key]
+    D[(Database + file storage\nClasses, notes, materials)]
     G[Gemini Live API\ngemini-3.8-live]
+    M[Gemini API\nText extraction + generation]
 
     U -->|selects target, asks question| C
+    U -->|uploads notes, requests quiz/guide/exam| C
     C -->|authenticated token request| T
     T -->|short-lived Live token| C
-    C -->|sampled screen frames + optional audio/text| G
+    C -->|notes, generation requests| T
+    T <-->|store / load| D
+    T <-->|extract text, generate materials| M
+    C -->|sampled screen frames + optional audio/text + class notes context| G
     G -->|audio, transcript, annotation tool call| C
     C -->|local speech playback + validated overlay| U
 ```
@@ -89,6 +132,46 @@ flowchart LR
 - Authenticates the client and provisions a short-lived, restricted Live API token for the selected model/configuration.
 - Does not receive or proxy screen frames or microphone audio in the proposed client-to-Gemini design.
 - For a public deployment, apply rate limits and abuse controls to token issuance.
+
+**Notes and study backend**
+
+- Requires student sign-in so notes are tied to one account and never visible to other students.
+- Stores uploaded files in private object storage and stores classes, extracted note text, and generated materials in a database.
+- Extracts text from uploads: direct parsing for text, DOCX, and text-based PDFs; Gemini multimodal input for images and scanned PDFs.
+- Generates study materials by calling a standard (non-Live) Gemini model with the selected notes and a structured-output schema, then validates the result before saving it.
+- When a Live session starts inside a class, supplies that class's note text (or a summary if the notes are too large) for the session's system context.
+- Enforces upload limits (file size, files per class) and rate limits on generation.
+
+**Data model (sketch)**
+
+```text
+Class          { id, owner_id, name, created_at }
+Note           { id, class_id, title, file_url?, mime_type, extracted_text, status: processing|ready|failed, created_at }
+StudyMaterial  { id, class_id, type: quiz|study_guide|practice_exam|flashcards, source_note_ids[], options, content (JSON), created_at }
+Attempt        { id, material_id, answers, score, completed_at }
+```
+
+**Generated material format (quiz example)**
+
+```json
+{
+  "type": "quiz",
+  "title": "Derivatives: Chain Rule",
+  "questions": [
+    {
+      "id": "q1",
+      "kind": "multiple_choice",
+      "prompt": "What is d/dx of sin(3x)?",
+      "choices": ["cos(3x)", "3cos(3x)", "-3cos(3x)", "3sin(3x)"],
+      "answer": 1,
+      "explanation": "Chain rule: the derivative of the outer function, cos(3x), times the derivative of the inner function, 3.",
+      "source_note_ids": ["note-42"]
+    }
+  ]
+}
+```
+
+The backend rejects output that doesn't match the schema, is missing answers, or cites notes outside the selected class.
 
 **Gemini Live session**
 
@@ -147,6 +230,8 @@ The tool should have no capability beyond adding or clearing this overlay. In pa
 - Keep the Gemini API key on the token service. Use short-lived ephemeral tokens in the client.
 - Pause immediately when the student pauses capture, the browser reports the track ended, permission is revoked, or the session ends. A change of source requires a new browser selection flow.
 - Avoid sending unchanged frames repeatedly. Provide a clear screen pause control for sensitive content.
+- Uploaded notes and generated study materials **are** stored, because the student explicitly saves them. They are private to the student's account, and the student can delete any note, material, or whole class. Deleting a note removes the file and its extracted text.
+- Note content is sent to the Gemini API for text extraction, generation, and per-class tutoring. Tell the student this at upload time.
 
 ## MVP acceptance criteria
 
@@ -157,6 +242,10 @@ The tool should have no capability beyond adding or clearing this overlay. In pa
 - The student can dismiss marks and pause screen and microphone input independently.
 - The app handles permission denial, network loss, invalid annotation data, and Live session expiry without crashing or continuing to send media.
 - The shipped client contains no long-lived Gemini API key, and the default flow stores no captured media.
+- A student can create at least two classes (for example, Math and Science), upload notes into each, and see them kept separate.
+- A student can generate a quiz and a study guide from a class's notes, take the quiz in the app, and see a score with explanations.
+- A tutoring session started in a class uses that class's notes and not another class's.
+- A student can delete a note or class, and it no longer appears or affects generation.
 
 ## Risks and mitigations
 
@@ -168,6 +257,10 @@ The tool should have no capability beyond adding or clearing this overlay. In pa
 | Exposed client API key | Use a backend-issued ephemeral token constrained to the Live model and session configuration. |
 | Frequent frames increase cost and context usage | Respect the documented frame-rate limit, sample only when needed, and avoid resending unchanged content. |
 | Screen-capture support and behavior vary by browser | Prototype on the target desktop browser early, detect unavailable capture APIs, and offer a clear error with transcript-only fallback. |
+| Generated questions or answers are wrong | Generate only from the student's notes, cite the source note, validate the schema, label content as AI-generated, and let the student flag errors. |
+| A class has too many notes to fit in context | Summarize or chunk notes per class, and let the student pick specific notes or topics for each generation. |
+| Poor text extraction from handwritten or low-quality photos | Show the extracted text for review and let the student edit it or re-upload. |
+| Stored notes leak between students | Require sign-in, scope every query by owner, and keep files in private storage behind signed URLs. |
 | A student expects marks to appear over the external app | Keep the preview and annotations visible together, and state that marks are in the web UI. A system-wide overlay would require a separate native client and is outside MVP scope. |
 
 ## Open implementation decisions
@@ -175,5 +268,9 @@ The tool should have no capability beyond adding or clearing this overlay. In pa
 - First supported browser(s) and screen-capture compatibility target.
 - Whether the MVP uses voice by default or starts with typed questions plus optional voice.
 - Annotation appearance and expiration time.
-- Whether students can opt into storing notes or session summaries later.
+- Whether students can opt into storing session summaries later.
+- Supported upload formats and size limits for the MVP.
+- Whether notes reach the tutor as full text, summaries, or chunks retrieved per question (RAG).
+- Which standard Gemini model to use for text extraction and study-material generation.
+- Database and file-storage choice (for example, Firebase, Supabase, or Postgres plus S3-compatible storage).
 - Authentication approach for a public demo versus a local hackathon build.
