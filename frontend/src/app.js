@@ -53,7 +53,7 @@ const STATUS_LABELS = { session: "Session", connection: "Live", screen: "Screen"
 function statusPill(key) {
   const value = state[key];
   return `<span class="pill" data-status="${key}" data-tone="${TONES[key][value] || ""}">
-    ${STATUS_LABELS[key]} <strong>${escapeHtml(value.replace(/_/g, " "))}</strong>
+    <span class="status-name">${STATUS_LABELS[key]}</span><strong>${escapeHtml(value.replace(/_/g, " "))}</strong>
   </span>`;
 }
 
@@ -82,8 +82,10 @@ function shell(content, { section = "classes" } = {}) {
   const isGuest = !currentUser?.email;
   const userLabel = currentUser?.email ? currentUser.email.split("@")[0] : "Guest";
   const brandHref = isGuest ? "#/study" : "#/classes";
+  const showSessionStatus = section === "tutor" || !["idle", "ended"].includes(state.session);
 
   app.innerHTML = `
+    <a class="skip-link" href="#main-content">Skip to content</a>
     <header class="app-header">
       <a class="brand" href="${brandHref}">
         <span class="brand-mark">${icon("monitor", { size: 18 })}</span>
@@ -96,17 +98,22 @@ function shell(content, { section = "classes" } = {}) {
           <a href="#/classes" ${section === "classes" ? 'aria-current="page"' : ""}>Classes</a>
         `}
         <a href="#/tutor" ${section === "tutor" ? 'aria-current="page"' : ""}>Quick tutor</a>
-        <a href="#/auth" ${section === "auth" ? 'aria-current="page"' : ""} class="nav-account-link" style="display: inline-flex; align-items: center; gap: 0.4rem;">
-          ${icon("user", { size: 16 })} <span>${escapeHtml(userLabel)}</span>
-          ${isGuest ? '<span class="tier-badge badge-guest" style="font-size: 0.65rem; padding: 1px 6px;">Guest</span>' : '<span class="tier-badge badge-cloud" style="font-size: 0.65rem; padding: 1px 6px;">Cloud</span>'}
+        <a href="#/auth" ${section === "auth" ? 'aria-current="page"' : ""} class="nav-account-link">
+          ${icon("user", { size: 16 })}
+          ${isGuest ? `<span class="nav-account-name">Guest</span>` : `<span class="nav-account-name">${escapeHtml(userLabel)}</span><span class="tier-badge badge-cloud">Cloud</span>`}
         </a>
       </nav>
-      <div class="status-strip" role="status" aria-live="polite" aria-label="Session status">
+      ${showSessionStatus ? `<div class="status-strip" role="status" aria-live="polite" aria-label="Session status">
         ${Object.keys(STATUS_LABELS).map(statusPill).join("")}
-      </div>
+      </div>` : ""}
     </header>
-    <main>${content}</main>
+    <main id="main-content" tabindex="-1">${content}</main>
   `;
+
+  app.querySelector(".skip-link")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    document.querySelector("#main-content")?.focus();
+  });
 }
 
 async function renderGuestWorkspace() {
@@ -269,7 +276,7 @@ async function renderClassTab({ id, tab }) {
       </div>
       <div id="class-tab"></div>
     </section>
-  `, { section: "classes" });
+  `, { section: tab === "tutor" ? "tutor" : "classes" });
 
   const root = document.querySelector("#class-tab");
 
@@ -333,9 +340,9 @@ function renderTutor(klass = null) {
         <div class="stage-topline">
           <span class="pill no-dot">${icon("book", { size: 14 })} Using <strong>${klass ? escapeHtml(klass.name) : "no class"}</strong></span>
           <div class="stage-controls">
-            <button id="share-screen" class="btn btn-primary" type="button">${icon("monitor", { size: 18 })}<span class="btn-label">Share screen</span></button>
-            <button id="pause-screen" class="btn btn-secondary" type="button" disabled aria-label="Pause screen sharing">${icon("pause", { size: 18 })}<span class="btn-label">Pause</span></button>
-            <button id="end-session" class="btn btn-danger-ghost" type="button" disabled aria-label="End session">${icon("stop", { size: 18 })}<span class="btn-label">End</span></button>
+            <button id="share-screen" class="btn btn-primary" type="button" aria-label="Share screen" title="Share screen">${icon("monitor", { size: 18 })}<span class="btn-label">Share screen</span></button>
+            <button id="pause-screen" class="btn btn-secondary" type="button" disabled aria-label="Pause screen sharing" title="Pause screen sharing">${icon("pause", { size: 18 })}<span class="btn-label">Pause</span></button>
+            <button id="end-session" class="btn btn-danger-ghost" type="button" disabled aria-label="End session" title="End session">${icon("stop", { size: 18 })}<span class="btn-label">End</span></button>
           </div>
         </div>
         <div class="screen-stage">
@@ -360,8 +367,8 @@ function renderTutor(klass = null) {
         <form id="composer" class="composer">
           <label class="visually-hidden" for="question-input">Ask the tutor a question</label>
           <input id="question-input" name="question" autocomplete="off" placeholder="Ask a question…" />
-          <button type="button" id="mic-toggle" class="btn btn-secondary btn-icon" aria-pressed="false" aria-label="Microphone">${icon("mic", { size: 20 })}</button>
-          <button type="submit" class="btn btn-primary btn-icon" aria-label="Send">${icon("send", { size: 20 })}</button>
+          <button type="button" id="mic-toggle" class="btn btn-secondary btn-icon" aria-pressed="false" aria-label="Microphone" title="Microphone">${icon("mic", { size: 20 })}</button>
+          <button type="submit" class="btn btn-primary btn-icon" aria-label="Send" title="Send question">${icon("send", { size: 20 })}</button>
         </form>
       </aside>
     </section>

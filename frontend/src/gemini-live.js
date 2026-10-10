@@ -1,4 +1,3 @@
-import { GoogleGenAI } from "@google/genai";
 import { requestLiveToken, calculateExpression } from "./api.js";
 
 export class GeminiLiveController {
@@ -13,7 +12,10 @@ export class GeminiLiveController {
 
   async connect() {
     this.onStatusChange("connecting");
-    const token = await requestLiveToken(this.classId);
+    const [token, { GoogleGenAI }] = await Promise.all([
+      requestLiveToken(this.classId),
+      import("@google/genai")
+    ]);
     this.client = new GoogleGenAI({ apiKey: token.access_token });
 
     this.session = await this.client.live.connect({

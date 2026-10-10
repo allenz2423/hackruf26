@@ -241,18 +241,16 @@ function generateGuestMaterial(type, count = 10, difficulty = "mixed") {
  * Main renderer for the Guest Study Workspace.
  */
 export function renderGuestStudy(root) {
-  let activePlayer = null; // 'quiz' | 'flashcards' | null
-
   function renderView() {
     const hasUploads = guestSession.uploads.length > 0;
     const hasMaterials = guestSession.materials.length > 0;
 
     root.innerHTML = `
-      <section class="section-stack" style="max-width: 960px; margin: 0 auto;">
+      <section class="guest-workspace">
         <div class="page-heading">
           <div>
-            <h1>Guest Study Workspace</h1>
-            <p class="muted">Upload temporary study notes or slides to generate quizzes and flashcards for this session.</p>
+            <h1>Quick study</h1>
+            <p class="muted">Add class notes, then turn them into a study set you can use right away.</p>
           </div>
           <div class="page-actions">
             <a href="#/auth" class="btn btn-primary">
@@ -264,20 +262,20 @@ export function renderGuestStudy(root) {
         <div class="account-status-banner guest-banner">
           ${icon("alert", { size: 20 })}
           <div>
-            <strong>Guest Mode Active · Files & Materials Are Temporary</strong>
-            <span>Uploaded files, generated quizzes, and flashcards stay in this browser session only and <strong>will not be saved to the cloud</strong>. To organize multiple classes and sync your library across devices, <a class="auth-link" href="#/auth">create a free account</a>.</span>
+            <strong>Temporary guest session</strong>
+            <span>Files and study sets stay in this browser session and are not saved to an account. <a class="auth-link" href="#/auth">Sign in to save your work.</a></span>
           </div>
         </div>
 
         <div id="player-container"></div>
 
-        <div id="workspace-content" class="section-stack">
+        <div id="workspace-content" class="guest-workspace-content">
           <!-- Step 1: Upload Files -->
-          <div class="panel">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+          <div class="panel guest-panel guest-source-panel">
+            <div class="guest-panel-heading">
               <div>
-                <h2>1. Upload Temporary Files</h2>
-                <p class="muted">Add lecture notes, slides, or documents for this session.</p>
+                <h2>Source material</h2>
+                <p class="muted">Add notes, readings, or lecture slides.</p>
               </div>
               <button id="guest-paste-btn" class="btn btn-secondary" type="button">
                 ${icon("pencil", { size: 16 })} Paste text notes
@@ -289,13 +287,13 @@ export function renderGuestStudy(root) {
                 <span class="upload-zone-icon">${icon("upload", { size: 28 })}</span>
                 <strong>Drop files here or <span class="browse">browse</span></strong>
                 <span class="muted">PDF, DOCX, PPTX, TXT, MD, images, and audio/video</span>
-                <small>Session temporary only · not uploaded to cloud</small>
+                <small>Session-only; not saved to an account</small>
                 <input id="guest-upload-input" class="visually-hidden" type="file" multiple
                   accept=".pdf,.docx,.pptx,.txt,.md,.png,.jpg,.jpeg,.mp4,.webm,.mov,.mp3,.m4a,.wav" />
               </label>
             </div>
 
-            <div style="margin-top: 1.25rem;">
+            <div class="guest-upload-list-wrap">
               <ul class="data-list" id="guest-upload-list" aria-live="polite">
                 ${!hasUploads ? `
                   <li class="empty-state">
@@ -324,12 +322,12 @@ export function renderGuestStudy(root) {
           </div>
 
           <!-- Step 2: Generate Study Materials -->
-          <form class="panel generate-panel" id="guest-generate-form">
+          <form class="panel generate-panel guest-panel guest-generate-panel" id="guest-generate-form">
             <div class="generate-head">
               <span class="kind-icon">${icon("sparkles", { size: 22 })}</span>
               <div>
-                <h2>2. Create Quizzes & Flashcards</h2>
-                <p class="muted">Select a material type and generate an interactive study set from your uploaded notes.</p>
+                <h2>Create a study set</h2>
+                <p class="muted">Choose a format to practice with your session material.</p>
               </div>
             </div>
 
@@ -377,18 +375,20 @@ export function renderGuestStudy(root) {
           </form>
 
           <!-- Step 3: Saved Study Sets -->
-          <div class="panel">
-            <div style="margin-bottom: 1.25rem;">
-              <h2>3. Session Study Materials</h2>
-              <p class="muted">Take quizzes, practice flashcards, and review your explanations.</p>
+          <div class="panel guest-materials-panel">
+            <div class="guest-section-heading">
+              <div>
+                <h2>Session materials</h2>
+                <p class="muted">Practice, check your answers, and review what you missed.</p>
+              </div>
             </div>
 
             <div id="guest-materials-list">
               ${!hasMaterials ? `
-                <div class="panel empty-state">
+                <div class="empty-state guest-empty-state">
                   <span class="empty-icon">${icon("sparkles", { size: 26 })}</span>
-                  <strong>No study materials created yet</strong>
-                  <span>Use the form above to generate flashcards or a quiz from your uploaded files.</span>
+                <strong>No study sets yet</strong>
+                <span>Your new quizzes, guides, and flashcards will appear here.</span>
                 </div>
               ` : `
                 <div class="material-grid">
@@ -399,7 +399,7 @@ export function renderGuestStudy(root) {
                     const lastAttempt = mat.attempts?.at(-1);
 
                     return `
-                      <article class="material-card" data-material-index="${idx}">
+                      <article class="panel material-card guest-material-card" data-material-index="${idx}">
                         <div class="material-card-head">
                           <span class="kind-icon" data-kind="${mat.type}">${icon(isFlashcards ? "sparkles" : isQuiz ? "check" : "book", { size: 20 })}</span>
                           <div>
@@ -411,11 +411,11 @@ export function renderGuestStudy(root) {
                           <span class="pill" data-tone="busy">Session temporary</span>
                           ${lastAttempt ? `<span class="pill" data-tone="good">Score: ${lastAttempt.scorePercent}%</span>` : ""}
                         </div>
-                        <footer class="material-card-foot" style="display: flex; gap: 0.5rem; justify-content: space-between; margin-top: 1rem;">
-                          <div style="display: flex; gap: 0.5rem;">
+                        <footer class="material-card-foot">
+                          <div class="guest-material-actions">
                             ${isFlashcards ? `
                               <button class="btn btn-primary btn-small" type="button" data-play-flashcards="${idx}">
-                                ${icon("sparkles", { size: 14 })} Study flashcards
+                                ${icon("sparkles", { size: 14 })} Study cards
                               </button>
                             ` : isQuiz ? `
                               <button class="btn btn-primary btn-small" type="button" data-play-quiz="${idx}">
@@ -552,7 +552,7 @@ export function renderGuestStudy(root) {
         renderFlashcards(playerContainer, material, {
           onBack: () => {
             playerContainer.innerHTML = "";
-            workspaceContent.style.display = "block";
+            workspaceContent.style.display = "";
           },
           onAttemptCompleted: () => {}
         });
@@ -571,7 +571,7 @@ export function renderGuestStudy(root) {
         renderQuizPlayer(playerContainer, material, {
           onBack: () => {
             playerContainer.innerHTML = "";
-            workspaceContent.style.display = "block";
+            workspaceContent.style.display = "";
           },
           onAttemptCompleted: (score) => {
             material.attempts = material.attempts || [];
