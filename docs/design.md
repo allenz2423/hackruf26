@@ -162,6 +162,7 @@ flowchart LR
 **Data model (sketch)**
 
 ```text
+Profile       { id -> auth.users.id, display_name?, username?, education_level?, created_at, updated_at }
 Class          { id, owner_id, name, created_at }
 Note           { id, class_id, title, kind: notes|document|syllabus|slides|lecture_video|lecture_audio,
                  file_url?, mime_type, duration_s?, extracted_text, transcript_segments[]? ({start_s, end_s, text}),
@@ -170,6 +171,8 @@ SyllabusOutline{ class_id, note_id, topics[] ({title, week?}), exams[] ({name, d
 StudyMaterial  { id, class_id, type: quiz|study_guide|practice_exam|flashcards, source_note_ids[], scope (topics/exam), options, content (JSON), created_at }
 Attempt        { id, material_id, answers, score, completed_at }
 ```
+
+Supabase Auth owns the account email, credentials, and login sessions. The app's `profiles` row stores optional profile details and shares the Auth user's stable UUID. `created_at` mirrors account creation time; email is not duplicated in the profile table.
 
 **Generated material format (quiz example)**
 
@@ -251,6 +254,7 @@ The tool should have no capability beyond adding or clearing this overlay. In pa
 - Pause immediately when the student pauses capture, the browser reports the track ended, permission is revoked, or the session ends. A change of source requires a new browser selection flow.
 - Avoid sending unchanged frames repeatedly. Provide a clear screen pause control for sensitive content.
 - Uploaded notes and generated study materials **are** stored, because the student explicitly saves them. They are private to the student's account, and the student can delete any note, material, or whole class. Deleting a note removes the file and its extracted text.
+- Student profiles are private to their own account. Supabase Auth owns email and multi-device login sessions; profile data does not duplicate credentials or refresh tokens.
 - Uploaded content, including lecture recordings, is sent to the Gemini API for text extraction, transcription, generation, and per-class tutoring. Tell the student this at upload time, and remind them to upload only recordings they are allowed to keep (some courses restrict lecture recordings).
 
 ## MVP acceptance criteria
@@ -264,6 +268,7 @@ The tool should have no capability beyond adding or clearing this overlay. In pa
 - The shipped client contains no long-lived Gemini API key, and the default flow stores no captured media.
 - A student can create at least two classes (for example, Math and Science), upload notes into each, and see them kept separate.
 - A student can generate a quiz and a study guide from a class's notes, take the quiz in the app, and see a score with explanations.
+- A student who signs in on another device can load the same account profile, classes, and saved course materials without seeing another student's data.
 - A tutoring session started in a class uses that class's notes and not another class's.
 - A student can delete a note or class, and it no longer appears or affects generation.
 
