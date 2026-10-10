@@ -38,12 +38,8 @@ class GeminiTokenService:
     def __init__(self, client: genai.Client, settings: Settings) -> None:
         self._client = client
         self._settings = settings
-        self._constraints = types.LiveConnectConstraints(
-            model=settings.gemini_model,
-            config=live_connect_config(),
-        )
 
-    async def create_token(self) -> TokenIssueResult:
+    async def create_token(self, class_context: str | None = None) -> TokenIssueResult:
         """Provision one token without blocking FastAPI's event loop."""
         now = datetime.now(timezone.utc)
         expiration = now + timedelta(minutes=self._settings.token_expiration_minutes)
@@ -58,7 +54,10 @@ class GeminiTokenService:
             # Omitting lock_additional_fields locks the full LiveConnectConfig.
             # This keeps model, instructions, modalities, and the approved tool
             # set fixed; callers cannot expand the session's capabilities.
-            live_connect_constraints=self._constraints,
+            live_connect_constraints=types.LiveConnectConstraints(
+                model=self._settings.gemini_model,
+                config=live_connect_config(class_context),
+            ),
         )
         provision = partial(self._client.auth_tokens.create, config=config)
         token = await asyncio.to_thread(provision)
@@ -75,12 +74,12 @@ class GeminiTokenService:
         )
 
 
-def create_genai_client(settings: Settings) -> genai.Client:
+def create_genai_client(settings: Settings, *, timeout_seconds: float | None = None) -> genai.Client:
     """Create a server-only SDK client with an explicit network timeout."""
     return genai.Client(
         api_key=settings.require_gemini_key(),
         http_options=types.HttpOptions(
             api_version=API_VERSION,
-            timeout=int(settings.gemini_timeout_seconds * 1000),
+            timeout=int((timeout_seconds or settings.gemini_timeout_seconds) * 1000),
         ),
     )

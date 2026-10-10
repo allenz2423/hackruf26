@@ -55,7 +55,9 @@ class Settings(BaseSettings):
 
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-3.8-live"
+    gemini_text_model: str = "gemini-3.8-flash"
     gemini_timeout_seconds: float = 10.0
+    gemini_content_timeout_seconds: float = 600.0
     token_expiration_minutes: int = 30
     new_session_expiration_seconds: int = 60
 
@@ -63,8 +65,23 @@ class Settings(BaseSettings):
     token_rate_window_seconds: int = 60
     calculator_rate_limit: int = 30
     calculator_rate_window_seconds: int = 60
+    upload_rate_limit: int = 10
+    upload_rate_window_seconds: int = 3600
+    generation_rate_limit: int = 10
+    generation_rate_window_seconds: int = 3600
     request_body_max_bytes: int = 1024
+    library_json_body_max_bytes: int = 1_100_000
     frontend_dist: str = "frontend/dist"
+
+    supabase_url: str | None = None
+    supabase_jwt_secret: SecretStr | None = None
+    database_url: SecretStr | None = None
+    storage_dir: str = "backend/.local/private_uploads"
+    file_url_signing_secret: SecretStr | None = None
+    max_upload_mb: int = 250
+    max_uploads_per_class: int = 100
+    max_lecture_minutes: int = 120
+    max_class_name_length: int = 100
 
     @field_validator("gemini_model")
     @classmethod
@@ -73,6 +90,33 @@ class Settings(BaseSettings):
         if not model or any(character.isspace() for character in model):
             raise ValueError("GEMINI_MODEL must be a non-empty model identifier.")
         return model
+
+    @field_validator("gemini_text_model")
+    @classmethod
+    def validate_text_model_identifier(cls, value: str) -> str:
+        model = value.strip()
+        if not model or any(character.isspace() for character in model):
+            raise ValueError("GEMINI_TEXT_MODEL must be a non-empty model identifier.")
+        return model
+
+    @field_validator("supabase_url")
+    @classmethod
+    def validate_supabase_url(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        candidate = value.strip().rstrip("/")
+        parsed = urlsplit(candidate)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ValueError("SUPABASE_URL must be an HTTP(S) project origin without a path.")
+        return candidate
 
     @field_validator("app_origins")
     @classmethod
@@ -86,8 +130,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_limits_and_deployment(self) -> Settings:
-        if self.gemini_timeout_seconds <= 0:
-            raise ValueError("GEMINI_TIMEOUT_SECONDS must be greater than zero.")
+        if self.gemini_timeout_seconds <= 0 or self.gemini_content_timeout_seconds <= 0:
+            raise ValueError("Gemini timeouts must be greater than zero.")
         if not 1 <= self.token_expiration_minutes <= 60:
             raise ValueError("TOKEN_EXPIRATION_MINUTES must be between 1 and 60.")
         if not 10 <= self.new_session_expiration_seconds <= 120:
@@ -96,18 +140,49 @@ class Settings(BaseSettings):
             raise ValueError("Token rate limit and window must both be positive.")
         if self.calculator_rate_limit < 1 or self.calculator_rate_window_seconds < 1:
             raise ValueError("Calculator rate limit and window must both be positive.")
+        if self.upload_rate_limit < 1 or self.upload_rate_window_seconds < 1:
+            raise ValueError("Upload rate limit and window must both be positive.")
+        if self.generation_rate_limit < 1 or self.generation_rate_window_seconds < 1:
+            raise ValueError("Generation rate limit and window must both be positive.")
         if not 1 <= self.request_body_max_bytes <= 16_384:
             raise ValueError("REQUEST_BODY_MAX_BYTES must be between 1 and 16384.")
+        if not 1_024 <= self.library_json_body_max_bytes <= 16_777_216:
+            raise ValueError("LIBRARY_JSON_BODY_MAX_BYTES must be between 1024 and 16777216.")
+        if not 1 <= self.max_upload_mb <= 2_048:
+            raise ValueError("MAX_UPLOAD_MB must be between 1 and 2048.")
+        if not 1 <= self.max_uploads_per_class <= 10_000:
+            raise ValueError("MAX_UPLOADS_PER_CLASS must be between 1 and 10000.")
+        if not 1 <= self.max_lecture_minutes <= 600:
+            raise ValueError("MAX_LECTURE_MINUTES must be between 1 and 600.")
+        if not 1 <= self.max_class_name_length <= 200:
+            raise ValueError("MAX_CLASS_NAME_LENGTH must be between 1 and 200.")
+
+        if self.demo_gate_token is not None and len(
+            self.demo_gate_token.get_secret_value().strip()
+        ) < 32:
+            raise ValueError("DEMO_GATE_TOKEN must contain at least 32 characters when configured.")
+
+        if self.database_url is not None:
+            if self.supabase_url is None:
+                raise ValueError("SUPABASE_URL is required when DATABASE_URL is configured.")
+            if self.file_url_signing_secret is None or len(
+                self.file_url_signing_secret.get_secret_value().strip()
+            ) < 32:
+                raise ValueError(
+                    "FILE_URL_SIGNING_SECRET must contain at least 32 characters when the database is configured."
+                )
 
         if self.app_env == "production":
             origins = self.allowed_origins
             if any(not origin.startswith("https://") for origin in origins):
                 raise ValueError("Production APP_ORIGINS must use HTTPS.")
             gate = self.demo_gate_token.get_secret_value().strip() if self.demo_gate_token else ""
-            if len(gate) < 32:
+            if self.supabase_url is None and len(gate) < 32:
                 raise ValueError(
-                    "Production requires a high-entropy DEMO_GATE_TOKEN until app sign-in is integrated."
+                    "Production requires SUPABASE_URL or a high-entropy DEMO_GATE_TOKEN."
                 )
+            if self.supabase_url is not None and not self.supabase_url.startswith("https://"):
+                raise ValueError("Production SUPABASE_URL must use HTTPS.")
         return self
 
     @property
@@ -118,6 +193,19 @@ class Settings(BaseSettings):
     def frontend_dist_path(self) -> Path:
         path = Path(self.frontend_dist)
         return path if path.is_absolute() else REPOSITORY_ROOT / path
+
+    @property
+    def storage_dir_path(self) -> Path:
+        path = Path(self.storage_dir)
+        return path if path.is_absolute() else REPOSITORY_ROOT / path
+
+    @property
+    def max_upload_bytes(self) -> int:
+        return self.max_upload_mb * 1024 * 1024
+
+    @property
+    def supabase_issuer(self) -> str | None:
+        return f"{self.supabase_url}/auth/v1" if self.supabase_url else None
 
     def require_gemini_key(self) -> str:
         """Return the configured key or fail startup without leaking its value."""
