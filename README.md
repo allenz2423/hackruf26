@@ -6,7 +6,7 @@ Screen Tutor is a HackRU Fall 2026 project concept. In the web UI, the student c
 
 ## Design
 
-See [the design document](docs/design.md) for the product flow, architecture, data handling, annotation format, MVP scope, and open questions.
+See the [product overview](docs/design.md), [frontend design](docs/frontend-design.md), and [backend design](docs/backend-design.md).
 
 ## Status
 
@@ -14,7 +14,8 @@ Design draft. No application code or setup instructions exist yet.
 
 ## Proposed stack
 
-- A browser client for screen sharing, microphone/audio, a live preview, and an annotation overlay in the page.
+- HTML, CSS, and JavaScript for the browser UI, with Google's JavaScript SDK for Gemini Live.
+- Python, FastAPI, and Pydantic for the token service.
 - Gemini Live API using `gemini-3.8-live` for real-time multimodal tutoring.
 - A small token service that issues short-lived Gemini Live credentials; the long-lived API key stays server-side.
 
