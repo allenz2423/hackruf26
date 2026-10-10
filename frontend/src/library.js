@@ -1,5 +1,6 @@
 import { icon } from "./icons.js";
 import { escapeHtml, formatBytes, toast } from "./ui.js";
+import { saveUploadedFile } from "./file-store.js";
 
 const ACCEPTED_EXTENSIONS = new Set(["pdf", "docx", "pptx", "txt", "md", "png", "jpg", "jpeg", "mp4", "webm", "mov", "mp3", "m4a", "wav"]);
 const MAX_FILE_SIZE = 250 * 1024 * 1024;
@@ -32,6 +33,10 @@ const STATUS_TONES = {
 // Remember the selected filter across re-renders of the tab.
 let activeFilter = null;
 
+function formatDate(iso) {
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 function guessKind(file) {
   const lower = file.name.toLowerCase();
   if (lower.includes("syllabus")) return "Syllabus";
@@ -61,8 +66,53 @@ export function createLocalUpload(file) {
 }
 
 export function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRemoved }) {
+  const readyCount = klass.uploads.filter((upload) => upload.status === "ready").length;
+  const workingCount = klass.uploads.filter((upload) => ["processing", "transcribing", "uploading"].includes(upload.status)).length;
+  const syllabus = klass.uploads.find((upload) => upload.outline);
+
   root.innerHTML = `
     <section class="section-stack">
+      <div class="library-overview">
+        <div class="panel overview-card">
+          <span class="kind-icon">${icon("check", { size: 20 })}</span>
+          <div>
+            <strong>${readyCount} ready</strong>
+            <span class="row-meta">Available to study from</span>
+          </div>
+        </div>
+        <div class="panel overview-card">
+          <span class="kind-icon" data-kind="Lecture">${icon("sparkles", { size: 20 })}</span>
+          <div>
+            <strong>${workingCount} processing</strong>
+            <span class="row-meta">Uploads can finish in the background</span>
+          </div>
+        </div>
+        <div class="panel overview-card">
+          <span class="kind-icon" data-kind="Syllabus">${icon("syllabus", { size: 20 })}</span>
+          <div>
+            <strong>${escapeHtml(klass.nextExam || "No exam set")}</strong>
+            <span class="row-meta">From syllabus and saved materials</span>
+          </div>
+        </div>
+      </div>
+      ${syllabus ? `
+        <section class="panel syllabus-panel" aria-label="Syllabus outline">
+          <div>
+            <h2>Syllabus map</h2>
+            <p class="muted">${escapeHtml(syllabus.summary)}</p>
+          </div>
+          <div class="syllabus-columns">
+            <div>
+              <h3>Topics</h3>
+              <ul class="compact-list">${syllabus.outline.topics.map((topic) => `<li>${escapeHtml(topic)}</li>`).join("")}</ul>
+            </div>
+            <div>
+              <h3>Upcoming checks</h3>
+              <ul class="compact-list">${syllabus.outline.exams.map((exam) => `<li><strong>${escapeHtml(exam.name)}</strong><span>${escapeHtml(exam.date)} · ${escapeHtml(exam.topics.join(", "))}</span></li>`).join("")}</ul>
+            </div>
+          </div>
+        </section>
+      ` : ""}
       <label class="upload-zone" for="upload-input">
         <span class="upload-zone-icon">${icon("upload", { size: 26 })}</span>
         <strong>Drop files here or <span class="browse">browse</span></strong>
@@ -71,6 +121,7 @@ export function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRemoved 
         <input id="upload-input" class="visually-hidden" type="file" multiple
           accept=".pdf,.docx,.pptx,.txt,.md,.png,.jpg,.jpeg,.mp4,.webm,.mov,.mp3,.m4a,.wav" />
       </label>
+      <p class="privacy-note">${icon("alert", { size: 16 })} Demo uploads stay in this browser. In production, class files are private to the signed-in student and processed by the backend.</p>
       <div class="toolbar-row">
         <div class="chip-group" role="group" aria-label="Filter uploads by kind" id="upload-filters"></div>
       </div>
@@ -111,11 +162,15 @@ export function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRemoved 
       <li>
         <span class="kind-icon" data-kind="${escapeHtml(upload.kind)}">${icon(KIND_ICONS[upload.kind] || "file")}</span>
         <span class="row-main">
-          <span class="file-name" title="${escapeHtml(upload.name)}">${escapeHtml(upload.name)}</span>
-          <span class="row-meta">${escapeHtml(upload.kind)} · ${formatBytes(upload.size)}</span>
+          <button class="file-name" type="button" data-preview="${escapeHtml(upload.id)}" title="Preview ${escapeHtml(upload.name)}">${escapeHtml(upload.name)}</button>
+          <span class="row-meta">${escapeHtml(upload.kind)}${upload.isSample ? " - Built-in sample content" : ` - ${formatBytes(upload.size)} - added ${formatDate(upload.createdAt)}`}</span>
+          ${upload.summary ? `<span class="row-summary">${escapeHtml(upload.summary)}</span>` : ""}
+          ${upload.sources?.length ? `<span class="source-chips">${upload.sources.map((source) => `<span>${escapeHtml(source)}</span>`).join("")}</span>` : ""}
+          ${upload.progress < 100 ? `<span class="progress" aria-label="${escapeHtml(upload.status)} ${upload.progress}% complete"><span style="width: ${upload.progress}%"></span></span>` : ""}
         </span>
         <span class="pill" data-tone="${STATUS_TONES[upload.status] || ""}"><strong>${escapeHtml(upload.status)}</strong></span>
         <span class="row-actions">
+          <button class="btn btn-secondary btn-small" type="button" data-preview="${escapeHtml(upload.id)}">${icon("file", { size: 16 })} View</button>
           <button class="btn btn-ghost btn-icon" type="button" data-remove="${upload.id}" aria-label="Remove ${escapeHtml(upload.name)}">
             ${icon("trash", { size: 18 })}
           </button>
@@ -124,15 +179,25 @@ export function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRemoved 
     `).join("");
   }
 
-  function addFiles(files) {
-    const nextUploads = [];
+  async function addFiles(files) {
+    const candidates = [];
 
     for (const file of files) {
       const error = validateUpload(file);
       if (error) {
         toast(error, { tone: "error" });
       } else {
-        nextUploads.push(createLocalUpload(file));
+        candidates.push({ upload: createLocalUpload(file), file });
+      }
+    }
+
+    const nextUploads = [];
+    for (const candidate of candidates) {
+      try {
+        await saveUploadedFile(candidate.upload.id, candidate.file);
+        nextUploads.push(candidate.upload);
+      } catch {
+        toast(`Could not save ${candidate.file.name} in this browser. Check available storage and try again.`, { tone: "error" });
       }
     }
 
@@ -151,6 +216,16 @@ export function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRemoved 
   });
 
   list.addEventListener("click", (event) => {
+    const previewId = event.target.closest("[data-preview]")?.dataset.preview;
+    if (previewId) {
+      const upload = klass.uploads.find((item) => item.id === previewId);
+      if (upload) {
+        import("./file-preview.js")
+          .then(({ openUploadPreview }) => openUploadPreview(upload))
+          .catch(() => toast("The file preview could not be opened. Try reloading the page.", { tone: "error" }));
+      }
+      return;
+    }
     const button = event.target.closest("[data-remove]");
     if (button) onUploadRemoved?.(button.dataset.remove);
   });

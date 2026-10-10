@@ -1,13 +1,14 @@
 import "./styles.css";
 import { AnnotationController } from "./annotations.js";
 import { AudioController } from "./audio.js";
-import { getClasses, getClassById, createClass, updateClass, deleteClass } from "./classes.js";
+import { getClasses, getClassById, createClass, updateClass, deleteClass, resetSampleData } from "./classes.js";
 import { GeminiLiveController } from "./gemini-live.js";
 import { icon } from "./icons.js";
 import { renderLibraryTab } from "./library.js";
 import { createRouter } from "./router.js";
 import { ScreenCaptureController } from "./screen-capture.js";
 import { renderStudyTab } from "./study.js";
+import { deleteUploadedFile, deleteUploadedFiles } from "./file-store.js";
 import { escapeHtml, openDialog, toast } from "./ui.js";
 
 const app = document.querySelector("#app");
@@ -68,7 +69,7 @@ function shell(content, { section = "classes" } = {}) {
         <a href="#/classes" ${section === "classes" ? 'aria-current="page"' : ""}>Classes</a>
         <a href="#/tutor" ${section === "tutor" ? 'aria-current="page"' : ""}>Quick tutor</a>
       </nav>
-      <div class="status-strip" role="status" aria-label="Session status">
+      <div class="status-strip" role="status" aria-live="polite" aria-label="Session status">
         ${Object.keys(STATUS_LABELS).map(statusPill).join("")}
       </div>
     </header>
@@ -78,6 +79,8 @@ function shell(content, { section = "classes" } = {}) {
 
 function renderClasses() {
   const classes = getClasses();
+  const totalUploads = classes.reduce((sum, klass) => sum + klass.uploads.length, 0);
+  const totalMaterials = classes.reduce((sum, klass) => sum + klass.materials.length, 0);
   shell(`
     <section>
       <div class="page-heading">
@@ -85,7 +88,15 @@ function renderClasses() {
           <h1>Your classes</h1>
           <p class="muted">Upload materials to a class, then study or get tutoring from them.</p>
         </div>
-        <button id="new-class" class="btn btn-primary" type="button">${icon("plus", { size: 18 })} New class</button>
+        <div class="page-actions">
+          <button id="restore-sample-data" class="btn btn-secondary" type="button">${icon("sparkles", { size: 18 })} Restore sample data</button>
+          <button id="new-class" class="btn btn-primary" type="button">${icon("plus", { size: 18 })} New class</button>
+        </div>
+      </div>
+      <div class="metric-strip" aria-label="Workspace summary">
+        <div class="metric"><strong>${classes.length}</strong><span>Classes</span></div>
+        <div class="metric"><strong>${totalUploads}</strong><span>Uploads</span></div>
+        <div class="metric"><strong>${totalMaterials}</strong><span>Study sets</span></div>
       </div>
       <div class="class-grid" id="class-grid"></div>
     </section>
@@ -97,10 +108,12 @@ function renderClasses() {
       <a href="#/classes/${encodeURIComponent(klass.id)}/library" class="class-card-main">
         <span class="class-icon" aria-hidden="true">${escapeHtml(klass.icon)}</span>
         <span class="class-name">${escapeHtml(klass.name)}</span>
+        <span class="class-focus">${escapeHtml(klass.focus || "Study workspace")}</span>
         <span class="class-meta">
           <span>${klass.uploads.length} ${klass.uploads.length === 1 ? "upload" : "uploads"}</span>
           <span>${klass.materials.length} study ${klass.materials.length === 1 ? "set" : "sets"}</span>
         </span>
+        ${klass.nextExam ? `<span class="class-next">${icon("syllabus", { size: 15 })}${escapeHtml(klass.nextExam)}</span>` : ""}
       </a>
       <div class="card-actions">
         <button class="btn btn-ghost" type="button" data-rename="${escapeHtml(klass.id)}">${icon("pencil", { size: 16 })} Rename</button>
@@ -122,6 +135,17 @@ function renderClasses() {
   }
 
   document.querySelector("#new-class").addEventListener("click", addClass);
+  document.querySelector("#restore-sample-data").addEventListener("click", async () => {
+    const confirmed = await openDialog({
+      title: "Restore sample data?",
+      message: "Restore the built-in sample content. Your classes and uploaded files will stay in place.",
+      confirmLabel: "Restore"
+    });
+    if (!confirmed) return;
+    resetSampleData();
+    toast("Sample class data restored.");
+    renderClasses();
+  });
 
   grid.addEventListener("click", async (event) => {
     if (event.target.closest("[data-new-class]")) {
@@ -150,6 +174,7 @@ function renderClasses() {
         danger: true
       });
       if (confirmed) {
+        await Promise.allSettled([deleteUploadedFiles(klass.uploads.map((upload) => upload.id))]);
         deleteClass(deleteId);
         toast(`Deleted ${klass.name}.`);
         renderClasses();
@@ -177,7 +202,10 @@ function renderClassTab({ id, tab }) {
       <div class="class-header">
         <div class="class-title" style="--class-color: ${escapeHtml(klass.color)}">
           <span class="class-icon" aria-hidden="true">${escapeHtml(klass.icon)}</span>
-          <h1>${escapeHtml(klass.name)}</h1>
+          <div>
+            <h1>${escapeHtml(klass.name)}</h1>
+            <p class="muted">${escapeHtml(klass.focus || "Class study workspace")}</p>
+          </div>
         </div>
         <nav class="tabs" aria-label="${escapeHtml(klass.name)} sections">
           ${CLASS_TABS.map((item) => `
@@ -218,6 +246,7 @@ function renderClassTab({ id, tab }) {
       renderClassTab({ id, tab });
     },
     onUploadRemoved: (uploadId) => {
+      deleteUploadedFile(uploadId).catch(() => toast("Could not remove the cached file from this browser.", { tone: "error" }));
       updateClass(klass.id, { uploads: klass.uploads.filter((upload) => upload.id !== uploadId) });
       renderClassTab({ id, tab });
     }

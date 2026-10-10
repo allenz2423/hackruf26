@@ -8,9 +8,10 @@ function isFiniteUnit(value) {
 }
 
 function validateAnnotation(item, frames) {
-  const rect = item?.rect || {};
+  const shape = item?.shape || item?.kind;
+  const rect = item?.rect || item?.region || {};
 
-  if (!ALLOWED_SHAPES.has(item?.shape)) return "Unknown annotation shape.";
+  if (!ALLOWED_SHAPES.has(shape)) return "Unknown annotation shape.";
   if (!frames.has(item?.frame_id)) return "The referenced frame is no longer available.";
   if (typeof item?.label !== "string" || item.label.length > MAX_LABEL_LENGTH) return "Annotation label is invalid.";
   if (![rect.x, rect.y, rect.width, rect.height].every(isFiniteUnit)) return "Annotation coordinates are out of bounds.";
@@ -43,7 +44,13 @@ export class AnnotationController {
       if (error) {
         errors.push(error);
       } else {
-        accepted.push({ ...item, id: crypto.randomUUID(), createdAt: Date.now() });
+        accepted.push({
+          ...item,
+          shape: item.shape || item.kind,
+          rect: item.rect || item.region,
+          id: crypto.randomUUID(),
+          createdAt: Date.now()
+        });
       }
     }
 
