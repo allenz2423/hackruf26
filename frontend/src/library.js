@@ -213,7 +213,7 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
         <div class="account-status-banner signed-in-banner">
           ${icon("check", { size: 20 })}
           <div>
-            <strong>SQLite Database Sync Active</strong>
+            <strong>Saved to your account</strong>
             <span>New uploads are saved to your class library. Any older browser-only files synchronize when you start class tutoring or generate a study set.</span>
           </div>
         </div>

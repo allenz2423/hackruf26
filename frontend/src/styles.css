@@ -533,7 +533,9 @@ main {
   height: 84px;
   padding-inline: var(--space-5);
   border-radius: calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px) 0 0;
+  /* Notebook paper: a red margin rule beside the badge over ruled lines in the class color. */
   background:
+    linear-gradient(to right, transparent 95px, var(--margin-rule) 95px 96px, transparent 96px),
     repeating-linear-gradient(to bottom, transparent 0 17px, color-mix(in srgb, var(--class-color, var(--primary)) 16%, transparent) 17px 18px),
     color-mix(in srgb, var(--class-color, var(--primary)) 14%, var(--surface));
 }
@@ -3225,6 +3227,8 @@ main {
 
 :root {
   --mark: var(--hl);
+  /* The red margin line of ruled notebook paper. */
+  --margin-rule: rgba(196, 74, 62, 0.45);
   caret-color: var(--primary);
   accent-color: var(--primary);
   scrollbar-color: var(--line-strong) transparent;
@@ -3232,6 +3236,7 @@ main {
 
 :root[data-theme="dark"] {
   --mark: #5a4e14;
+  --margin-rule: rgba(232, 112, 98, 0.38);
 }
 
 ::selection {
@@ -3266,6 +3271,19 @@ h1 {
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
   animation: swipe 720ms var(--ease-out) 140ms backwards;
+}
+
+/* A title that wraps gets the highlighter on every line, not one band across the block. */
+@supports (height: 1lh) {
+  h1 {
+    background-size: 100% 1lh;
+    background-repeat: repeat-y;
+    animation-name: swipe-lines;
+  }
+}
+
+@keyframes swipe-lines {
+  from { background-size: 0% 1lh; }
 }
 
 h2 {
@@ -3388,6 +3406,30 @@ p {
   left: 0;
   height: 1px;
   background: var(--surface);
+}
+
+/* Inside a class the open tab wears the class color, like the divider tab on its card. */
+.class-header .tabs a[aria-current="page"] {
+  box-shadow: inset 0 3px 0 var(--class-color, var(--primary));
+}
+
+.class-header .tabs a[aria-current="page"] .icon {
+  color: var(--class-color, var(--primary));
+}
+
+/* The title block takes the rest of the row, so a short name never wraps early. */
+.class-title > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.class-title .class-icon {
+  flex: none;
+}
+
+.class-title h1 {
+  overflow-wrap: anywhere;
+  text-wrap: balance;
 }
 
 /* Surfaces: one edge, no shadow at rest */
@@ -3607,6 +3649,27 @@ p {
 @media (max-width: 640px) {
   .tabs a {
     padding-inline: var(--space-2);
+  }
+
+  /* The three tabs fit; scrolling only clipped the open tab's seam and showed a scrollbar. */
+  .tabs {
+    overflow: visible;
+  }
+
+  /* Two header rows: logo, theme, and account on top, the page links below. */
+  .app-header .theme-toggle {
+    margin-left: auto;
+  }
+
+  .app-header .account-menu {
+    margin-left: 0;
+  }
+
+  .primary-nav {
+    order: 1;
+    grid-template-columns: none;
+    grid-auto-columns: minmax(0, 1fr);
+    grid-auto-flow: column;
   }
 }
 

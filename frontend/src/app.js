@@ -572,8 +572,8 @@ async function renderClassTab({ id, tab }) {
   shell(`
     <section>
       <a class="back-link" href="#/classes">${icon("arrowLeft", { size: 16 })} All classes</a>
-      <div class="class-header">
-        <div class="class-title" style="--class-color: ${escapeHtml(classColor(klass))}">
+      <div class="class-header" style="--class-color: ${escapeHtml(classColor(klass))}">
+        <div class="class-title">
           <span class="class-icon" aria-hidden="true">${classBadge(klass)}</span>
           <div>
             <h1>${escapeHtml(klass.name)}</h1>
