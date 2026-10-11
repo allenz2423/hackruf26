@@ -422,12 +422,15 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
       if (upload) {
         // If remote, fetch full detail including extracted text & signed URL
         const backendUploadId = getBackendUploadId(upload);
-        if (backendUploadId && !upload.content) {
+        if (backendUploadId) {
           try {
             const detail = await getUploadDetailApi(backendUploadId);
             upload.content = detail.extracted_text;
             upload.summary = detail.summary;
             upload.fileUrl = detail.file_url;
+            upload.originalFilename = detail.original_filename;
+            upload.document = detail.document;
+            upload.status = detail.status;
             upload.transcript = (detail.transcript_segments || []).map((seg) => ({
               at: `${Math.floor(seg.start_seconds / 60)}:${Math.floor(seg.start_seconds % 60).toString().padStart(2, "0")}`,
               text: seg.text

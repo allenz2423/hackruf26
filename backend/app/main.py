@@ -18,6 +18,7 @@ from app.api.errors import ApiError
 from app.api.live import router as live_router
 from app.api.routes import router
 from app.api.schemas import ErrorResponse
+from app.api.upload_documents import router as upload_documents_router
 from app.config import Settings, get_settings
 from app.middleware.request_context import RequestContextMiddleware
 from app.middleware.request_size import RequestSizeLimitMiddleware
@@ -123,6 +124,7 @@ def create_app(
     application.include_router(router)
     application.include_router(live_router)
     application.include_router(class_library_router)
+    application.include_router(upload_documents_router)
 
     @application.exception_handler(ApiError)
     async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:

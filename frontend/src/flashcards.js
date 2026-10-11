@@ -19,7 +19,7 @@ export function formatSourceCitation(source) {
     const secs = Math.floor(source.timestamp_seconds % 60).toString().padStart(2, "0");
     parts.push(`${mins}:${secs}`);
   }
-  if (parts.length) return parts.join(" &middot; ");
+  if (parts.length) return parts.join(" · ");
   if (source.upload_id) return `Source ${String(source.upload_id).slice(0, 8)}`;
   return "Source reference";
 }
@@ -108,13 +108,13 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
   }
 
   function handleKeyNavigation(event) {
-    if (!root.isConnected) {
+    if (!root.isConnected || !root.querySelector(".flashcard-player")) {
       teardown();
       return;
     }
 
     const tag = document.activeElement?.tagName;
-    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
+    if (["INPUT", "TEXTAREA", "SELECT", "BUTTON", "A"].includes(tag)) {
       return;
     }
 
@@ -429,6 +429,7 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
       cardElement.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
+          e.stopPropagation();
           flipCard();
         }
       });

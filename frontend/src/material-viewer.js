@@ -1,6 +1,7 @@
-import { escapeHtml } from "./ui.js";
+import { escapeHtml, toast } from "./ui.js";
 import { icon } from "./icons.js";
 import { renderFlashcards, normalizeCards, formatSourceCitation } from "./flashcards.js";
+import { downloadStudyFileApi } from "./api.js";
 
 function addDialog(title) {
   const dialog = document.createElement("dialog");
@@ -141,6 +142,11 @@ function renderGuide(root, material) {
 
   root.innerHTML = `
     <div class="study-mode-actions">
+      ${material.isRemote ? `
+        <button class="btn btn-primary" type="button" data-download-guide="pdf">Download PDF</button>
+        <button class="btn btn-secondary" type="button" data-download-guide="latex">Download LaTeX</button>
+        <span class="field-hint" role="status" data-download-status></span>
+      ` : ""}
       ${flashcardsAvailable ? `
         <button class="btn btn-secondary" type="button" data-flashcards>
           ${icon("cards", { size: 16 })} Study flashcards
@@ -186,6 +192,30 @@ function renderGuide(root, material) {
       `}
     </article>
   `;
+
+  root.querySelectorAll("[data-download-guide]").forEach((button) => button.addEventListener("click", async () => {
+    const buttons = root.querySelectorAll("[data-download-guide]");
+    const status = root.querySelector("[data-download-status]");
+    buttons.forEach((item) => { item.disabled = true; });
+    status.textContent = "Preparing download…";
+    try {
+      const { blob, filename } = await downloadStudyFileApi(material.id, button.dataset.downloadGuide);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      status.textContent = "Downloaded. This file stays saved with your guide.";
+    } catch (error) {
+      status.textContent = error.message;
+      toast(error.message, { tone: "error" });
+    } finally {
+      buttons.forEach((item) => { item.disabled = false; });
+    }
+  }));
 
   root.querySelector("[data-flashcards]")?.addEventListener("click", () => {
     renderFlashcards(root, material, { onBack: () => renderGuide(root, material) });

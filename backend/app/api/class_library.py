@@ -10,7 +10,7 @@ import unicodedata
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
@@ -42,10 +42,12 @@ from app.api.schemas import (
     UploadPatch,
     UploadSummary,
 )
+from app.api.upload_documents import create_default_document, document_detail
 from app.config import Settings
 from app.services.database import SQLiteConnection, SQLiteDatabase, json_value
 from app.services.gemini_content import GeminiContentService
 from app.services.storage import LocalPrivateStorage, UploadTooLarge
+from app.services.study_files import StudyFileFailure, compiler_path, create_guide_files
 
 logger = logging.getLogger("screen_tutor.class_library")
 router = APIRouter(tags=["class-library"])
@@ -643,6 +645,7 @@ async def get_upload(upload_id: UUID, request: Request) -> UploadDetail:
         syllabus_outline=json_value(row["syllabus_outline"]),
         file_url=file_url,
         file_url_expires_at=expires_at,
+        document=await document_detail(database, upload_id),
     )
 
 
@@ -838,7 +841,7 @@ async def _process_upload_job(application: Any, upload_id: UUID) -> None:
         else:
             path = storage.path_for(row["storage_key"])
             result = await asyncio.to_thread(content_service.process_upload, path, row["kind"], row["mime_type"])
-        await database.execute(
+        completed = await database.execute(
             "UPDATE course_notes SET extracted_text = ?2, summary = ?3, key_topics = ?4, "
             "transcript_segments = ?5, duration_seconds = ?6, syllabus_outline = ?7, "
             "status = 'ready', processing_progress = 100, failure_code = NULL, processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
@@ -853,6 +856,8 @@ async def _process_upload_job(application: Any, upload_id: UUID) -> None:
             json.dumps(result["syllabus_outline"]) if result["syllabus_outline"] is not None else None,
             row["updated_at"],
         )
+        if completed != "UPDATE 0":
+            await create_default_document(application, upload_id)
     except Exception as exc:
         logger.error(
             "upload_processing_failed upload_id=%s category=%s",
@@ -988,6 +993,7 @@ async def _process_assessment_job(
                     else None,
                     analysis["grade_confidence"],
                 )
+        await create_default_document(application, UUID(str(note_id)))
     except Exception as exc:
         logger.error(
             "assessment_processing_failed assessment_id=%s category=%s",
@@ -1047,7 +1053,7 @@ async def _reprocess_upload_job(application: Any, upload_id: UUID, use_extracted
                 row["kind"],
                 row["mime_type"],
             )
-        await database.execute(
+        completed = await database.execute(
             "UPDATE course_notes SET extracted_text = ?2, summary = ?3, key_topics = ?4, "
             "transcript_segments = ?5, duration_seconds = ?6, syllabus_outline = ?7, "
             "status = 'ready', processing_progress = 100, failure_code = NULL, processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
@@ -1062,6 +1068,8 @@ async def _reprocess_upload_job(application: Any, upload_id: UUID, use_extracted
             json.dumps(result["syllabus_outline"]) if result["syllabus_outline"] is not None else None,
             row["updated_at"],
         )
+        if completed != "UPDATE 0":
+            await create_default_document(application, upload_id)
     except Exception as exc:
         logger.error(
             "upload_reprocessing_failed upload_id=%s category=%s",
@@ -1204,7 +1212,9 @@ async def _create_material_job(
     material_id: UUID,
 ) -> None:
     database: SQLiteDatabase | None = getattr(application.state, "database", None)
-    service: GeminiContentService | None = getattr(application.state, "gemini_content_service", None)
+    service: GeminiContentService | None = getattr(
+        application.state, "gemini_content_service", None
+    )
     if database is None or service is None:
         return
     try:
@@ -1231,15 +1241,33 @@ async def _create_material_job(
             options=json_value(material["options"], {}),
             sources=sources,
         )
-        await database.execute(
-            "UPDATE study_materials SET title = ?2, content = ?3, status = 'ready', "
-            "failure_code = NULL, generated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
-            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-            "WHERE id = ?1 AND status = 'generating'",
-            material_id,
-            title,
-            json.dumps(content),
-        )
+        files = {}
+        if material["kind"] == "study_guide":
+            files = await asyncio.to_thread(
+                create_guide_files,
+                application.state.settings,
+                title=title,
+                class_name=material["class_name"],
+                material_id=UUID(str(material_id)),
+                content=content,
+                sources=sources,
+            )
+        async with database.acquire() as connection:
+            async with connection.transaction():
+                completed = await connection.fetchrow(
+                    "UPDATE study_materials SET title = ?2, content = ?3, status = 'ready', "
+                    "failure_code = NULL, generated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
+                    "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                    "WHERE id = ?1 AND status = 'generating' RETURNING id",
+                    material_id,
+                    title,
+                    json.dumps(content),
+                )
+                if completed and files:
+                    await connection.executemany(
+                        "INSERT INTO study_material_files (material_id, format, content) VALUES (?1, ?2, ?3)",
+                        [(material_id, format, data) for format, data in files.items()],
+                    )
     except Exception as exc:
         logger.error(
             "study_generation_failed material_id=%s category=%s",
@@ -1260,19 +1288,20 @@ async def create_study_material(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> MaterialSummary:
-    user_id, database, _ = await _authorize(request)
+    user_id, database, settings = await _authorize(request)
     class_row = await _owned_class(database, class_id, user_id)
     if getattr(request.app.state, "gemini_content_service", None) is None:
-        raise ApiError(503, "content_processing_unavailable", "Study material generation is unavailable.")
+        raise ApiError(
+            503, "content_processing_unavailable", "Study material generation is unavailable."
+        )
+    if payload.kind == "study_guide" and not compiler_path(settings):
+        raise ApiError(503, "pdf_export_unavailable", "Study-guide PDF generation is unavailable.")
     await _rate_limit(request, "generation_rate_limiter", user_id)
     scope = payload.scope.model_dump(mode="json")
     options = payload.options.model_dump(mode="json", exclude_none=True)
     if payload.kind != "practice_exam" and options.get("time_limit_minutes") is not None:
         raise ApiError(400, "invalid_options", "A time limit is available only for practice exams.")
-    if (
-        options.get("question_types") is not None
-        and payload.kind not in {"quiz", "practice_exam"}
-    ):
+    if options.get("question_types") is not None and payload.kind not in {"quiz", "practice_exam"}:
         raise ApiError(
             400,
             "invalid_options",
@@ -1296,7 +1325,10 @@ async def create_study_material(
             await connection.executemany(
                 "INSERT INTO study_material_sources (material_id, class_id, note_id, position) "
                 "VALUES (?1, ?2, ?3, ?4)",
-                [(row["id"], class_id, source["id"], index) for index, source in enumerate(sources)],
+                [
+                    (row["id"], class_id, source["id"], index)
+                    for index, source in enumerate(sources)
+                ],
             )
     background_tasks.add_task(_create_material_job, request.app, row["id"])
     return MaterialSummary(
@@ -1315,7 +1347,9 @@ async def create_study_material(
 
 
 @router.get("/api/classes/{class_id}/study-materials")
-async def list_study_materials(class_id: UUID, request: Request) -> dict[str, list[MaterialSummary]]:
+async def list_study_materials(
+    class_id: UUID, request: Request
+) -> dict[str, list[MaterialSummary]]:
     user_id, database, _ = await _authorize(request)
     await _owned_class(database, class_id, user_id)
     rows = await database.fetch(
@@ -1351,6 +1385,91 @@ async def get_study_material(material_id: UUID, request: Request) -> MaterialDet
     return MaterialDetail(
         **summary.model_dump(),
         content=_public_material_content(row["kind"], row["content"]),
+        download_urls={
+            format: f"/api/study-materials/{material_id}/files/{format}"
+            for format in ("pdf", "latex")
+        }
+        if row["kind"] == "study_guide" and row["status"] == "ready"
+        else {},
+    )
+
+
+@router.get("/api/study-materials/{material_id}/files/{format}")
+async def download_study_file(
+    material_id: UUID,
+    format: Literal["pdf", "latex"],
+    request: Request,
+) -> Response:
+    user_id, database, settings = await _authorize(request)
+    material = await database.fetchrow(
+        "SELECT m.*, c.name AS class_name FROM study_materials m "
+        "JOIN course_classes c ON c.id = m.class_id WHERE m.id = ?1 AND c.owner_id = ?2",
+        material_id,
+        user_id,
+    )
+    if material is None:
+        raise ApiError(404, "not_found", "The requested resource was not found.")
+    if material["kind"] != "study_guide":
+        raise ApiError(
+            409, "export_not_supported", "File downloads are available for study guides."
+        )
+    if material["status"] != "ready":
+        raise ApiError(409, "material_not_ready", "Wait for this study guide to finish generating.")
+    file = await database.fetchrow(
+        "SELECT content FROM study_material_files WHERE material_id = ?1 AND format = ?2",
+        material_id,
+        format,
+    )
+    if file is None:
+        # Backfill guides saved before file exports existed, without another model request.
+        sources = await database.fetch(
+            "SELECT n.id, n.title FROM study_material_sources s JOIN course_notes n ON n.id = s.note_id "
+            "WHERE s.material_id = ?1 ORDER BY s.position",
+            material_id,
+        )
+        try:
+            files = await asyncio.to_thread(
+                create_guide_files,
+                settings,
+                title=material["title"],
+                class_name=material["class_name"],
+                material_id=material_id,
+                content=json_value(material["content"], {}),
+                sources=sources,
+            )
+        except StudyFileFailure as exc:
+            raise ApiError(
+                503,
+                "pdf_export_unavailable",
+                "Study-guide file generation failed. Try again shortly.",
+            ) from exc
+        async with database.acquire() as connection:
+            async with connection.transaction():
+                if not await connection.fetchval(
+                    "SELECT id FROM study_materials WHERE id = ?1", material_id
+                ):
+                    raise ApiError(404, "not_found", "The requested resource was not found.")
+                await connection.executemany(
+                    "INSERT OR IGNORE INTO study_material_files (material_id, format, content) VALUES (?1, ?2, ?3)",
+                    [(material_id, kind, data) for kind, data in files.items()],
+                )
+                file = await connection.fetchrow(
+                    "SELECT content FROM study_material_files WHERE material_id = ?1 AND format = ?2",
+                    material_id,
+                    format,
+                )
+    suffix = "pdf" if format == "pdf" else "tex"
+    filename = (
+        re.sub(r"[^A-Za-z0-9._-]+", "-", material["title"]).strip(".-")[:100] or "study-guide"
+    )
+    return Response(
+        content=file["content"],
+        media_type="application/pdf" if format == "pdf" else "application/x-tex",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}.{suffix}"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 

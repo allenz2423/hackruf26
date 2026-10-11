@@ -99,7 +99,9 @@ The app keeps the original file and the extracted text or transcript. The studen
 - Say when the notes don't cover something rather than presenting outside knowledge as if it came from the notes.
 - Keep classes separate: a Math session doesn't use Biology notes.
 
-**Generated study materials.** Materials are generated only from selected source material in the current class, such as notes or uploaded tests (or a chosen subset):
+**Upload study documents.** Keep the full original uploaded file and extracted text intact. Each processed upload also gets a separate study explanation, with concise, balanced, and detailed versions. Students can switch between the original file, original text, and explanation, and download a saved PDF or LaTeX document. Companion PDFs include the full extracted source text in a separate appendix. AI explanations preserve source facts and identify uncertainty; the original file remains available for checking visual details and extraction errors.
+
+**Generated study materials.** Materials are generated only from selected source material in the current class, such as notes or uploaded tests (or a chosen subset). Study guides persist as both structured content and downloadable LaTeX/PDF files for future reference:
 
 | Type | Contents | Options |
 | --- | --- | --- |

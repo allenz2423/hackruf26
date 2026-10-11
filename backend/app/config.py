@@ -74,6 +74,8 @@ class Settings(BaseSettings):
     upload_rate_window_seconds: int = 3600
     generation_rate_limit: int = 10
     generation_rate_window_seconds: int = 3600
+    study_pdf_executable: str = "tectonic"
+    study_pdf_timeout_seconds: float = 60.0
     request_body_max_bytes: int = 1024
     library_json_body_max_bytes: int = 1_100_000
     frontend_dist: str = "frontend/dist"
@@ -129,6 +131,8 @@ class Settings(BaseSettings):
             raise ValueError("Upload rate limit and window must both be positive.")
         if self.generation_rate_limit < 1 or self.generation_rate_window_seconds < 1:
             raise ValueError("Generation rate limit and window must both be positive.")
+        if not self.study_pdf_executable.strip() or not 1 <= self.study_pdf_timeout_seconds <= 120:
+            raise ValueError("Set STUDY_PDF_EXECUTABLE and a STUDY_PDF_TIMEOUT_SECONDS between 1 and 120.")
         if not 1 <= self.request_body_max_bytes <= 16_384:
             raise ValueError("REQUEST_BODY_MAX_BYTES must be between 1 and 16384.")
         if not 1_024 <= self.lean_request_max_bytes <= 131_072:

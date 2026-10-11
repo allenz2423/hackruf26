@@ -49,6 +49,9 @@ notation, and distinguish source facts from any uncertainty. Do not invent facts
 Organize the guide into ordered sections with descriptive headings, concise explanations, and
 relevant key terms. Each section must cite at least one supplied source and use only its upload_id
 and locator details that are actually present. Avoid repeating the same material across sections.
+Write bodies as readable paragraphs or simple bullet lists. For mathematical notation, use inline
+LaTeX inside $...$ or display LaTeX inside $$...$$, with standard math commands only. Never emit a
+LaTeX document, package declarations, file commands, or custom macros; the backend owns typesetting.
 
 Return the study-guide format required by the response schema. Do not add commentary or fields
 outside that schema.

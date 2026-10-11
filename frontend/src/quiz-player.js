@@ -383,6 +383,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
           ? `<div class="assessment-timer" role="timer" aria-live="off"><span>Time left</span><strong id="assessment-countdown">${formatTime(material.timeLimitMinutes * 60)}</strong></div>`
           : ""}
       </header>
+      ${material.instructions ? `<p class="assessment-instructions">${escapeHtml(material.instructions)}</p>` : ""}
       <form id="assessment-form" class="assessment-form">
         ${material.questions.map((question, index) => `
           <fieldset class="practice-question">

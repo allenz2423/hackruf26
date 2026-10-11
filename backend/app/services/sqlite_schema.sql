@@ -72,6 +72,38 @@ CREATE TABLE IF NOT EXISTS study_materials (
     CHECK (status = 'failed' OR failure_code IS NULL)
 );
 
+CREATE TABLE IF NOT EXISTS upload_documents (
+    note_id           TEXT NOT NULL REFERENCES course_notes(id) ON DELETE CASCADE,
+    detail_level      TEXT NOT NULL CHECK (detail_level IN ('concise', 'balanced', 'detailed')),
+    job_id            TEXT NOT NULL,
+    source_updated_at TEXT NOT NULL,
+    status            TEXT NOT NULL CHECK (status IN ('generating', 'ready', 'failed')),
+    progress          INTEGER NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100),
+    content           TEXT CHECK (content IS NULL OR json_valid(content)),
+    original_text     TEXT NOT NULL,
+    pdf               BLOB,
+    latex             BLOB,
+    failure_code      TEXT,
+    updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (note_id, detail_level),
+    CHECK (status <> 'ready' OR (content IS NOT NULL AND pdf IS NOT NULL AND latex IS NOT NULL))
+);
+
+CREATE TRIGGER IF NOT EXISTS course_notes_invalidate_documents
+AFTER UPDATE OF extracted_text, kind, title ON course_notes
+WHEN OLD.extracted_text IS NOT NEW.extracted_text OR OLD.kind IS NOT NEW.kind OR OLD.title IS NOT NEW.title
+BEGIN
+    DELETE FROM upload_documents WHERE note_id = NEW.id;
+END;
+
+CREATE TABLE IF NOT EXISTS study_material_files (
+    material_id TEXT NOT NULL REFERENCES study_materials(id) ON DELETE CASCADE,
+    format      TEXT NOT NULL CHECK (format IN ('pdf', 'latex')),
+    content     BLOB NOT NULL CHECK (length(content) > 0),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (material_id, format)
+);
+
 CREATE TABLE IF NOT EXISTS study_material_sources (
     material_id TEXT NOT NULL,
     class_id    TEXT NOT NULL,

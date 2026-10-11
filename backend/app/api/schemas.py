@@ -136,6 +136,7 @@ class UploadDetail(UploadSummary):
     syllabus_outline: dict | None = None
     file_url: str | None = None
     file_url_expires_at: datetime | None = None
+    document: dict | None = None
 
 
 class UploadPatch(BaseModel):
@@ -253,6 +254,7 @@ class MaterialSummary(BaseModel):
 
 class MaterialDetail(MaterialSummary):
     content: dict | None = None
+    download_urls: dict[str, str] = Field(default_factory=dict)
 
 
 class AttemptSubmission(BaseModel):
@@ -427,6 +429,26 @@ class StudyGuideContent(BaseModel):
     model_config = ConfigDict(extra="forbid")
     format: Literal["study_guide"]
     sections: list[GuideSectionContent] = Field(min_length=1, max_length=50)
+
+
+DocumentDetailLevel = Literal["concise", "balanced", "detailed"]
+
+
+class UploadDocumentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    detail_level: DocumentDetailLevel = "balanced"
+
+
+class UploadDocumentChunk(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sections: list[GuideSectionContent] = Field(min_length=1, max_length=12)
+
+
+class UploadDocumentContent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    format: Literal["upload_document"] = "upload_document"
+    detail_level: DocumentDetailLevel
+    sections: list[GuideSectionContent] = Field(min_length=1, max_length=1000)
 
 
 class FlashcardContent(BaseModel):
