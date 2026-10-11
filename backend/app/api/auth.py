@@ -8,7 +8,14 @@ from fastapi import APIRouter, Request, Response
 
 from app.api.dependencies import database, enforce_origin_policy, session_token, session_user
 from app.api.errors import ApiError
-from app.api.schemas import AuthUser, LoginRequest, MeResponse, SignupRequest
+from app.api.schemas import (
+    AuthUser,
+    LoginRequest,
+    MeResponse,
+    PasswordChange,
+    ProfileUpdate,
+    SignupRequest,
+)
 from app.config import Settings
 from app.security.rate_limit import InMemoryRateLimiter
 from app.services import auth as accounts
@@ -133,3 +140,51 @@ async def me(request: Request, response: Response) -> MeResponse:
             _clear_session_cookie(response, settings)
         return MeResponse(user=None)
     return MeResponse(user=AuthUser(**accounts.public_user(user)))
+
+
+async def _require_user(request: Request) -> dict:
+    """Origin-checked, logged-in account for endpoints that change data."""
+    settings: Settings = request.app.state.settings
+    await enforce_origin_policy(request, settings, required=True)
+    user = await session_user(request)
+    if user is None:
+        raise ApiError(401, "authentication_required", "Please log in to change your account.")
+    return user
+
+
+@router.patch("/me", response_model=MeResponse)
+async def update_me(request: Request, response: Response, payload: ProfileUpdate) -> MeResponse:
+    """Change the logged-in account's username and/or email."""
+    user = await _require_user(request)
+
+    changes: dict[str, str | None] = {}
+    if "username" in payload.model_fields_set:
+        if payload.username is None:
+            raise ApiError(400, "invalid_request", "Enter a username.")
+        changes["username"] = payload.username
+    if "email" in payload.model_fields_set:
+        changes["email"] = payload.email
+    if not changes:
+        raise ApiError(400, "invalid_request", "Nothing to update.")
+
+    updated = await accounts.update_profile(database(request), user["id"], changes)
+    _no_store(response)
+    return MeResponse(user=AuthUser(**accounts.public_user(updated)))
+
+
+@router.post("/password", status_code=204)
+async def change_password(request: Request, payload: PasswordChange) -> Response:
+    """Change the password. Other devices are logged out; this session stays."""
+    user = await _require_user(request)
+    await _limit_attempts(request, f"password:{user['id']}")
+
+    await accounts.change_password(
+        database(request),
+        user["id"],
+        payload.current_password,
+        payload.new_password,
+        keep_session_token=session_token(request),
+    )
+    response = Response(status_code=204)
+    _no_store(response)
+    return response

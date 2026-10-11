@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 
@@ -9,7 +10,9 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+from app.services import auth as accounts
 from app.services.auth import hash_password, verify_password
+from app.services.database import create_database
 
 ORIGIN = "http://localhost:5173"
 
@@ -178,6 +181,200 @@ class AccountBoundaryTests(unittest.TestCase):
         foreign = TestClient(self.client.app, headers={"origin": "https://evil.example"})
         response = foreign.post("/api/auth/login", json={"identifier": "a", "password": "b"})
         self.assertEqual(response.status_code, 403)
+
+
+
+class ProfileAndPasswordTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.storage = tempfile.TemporaryDirectory()
+        self.addCleanup(self.storage.cleanup)
+        self.client = make_client(self.storage.name)
+        self.client.__enter__()
+        self.addCleanup(self.client.__exit__, None, None, None)
+
+    def browser(self) -> TestClient:
+        return TestClient(self.client.app, headers={"origin": ORIGIN})
+
+    def signup(self, client: TestClient, username: str = "Ada_L", **extra: object):
+        return client.post(
+            "/api/auth/signup", json={"username": username, "password": "tutor-pass-1", **extra}
+        )
+
+    def test_guest_cannot_change_anything(self) -> None:
+        guest = self.browser()
+        self.assertEqual(guest.patch("/api/auth/me", json={"username": "Hacker"}).status_code, 401)
+        self.assertEqual(
+            guest.post(
+                "/api/auth/password",
+                json={"current_password": "tutor-pass-1", "new_password": "brand-new-pass"},
+            ).status_code,
+            401,
+        )
+
+    def test_change_username_and_email(self) -> None:
+        self.signup(self.client)
+        response = self.client.patch(
+            "/api/auth/me", json={"username": "Ada_Lovelace", "email": "ada@example.com"}
+        )
+        self.assertEqual(response.status_code, 200)
+        user = response.json()["user"]
+        self.assertEqual(user["username"], "Ada_Lovelace")
+        self.assertEqual(user["email"], "ada@example.com")
+        # The display name was just the old username, so it follows the change.
+        self.assertEqual(user["display_name"], "Ada_Lovelace")
+        self.assertEqual(self.client.get("/api/auth/me").json()["user"]["username"], "Ada_Lovelace")
+
+        old = self.browser().post(
+            "/api/auth/login", json={"identifier": "Ada_L", "password": "tutor-pass-1"}
+        )
+        self.assertEqual(old.status_code, 401)
+        new = self.browser().post(
+            "/api/auth/login", json={"identifier": "ada@example.com", "password": "tutor-pass-1"}
+        )
+        self.assertEqual(new.status_code, 200)
+
+    def test_custom_display_name_is_kept_and_email_can_be_removed(self) -> None:
+        self.signup(self.client, email="ada@example.com", display_name="Ada the Great")
+        response = self.client.patch("/api/auth/me", json={"username": "Ada_2", "email": ""})
+        user = response.json()["user"]
+        self.assertEqual(user["display_name"], "Ada the Great")
+        self.assertIsNone(user["email"])
+
+    def test_username_and_email_must_be_free_and_valid(self) -> None:
+        self.signup(self.browser(), "Grace_H", email="grace@example.com")
+        self.signup(self.client)
+
+        taken = self.client.patch("/api/auth/me", json={"username": "grace_h"})
+        self.assertEqual((taken.status_code, taken.json()["code"]), (409, "username_taken"))
+        taken_email = self.client.patch("/api/auth/me", json={"email": "Grace@Example.com"})
+        self.assertEqual((taken_email.status_code, taken_email.json()["code"]), (409, "email_taken"))
+
+        for body in (
+            {"username": "ab"},
+            {"username": "bad name"},
+            {"email": "nope"},
+            {},
+            {"username": None},
+            {"role": "admin"},
+        ):
+            with self.subTest(body=body):
+                self.assertEqual(self.client.patch("/api/auth/me", json=body).status_code, 400)
+        self.assertEqual(self.client.get("/api/auth/me").json()["user"]["username"], "Ada_L")
+
+    def test_changing_only_the_letter_case_of_your_own_username_is_allowed(self) -> None:
+        self.signup(self.client)
+        response = self.client.patch("/api/auth/me", json={"username": "ada_l"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["user"]["username"], "ada_l")
+
+    def test_change_password_checks_the_old_one_and_logs_out_other_devices(self) -> None:
+        phone, laptop = self.browser(), self.browser()
+        self.signup(phone)
+        laptop.post("/api/auth/login", json={"identifier": "Ada_L", "password": "tutor-pass-1"})
+        self.assertEqual(laptop.get("/api/classes").status_code, 200)
+
+        def change(current: str, new: str):
+            return phone.post(
+                "/api/auth/password", json={"current_password": current, "new_password": new}
+            )
+
+        wrong = change("not-my-password", "brand-new-pass")
+        self.assertEqual((wrong.status_code, wrong.json()["code"]), (400, "incorrect_password"))
+        same = change("tutor-pass-1", "tutor-pass-1")
+        self.assertEqual((same.status_code, same.json()["code"]), (400, "password_unchanged"))
+        self.assertEqual(change("tutor-pass-1", "short").status_code, 400)
+
+        self.assertEqual(change("tutor-pass-1", "brand-new-pass").status_code, 204)
+
+        # This device stays logged in; the other device is logged out.
+        self.assertEqual(phone.get("/api/classes").status_code, 200)
+        self.assertEqual(laptop.get("/api/classes").status_code, 401)
+
+        old = self.browser().post(
+            "/api/auth/login", json={"identifier": "Ada_L", "password": "tutor-pass-1"}
+        )
+        self.assertEqual(old.status_code, 401)
+        new = self.browser().post(
+            "/api/auth/login", json={"identifier": "Ada_L", "password": "brand-new-pass"}
+        )
+        self.assertEqual(new.status_code, 200)
+
+    def test_wrong_current_password_attempts_are_rate_limited(self) -> None:
+        limited = make_client(self.storage.name, auth_rate_limit=3)
+        with limited:
+            limited.post("/api/auth/signup", json={"username": "Ada_L", "password": "tutor-pass-1"})
+            codes = [
+                limited.post(
+                    "/api/auth/password",
+                    json={"current_password": "wrong-guess", "new_password": "brand-new-pass"},
+                ).status_code
+                for _ in range(4)
+            ]
+        self.assertEqual(codes, [400, 400, 400, 429])
+
+
+class DemoAccountTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.storage = tempfile.TemporaryDirectory()
+        self.addCleanup(self.storage.cleanup)
+        self.settings = Settings(
+            _env_file=None,
+            gemini_api_key="test-key-not-used",
+            file_url_signing_secret="test-signing-secret-with-at-least-32-characters",
+            sqlite_path=":memory:",
+            storage_dir=self.storage.name,
+        )
+        self.database = await create_database(self.settings)
+        self.addAsyncCleanup(self.database.close)
+
+    async def test_only_flagged_accounts_are_demo_accounts(self) -> None:
+        plain = await accounts.create_user(
+            self.database, username="plain_user", password="tutor-pass-1"
+        )
+        demo = await accounts.create_user(
+            self.database, username="demo_user", password="tutor-pass-1", is_demo=True
+        )
+        self.assertFalse(accounts.public_user(plain)["is_demo"])
+        self.assertTrue(accounts.public_user(demo)["is_demo"])
+
+        token, _ = await accounts.create_session(self.database, demo["id"], 1)
+        session_user = await accounts.user_for_token(self.database, token)
+        self.assertTrue(accounts.public_user(session_user)["is_demo"])
+
+        logged_in = await accounts.authenticate(self.database, "demo_user", "tutor-pass-1")
+        self.assertTrue(accounts.public_user(logged_in)["is_demo"])
+
+
+class DemoColumnMigrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_database_from_before_the_demo_flag_is_upgraded_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = f"{folder}/old.sqlite3"
+            old = sqlite3.connect(path)
+            old.execute(
+                "CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE UNIQUE, "
+                "email TEXT COLLATE NOCASE UNIQUE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, "
+                "created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))"
+            )
+            old.execute(
+                "INSERT INTO users (id, username, display_name, password_hash) "
+                "VALUES ('u1', 'Old_User', 'Old_User', 'x')"
+            )
+            old.commit()
+            old.close()
+
+            settings = Settings(
+                _env_file=None,
+                gemini_api_key="test-key-not-used",
+                file_url_signing_secret="test-signing-secret-with-at-least-32-characters",
+                sqlite_path=path,
+                storage_dir=folder,
+            )
+            database = await create_database(settings)
+            try:
+                row = await database.fetchrow("SELECT username, is_demo FROM users")
+                self.assertEqual((row["username"], row["is_demo"]), ("Old_User", 0))
+            finally:
+                await database.close()
 
 
 if __name__ == "__main__":

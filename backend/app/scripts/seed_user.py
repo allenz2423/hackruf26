@@ -1,6 +1,6 @@
 """Create or update a local account, for development and demos.
 
-    python -m app.scripts.seed_user USERNAME PASSWORD [--display-name NAME] [--adopt-local-data]
+    python -m app.scripts.seed_user USERNAME PASSWORD [--display-name NAME] [--demo] [--adopt-local-data]
 
 The password is only used to compute a hash; it is never printed or stored.
 Run from the backend directory with the virtualenv active. Refuses to run
@@ -26,6 +26,11 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("username")
     parser.add_argument("password")
     parser.add_argument("--display-name", default=None)
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Mark this as the demo account: it alone starts with the built-in sample classes.",
+    )
     parser.add_argument(
         "--adopt-local-data",
         action="store_true",
@@ -58,9 +63,10 @@ async def run(argv: list[str]) -> int:
         if existing:
             user_id = existing["id"]
             await database.execute(
-                "UPDATE users SET password_hash = ?1, display_name = ?2 WHERE id = ?3",
+                "UPDATE users SET password_hash = ?1, display_name = ?2, is_demo = ?3 WHERE id = ?4",
                 await accounts.hash_password(details.password),
                 details.display_name or details.username,
+                1 if args.demo else 0,
                 user_id,
             )
             action = "Updated"
@@ -70,6 +76,7 @@ async def run(argv: list[str]) -> int:
                 username=details.username,
                 password=details.password,
                 display_name=details.display_name,
+                is_demo=args.demo,
             )
             user_id = user["id"]
             action = "Created"
@@ -85,7 +92,7 @@ async def run(argv: list[str]) -> int:
     finally:
         await database.close()
 
-    print(f"{action} account '{details.username}'.")
+    print(f"{action} account '{details.username}'{' (demo account)' if args.demo else ''}.")
     if args.adopt_local_data:
         print(f"Moved {adopted} existing class(es) to this account.")
     return 0

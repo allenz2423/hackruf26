@@ -128,6 +128,7 @@ async def create_database(settings: Settings) -> SQLiteDatabase:
     await connection.execute("PRAGMA busy_timeout = 5000")
     schema = Path(__file__).with_name("sqlite_schema.sql").read_text(encoding="utf-8")
     await connection.executescript(schema)
+    await _add_missing_columns(connection)
     return SQLiteDatabase(connection)
 
 
@@ -162,3 +163,12 @@ def json_value(value: object, fallback: object = None) -> object:
         except json.JSONDecodeError:
             return fallback
     return value
+
+
+async def _add_missing_columns(connection: aiosqlite.Connection) -> None:
+    """Upgrade tables created by earlier versions of the schema in place."""
+    cursor = await connection.execute("PRAGMA table_info(users)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    await cursor.close()
+    if "is_demo" not in columns:
+        await connection.execute("ALTER TABLE users ADD COLUMN is_demo INTEGER NOT NULL DEFAULT 0")

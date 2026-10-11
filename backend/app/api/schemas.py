@@ -539,6 +539,7 @@ class AuthUser(BaseModel):
     username: str
     display_name: str
     email: str | None = None
+    is_demo: bool = False
 
 
 class MeResponse(BaseModel):
@@ -547,3 +548,43 @@ class MeResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     user: AuthUser | None = None
+
+
+class ProfileUpdate(BaseModel):
+    """Change the username and/or email. Only fields that are sent are changed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    username: str | None = Field(default=None, min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")
+    email: str | None = Field(default=None, max_length=254)
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def strip_username(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def blank_email_to_none(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return value
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str | None) -> str | None:
+        from app.services.auth import EMAIL_PATTERN
+
+        if value is not None and not EMAIL_PATTERN.match(value):
+            raise ValueError("Enter a valid email address.")
+        return value
+
+
+class PasswordChange(BaseModel):
+    """Prove the current password, then set a new one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    current_password: str = Field(min_length=1, max_length=128, strict=True)
+    new_password: str = Field(min_length=8, max_length=128, strict=True)
