@@ -5,14 +5,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import hashlib
 import json
 import logging
 import secrets
 import struct
 import time
-from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
@@ -34,6 +32,20 @@ from app.services.lean_proofs import (
     LeanProofService,
     LeanRuntimeUnavailable,
 )
+from app.services.live_coaching import (
+    COACHING_INPUT_PAUSE_SECONDS,
+    MAX_PENDING_TOOLS,
+    ScreenReviewResult,
+    ToolJob,
+    inspect_frame,
+    interruption_event,
+)
+from app.services.live_coaching import (
+    FrameState as _FrameState,
+)
+from app.services.live_coaching import (
+    LiveTurnState as _CoachingState,
+)
 from app.services.live_config import (
     AUTOMATIC_SCREEN_REVIEW,
     CURRENT_SCREEN_CONTEXT,
@@ -48,14 +60,13 @@ TICKET_TTL_SECONDS = 45
 MAX_CLIENT_MESSAGE_BYTES = 3_200_000
 MAX_FRAME_BYTES = 2_200_000
 FRAME_INTERVAL_SECONDS = 1.0
-MAX_FRAME_AGE_SECONDS = 10.0
 ANNOTATION_REPLY_TIMEOUT_SECONDS = 15
-SCREEN_REVIEW_INTERVAL_SECONDS = 5.0
-SCREEN_REVIEW_STABLE_SECONDS = 1.5
-SCREEN_REVIEW_MAX_AGE_SECONDS = 2.5
-COACHING_INPUT_PAUSE_SECONDS = 2.0
-COACHING_FEEDBACK_PAUSE_SECONDS = 10.0
 PCM_ACTIVITY_THRESHOLD = 600
+SESSION_WATCH_INTERVAL_SECONDS = 1.0
+
+
+class _ScreenReviewTimeout(TimeoutError):
+    """A proactive review exceeded its total budget, including tool work."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,83 +155,6 @@ _EVENT_ADAPTER = TypeAdapter(
 )
 
 
-@dataclass(slots=True)
-class _FrameState:
-    latest_frame_id: str | None = None
-    last_frame_at: float = 0.0
-    latest_image: bytes | None = None
-    latest_digest: bytes | None = None
-    last_change_at: float = 0.0
-    paused: bool = False
-
-    def is_current(self) -> bool:
-        return bool(
-            self.latest_frame_id
-            and not self.paused
-            and time.monotonic() - self.last_frame_at <= MAX_FRAME_AGE_SECONDS
-        )
-
-    def clear(self) -> None:
-        self.latest_frame_id = None
-        self.latest_image = None
-        self.latest_digest = None
-
-
-@dataclass(slots=True)
-class _CoachingState:
-    """Coordinate automatic checks without retaining past images or audio."""
-
-    model_busy: bool = False
-    student_speaking: bool = False
-    last_user_activity_at: float = 0.0
-    last_model_activity_at: float = 0.0
-    last_review_at: float = 0.0
-    review_digest: bytes | None = None
-    review_frame_id: str | None = None
-    review_stale: bool = False
-    review_output_sent: bool = False
-    reviewed_digests: deque[bytes] = field(default_factory=lambda: deque(maxlen=16))
-
-    def clear_review(self) -> None:
-        self.review_digest = None
-        self.review_frame_id = None
-        self.review_stale = False
-        self.review_output_sent = False
-
-    def user_turn(self) -> None:
-        self.clear_review()
-        self.model_busy = True
-        self.last_user_activity_at = time.monotonic()
-
-    def finish_turn(self) -> None:
-        self.model_busy = False
-        if self.review_digest is None or self.review_output_sent:
-            self.last_model_activity_at = time.monotonic()
-        self.clear_review()
-
-    def review_is_stale(self, frames: _FrameState) -> bool:
-        if self.review_digest is not None:
-            self.review_stale = self.review_stale or (
-                not frames.is_current() or self.review_digest != frames.latest_digest
-            )
-        return self.review_stale
-
-    def can_review(self, frames: _FrameState, now: float) -> bool:
-        return bool(
-            not self.model_busy
-            and not self.student_speaking
-            and frames.is_current()
-            and frames.latest_image is not None
-            and frames.latest_digest is not None
-            and now - frames.last_frame_at <= SCREEN_REVIEW_MAX_AGE_SECONDS
-            and now - frames.last_change_at >= SCREEN_REVIEW_STABLE_SECONDS
-            and now - self.last_user_activity_at >= COACHING_INPUT_PAUSE_SECONDS
-            and now - self.last_model_activity_at >= COACHING_FEEDBACK_PAUSE_SECONDS
-            and now - self.last_review_at >= SCREEN_REVIEW_INTERVAL_SECONDS
-            and frames.latest_digest not in self.reviewed_digests
-        )
-
-
 class GeminiLiveSessionService:
     """Bridge validated browser media to one fixed, server-configured Live session."""
 
@@ -251,11 +185,15 @@ class GeminiLiveSessionService:
         upstream_send_lock = asyncio.Lock()
         pending_annotations: dict[str, asyncio.Future[dict[str, Any]]] = {}
         frames = _FrameState()
-        coaching = _CoachingState() if mode == TutorMode.CHECK_STEPS else None
+        # Ordinary conversations also need responsive tool cancellation. Only
+        # check_steps sessions enable the automatic screen-review scheduler.
+        coaching = _CoachingState()
         peer = websocket.client.host if websocket.client else "unknown"
 
-        async def send_client(payload: dict[str, Any]) -> None:
+        async def send_client(payload: dict[str, Any], *, generation: int | None = None) -> None:
             async with send_lock:
+                if generation is not None and generation != coaching.generation:
+                    return
                 await websocket.send_json(payload)
 
         try:
@@ -292,13 +230,19 @@ class GeminiLiveSessionService:
                         coaching=coaching,
                     )
                 )
-                tasks = [input_task, output_task]
-                if coaching is not None:
-                    tasks.append(
-                        asyncio.create_task(
-                            self._review_screen(session, frames, coaching, upstream_send_lock)
+                tasks = [
+                    input_task,
+                    output_task,
+                    asyncio.create_task(
+                        self._review_screen(
+                            session,
+                            frames,
+                            coaching,
+                            upstream_send_lock,
+                            enable_reviews=mode == TutorMode.CHECK_STEPS,
                         )
-                    )
+                    ),
+                ]
                 try:
                     done, _ = await asyncio.wait(
                         tasks,
@@ -326,7 +270,7 @@ class GeminiLiveSessionService:
             return
         except Exception as exc:  # noqa: BLE001 - upstream content and credentials stay private
             category = _classify_live_failure(exc)
-            status = getattr(exc, "status_code", None)
+            status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
             logger.error(
                 "live_session_failed request_id=%s category=%s status=%s exception_type=%s",
                 request_id,
@@ -338,8 +282,16 @@ class GeminiLiveSessionService:
                 await send_client(
                     {
                         "type": "error",
-                        "code": f"upstream_{category}",
-                        "message": "The tutoring service could not complete this session.",
+                        "code": (
+                            "screen_review_timeout"
+                            if isinstance(exc, _ScreenReviewTimeout)
+                            else f"upstream_{category}"
+                        ),
+                        "message": (
+                            "The automatic screen check timed out. Start a new tutor session."
+                            if isinstance(exc, _ScreenReviewTimeout)
+                            else "The tutoring service could not complete this session."
+                        ),
                     }
                 )
                 await websocket.close(code=1011)
@@ -347,9 +299,7 @@ class GeminiLiveSessionService:
                 pass
         finally:
             frames.clear()
-            if coaching is not None:
-                coaching.clear_review()
-                coaching.reviewed_digests.clear()
+            coaching.clear()
             for future in pending_annotations.values():
                 if not future.done():
                     future.cancel()
@@ -398,6 +348,9 @@ class GeminiLiveSessionService:
                 async with upstream_send_lock:
                     if coaching is not None:
                         coaching.user_turn()
+                    # Flush audio already buffered in the browser even when
+                    # provider generation has finished before this question.
+                    await send_client(interruption_event())
                     # Keep the latest image and the student's correction in one
                     # ordered update, without replaying any older screen frames.
                     parts = [types.Part(text=NO_CURRENT_SCREEN_CONTEXT)]
@@ -454,6 +407,9 @@ class GeminiLiveSessionService:
                     continue
                 frames.paused = True
                 async with upstream_send_lock:
+                    if coaching is not None:
+                        coaching.pause_screen()
+                    await send_client(interruption_event())
                     await session.send_client_content(
                         turns=[
                             types.Content(
@@ -478,7 +434,9 @@ class GeminiLiveSessionService:
                     )
                     await websocket.close(code=1003)
                     return
-                if not data.startswith(b"\xff\xd8"):
+                try:
+                    size, signature = await asyncio.to_thread(inspect_frame, data)
+                except ValueError:
                     await send_client(
                         {
                             "type": "error",
@@ -498,14 +456,18 @@ class GeminiLiveSessionService:
                             ],
                             turn_complete=False,
                         )
-                    frames.latest_frame_id = str(event.frame_id)
-                    frames.latest_image = data
-                    frames.last_frame_at = time.monotonic()
-                    digest = hashlib.sha256(data).digest()
-                    if digest != frames.latest_digest:
-                        frames.last_change_at = frames.last_frame_at
-                    frames.latest_digest = digest
-                    frames.paused = False
+                    was_invalid = bool(coaching and coaching.review and coaching.review.invalidated)
+                    frames.accept(str(event.frame_id), data, size, signature)
+                    if (
+                        coaching is not None
+                        and coaching.review_is_stale(frames)
+                        and not was_invalid
+                    ):
+                        coaching.generation += 1
+                        coaching.cancel_tools()
+                        if coaching.review is not None and coaching.review.output_sent:
+                            await send_client(interruption_event())
+                            coaching.review.output_sent = False
                     await session.send_realtime_input(
                         video=types.Blob(data=data, mime_type="image/jpeg")
                     )
@@ -527,20 +489,24 @@ class GeminiLiveSessionService:
         frames: _FrameState,
         coaching: _CoachingState,
         upstream_send_lock: asyncio.Lock,
+        *,
+        enable_reviews: bool = True,
     ) -> None:
         while True:
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(SESSION_WATCH_INTERVAL_SECONDS)
             async with upstream_send_lock:
                 now = time.monotonic()
-                if not coaching.can_review(frames, now):
+                if coaching.tool_failure is not None:
+                    raise coaching.tool_failure
+                if (
+                    coaching.review is not None
+                    and now - coaching.review.started_at
+                    >= self._settings.live_review_timeout_seconds
+                ):
+                    raise _ScreenReviewTimeout
+                if not enable_reviews or not coaching.can_review(frames, now):
                     continue
-                coaching.model_busy = True
-                coaching.last_review_at = now
-                coaching.review_digest = frames.latest_digest
-                coaching.review_frame_id = frames.latest_frame_id
-                coaching.review_stale = False
-                coaching.review_output_sent = False
-                coaching.reviewed_digests.append(frames.latest_digest)
+                coaching.start_review(frames, now)
                 # Completing this server-owned turn triggers Live output without
                 # a user question. Only the current bounded snapshot is included.
                 await session.send_client_content(
@@ -548,7 +514,12 @@ class GeminiLiveSessionService:
                         types.Content(
                             role="user",
                             parts=[
-                                types.Part(text=AUTOMATIC_SCREEN_REVIEW),
+                                types.Part(
+                                    text=(
+                                        f"{AUTOMATIC_SCREEN_REVIEW}\n\n"
+                                        f"review_id: {coaching.review.review_id}"
+                                    )
+                                ),
                                 types.Part(
                                     inline_data=types.Blob(
                                         data=frames.latest_image, mime_type="image/jpeg"
@@ -571,105 +542,222 @@ class GeminiLiveSessionService:
         *,
         coaching: _CoachingState | None = None,
     ) -> None:
-        # receive() ends after one model turn; keep listening until disconnection.
-        while True:
-            received_message = False
-            async for message in session.receive():
-                received_message = True
-                voice_activity = getattr(message, "voice_activity", None)
-                if coaching is not None and voice_activity is not None:
-                    activity = voice_activity.voice_activity_type
-                    if activity == types.VoiceActivityType.ACTIVITY_START:
-                        coaching.student_speaking = True
-                        coaching.user_turn()
-                    elif activity == types.VoiceActivityType.ACTIVITY_END:
-                        coaching.student_speaking = False
-                        coaching.last_user_activity_at = time.monotonic()
-                content = message.server_content
-                if content is not None:
-                    if coaching is not None and content.model_turn is not None:
-                        coaching.model_busy = True
-                        coaching.last_model_activity_at = time.monotonic()
-                    event: dict[str, Any] = {
-                        "type": "assistant",
-                        "interrupted": bool(content.interrupted),
-                        "turn_complete": bool(content.turn_complete),
-                        "text": getattr(content.output_transcription, "text", None),
-                        "audio": [],
-                    }
-                    for part in getattr(content.model_turn, "parts", None) or []:
-                        inline_data = part.inline_data
-                        mime_type = inline_data.mime_type or "" if inline_data is not None else ""
-                        if inline_data is not None and mime_type.startswith("audio/"):
-                            event["audio"].append(
-                                {
-                                    "data": _encode_audio(inline_data.data),
-                                    "mime_type": mime_type,
-                                }
-                            )
-                        if part.text and not event["text"]:
-                            event["text"] = part.text
-                    if (
-                        event["interrupted"]
-                        or event["turn_complete"]
-                        or event["text"]
-                        or event["audio"]
-                    ):
-                        if coaching is None or not coaching.review_is_stale(frames):
-                            await send_client(event)
-                            if (
-                                coaching is not None
-                                and coaching.review_digest is not None
-                                and (event["text"] or event["audio"])
-                            ):
-                                coaching.review_output_sent = True
-                        elif coaching.review_output_sent:
-                            # Cancel queued speech from an obsolete automatic check.
-                            await send_client(
-                                {
-                                    "type": "assistant",
-                                    "interrupted": True,
-                                    "turn_complete": False,
-                                    "text": None,
-                                    "audio": [],
-                                }
-                            )
-                            coaching.review_output_sent = False
+        state = coaching if coaching is not None else _CoachingState()
+        try:
+            # receive() ends after one model turn. Tool work must not block
+            # the next voice-activity, interruption, or cancellation message.
+            while True:
+                received_message = False
+                async for message in session.receive():
+                    received_message = True
+                    voice_activity = getattr(message, "voice_activity", None)
+                    if voice_activity is not None:
+                        activity = voice_activity.voice_activity_type
+                        if activity == types.VoiceActivityType.ACTIVITY_START:
+                            state.student_speaking = True
+                            state.user_turn()
+                            # Generation may already be over while the browser
+                            # is still playing buffered speech.
+                            await send_client(interruption_event())
+                        elif activity == types.VoiceActivityType.ACTIVITY_END:
+                            state.student_speaking = False
+                            state.last_user_activity_at = time.monotonic()
 
-                tool_call = message.tool_call
-                calls = list(getattr(tool_call, "function_calls", None) or [])
-                known_ids = {call.id for call in calls if call.id}
-                model_turn = content.model_turn if content is not None else None
-                for part in getattr(model_turn, "parts", None) or []:
-                    function_call = part.function_call
-                    if function_call is not None and function_call.id not in known_ids:
-                        calls.append(function_call)
-                        if function_call.id:
-                            known_ids.add(function_call.id)
-                if calls:
-                    if coaching is not None:
-                        coaching.model_busy = True
-                    responses = []
+                    cancellation = getattr(message, "tool_call_cancellation", None)
+                    for call_id in getattr(cancellation, "ids", None) or []:
+                        job = state.tools.get(call_id)
+                        if job is not None and job.task is not None:
+                            job.task.cancel()
+
+                    content = message.server_content
+                    transcription = getattr(content, "input_transcription", None)
+                    if getattr(transcription, "text", None):
+                        now = time.monotonic()
+                        if (
+                            not state.student_speaking
+                            and now - state.last_transcription_at >= COACHING_INPUT_PAUSE_SECONDS
+                        ):
+                            state.user_turn()
+                            await send_client(interruption_event())
+                        state.last_transcription_at = now
+                        state.last_user_activity_at = now
+                    if content is not None and content.interrupted:
+                        if frames.paused:
+                            state.invalidate_review()
+                        else:
+                            state.provider_interrupted()
+                        await send_client(interruption_event())
+
+                    tool_call = message.tool_call
+                    calls = list(getattr(tool_call, "function_calls", None) or [])
+                    known_ids = {call.id for call in calls if call.id}
+                    model_turn = content.model_turn if content is not None else None
+                    for part in getattr(model_turn, "parts", None) or []:
+                        function_call = part.function_call
+                        if function_call is not None and function_call.id not in known_ids:
+                            calls.append(function_call)
+                            if function_call.id:
+                                known_ids.add(function_call.id)
+
+                    valid = not state.discard_output and not state.review_is_stale(frames)
                     for call in calls:
-                        response = await self._handle_function_call(
-                            call,
-                            session,
-                            frames,
-                            pending_annotations,
-                            peer,
-                            send_client,
-                            coaching=coaching,
+                        # A stale visual review can still acknowledge its own
+                        # bounded outcome silently. It cannot close a newer
+                        # student response or authorize any visual action.
+                        terminal_report = (
+                            call.name == "report_screen_review"
+                            and state.review is not None
+                            and not state.awaiting_user_response
+                            and not state.waiting_for_old_turn
                         )
-                        responses.append(response)
-                    async with upstream_send_lock:
-                        await session.send_tool_response(function_responses=responses)
-                if coaching is not None and content is not None:
-                    if content.turn_complete or (
-                        content.waiting_for_input and not calls and not coaching.student_speaking
-                    ):
-                        coaching.finish_turn()
-            if not received_message:
-                return
+                        if valid or terminal_report:
+                            call_id = str(call.id or secrets.token_hex(12))
+                            if call_id in state.tools:
+                                continue
+                            if len(state.tools) >= MAX_PENDING_TOOLS:
+                                # Stop this session rather than growing an
+                                # unbounded executor or blocking speech input.
+                                raise RuntimeError("Live tool concurrency limit exceeded.")
+                            state.model_busy = True
+                            state.awaiting_user_response = False
+                            state.turn_complete = False
+                            job = ToolJob(generation=state.generation)
+                            state.tools[call_id] = job
+                            job.task = asyncio.create_task(
+                                self._execute_tool(
+                                    call,
+                                    call_id,
+                                    job,
+                                    session,
+                                    frames,
+                                    pending_annotations,
+                                    upstream_send_lock,
+                                    peer,
+                                    send_client,
+                                    state,
+                                )
+                            )
+
+                    if content is not None:
+                        event: dict[str, Any] = {
+                            "type": "assistant",
+                            "interrupted": False,
+                            "turn_complete": bool(content.turn_complete),
+                            "text": getattr(content.output_transcription, "text", None),
+                            "audio": [],
+                        }
+                        for part in getattr(content.model_turn, "parts", None) or []:
+                            if getattr(part, "thought", False):
+                                continue
+                            inline_data = part.inline_data
+                            mime_type = (inline_data.mime_type or "") if inline_data else ""
+                            if inline_data is not None and mime_type.startswith("audio/"):
+                                event["audio"].append(
+                                    {
+                                        "data": _encode_audio(inline_data.data),
+                                        "mime_type": mime_type,
+                                    }
+                                )
+                            if part.text and not event["text"]:
+                                event["text"] = part.text
+                        has_output = bool(event["text"] or event["audio"])
+                        if valid and not content.interrupted:
+                            audible = state.allows_speech()
+                            if has_output and audible:
+                                state.turn_output_sent = True
+                                if state.review is not None:
+                                    state.review.output_sent = True
+                            if not audible:
+                                event["text"] = None
+                                event["audio"] = []
+                            if (has_output and audible) or event["turn_complete"]:
+                                await send_client(event, generation=state.generation)
+                        elif state.review is not None and state.review.output_sent:
+                            await send_client(interruption_event())
+                            state.review.output_sent = False
+                        state.observe_content(
+                            has_output=has_output,
+                            complete=bool(content.turn_complete),
+                            status=getattr(content, "interaction_status", None),
+                        )
+                        state.finish_if_idle()
+                if not received_message:
+                    return
+        finally:
+            tasks = [job.task for job in state.tools.values() if job.task is not None]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _execute_tool(
+        self,
+        call: Any,
+        call_id: str,
+        job: ToolJob,
+        session: Any,
+        frames: _FrameState,
+        pending_annotations: dict[str, asyncio.Future[dict[str, Any]]],
+        upstream_send_lock: asyncio.Lock,
+        peer: str,
+        send_client: Any,
+        state: _CoachingState,
+    ) -> None:
+        try:
+            response = await self._handle_function_call(
+                call,
+                session,
+                frames,
+                pending_annotations,
+                peer,
+                send_client,
+                coaching=state,
+            )
+            async with upstream_send_lock:
+                quiet_review = (
+                    call.name == "report_screen_review"
+                    and response.response.get("decision") in {"no_issue", "incomplete", "uncertain"}
+                    and state.review is not None
+                    and not state.awaiting_user_response
+                    and not state.waiting_for_old_turn
+                )
+                if job.generation != state.generation or (
+                    (state.discard_output or state.review_is_stale(frames)) and not quiet_review
+                ):
+                    return
+                # A sent result may trigger more model output. Keep the gate
+                # closed until the provider acknowledges its completed turn.
+                state.turn_complete = False
+                state.provider_idle = False
+                state.model_busy = True
+                if quiet_review:
+                    response.scheduling = types.FunctionResponseScheduling.SILENT
+                    response.will_continue = False
+                await session.send_tool_response(function_responses=[response])
+                if quiet_review:
+                    # SILENT + will_continue=False explicitly terminates this
+                    # nonblocking call without requesting further generation.
+                    # Proactive abstention alone may emit no turnComplete.
+                    # Finishing this control call cannot override a provider
+                    # that explicitly reports background work in progress.
+                    state.observe_content(has_output=False, complete=True, status=None)
+                    await send_client(
+                        {
+                            "type": "assistant",
+                            "interrupted": False,
+                            "turn_complete": True,
+                            "text": None,
+                            "audio": [],
+                        },
+                        generation=job.generation,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # retrieved by the bounded session monitor
+            state.tool_failure = exc
+        finally:
+            if state.tools.get(call_id) is job:
+                state.tools.pop(call_id)
+            state.finish_if_idle()
 
     async def _handle_function_call(
         self,
@@ -687,18 +775,66 @@ class GeminiLiveSessionService:
         args = call.args if isinstance(call.args, dict) else {}
         result: dict[str, Any]
 
-        if name == "add_annotations":
+        if name == "report_screen_review":
+            try:
+                outcome = ScreenReviewResult.model_validate(args)
+            except ValidationError:
+                result = {
+                    "error": {
+                        "code": "invalid_review_result",
+                        "message": "Report a valid review ID and decision.",
+                    }
+                }
+            else:
+                if (
+                    coaching is None
+                    or coaching.review is None
+                    or coaching.review.review_id != outcome.review_id
+                    or coaching.awaiting_user_response
+                    or coaching.waiting_for_old_turn
+                ):
+                    result = {
+                        "error": {
+                            "code": "stale_review",
+                            "message": "This automatic review is no longer active.",
+                        }
+                    }
+                elif coaching.review_is_stale(frames):
+                    coaching.review.decision = "uncertain"
+                    coaching.silenced_generation = coaching.generation
+                    result = {
+                        "accepted": False,
+                        "decision": "uncertain",
+                        "error": {
+                            "code": "stale_review",
+                            "message": "The reviewed screen changed. Finish this check silently.",
+                        },
+                    }
+                else:
+                    coaching.review.decision = outcome.decision
+                    if outcome.decision != "mistake":
+                        coaching.silenced_generation = coaching.generation
+                    result = {"accepted": True, "decision": outcome.decision}
+        elif name == "add_annotations":
             frame_id = (
-                coaching.review_frame_id
-                if coaching is not None and coaching.review_digest is not None
+                coaching.review.frame_id
+                if coaching is not None and coaching.review is not None
                 else frames.latest_frame_id
             )
-            if coaching is not None and coaching.review_is_stale(frames):
+            if (
+                coaching is not None
+                and coaching.review is not None
+                and (
+                    coaching.review.decision != "mistake"
+                    or not coaching.annotation_is_current(frames)
+                )
+            ):
                 result = {
                     "error": {
                         "code": "stale_review",
                         "message": (
-                            "The reviewed screen changed. Do not mark or repeat the old step."
+                            "The reviewed frame is no longer suitable for a mark. "
+                            "Give a verbal hint without marking remembered coordinates."
                         ),
                     }
                 }
@@ -722,13 +858,15 @@ class GeminiLiveSessionService:
                 future = asyncio.get_running_loop().create_future()
                 pending_annotations[call_id] = future
                 try:
-                    await send_client(
-                        {
-                            "type": "annotation_request",
-                            "call_id": call_id,
-                            "payload": {"frame_id": frame_id, "items": args.get("items", [])},
-                        }
-                    )
+                    payload = {
+                        "type": "annotation_request",
+                        "call_id": call_id,
+                        "payload": {"frame_id": frame_id, "items": args.get("items", [])},
+                    }
+                    if coaching is None:
+                        await send_client(payload)
+                    else:
+                        await send_client(payload, generation=coaching.generation)
                     result = await asyncio.wait_for(
                         future,
                         timeout=ANNOTATION_REPLY_TIMEOUT_SECONDS,
@@ -841,7 +979,7 @@ def _encode_audio(value: bytes | str) -> str:
 
 
 def _classify_live_failure(exc: Exception) -> str:
-    status = getattr(exc, "status_code", None)
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
     details = str(getattr(exc, "message", "") or exc).lower()
     if status == 429 or "quota" in details or "billing" in details:
         return "quota_or_billing"
@@ -849,7 +987,7 @@ def _classify_live_failure(exc: Exception) -> str:
         return "credentials_or_access"
     if status == 404 or "not found" in details:
         return "model_unavailable"
-    if status == 400:
+    if status in {400, 1007}:
         return "configuration_rejected"
     if isinstance(exc, TimeoutError):
         return "timeout"

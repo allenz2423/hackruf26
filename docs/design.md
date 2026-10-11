@@ -6,6 +6,8 @@
 
 Implementation detail lives in the [frontend design](frontend-design.md) and [backend design](backend-design.md).
 
+The [proactive coaching and barge-in design](proactive-coaching-design.md) describes the implemented backend for automatic spoken hints while the student works silently, including scheduling, interruptions, privacy, verification evidence, and the frontend handoff.
+
 ## Summary
 
 Screen Tutor is an AI tutor that runs in a browser and observes a screen the student explicitly shares. The student asks a question by voice or text. The tutor responds conversationally, refers to visible content, and can place a small number of temporary marks—such as a pointer, underline, or note—over the relevant region in the web app's live preview.

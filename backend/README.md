@@ -45,13 +45,27 @@ Study guides save PDF and LaTeX files. Every processed upload also gets a balanc
 
 ## Regression checks
 
-From the repository root, run the isolated calculator/Lean argument, quiz-scoring, and processing-lifecycle tests:
+From the repository root, run the isolated calculator/Lean, quiz-scoring, processing-lifecycle, and Live coaching state/transport tests:
 
 ```bash
 PYTHONPATH=backend backend/.venv/bin/python -m unittest discover -s backend/tests -v
 ```
 
-These tests use in-memory SQLite and a fake Lean runner; they do not call Gemini or change the local course library. Live and native Lean integration checks require the running service and configured runtime.
+These tests use in-memory SQLite, a fake Lean runner, and a fake Live transport; they do not call Gemini or change the local course library. Live and native Lean integration checks require the configured runtime.
+
+Opt into billed Gemini checks with the server key already configured:
+
+```bash
+backend/.venv/bin/python backend/scripts/check-live-coaching.py --run-live
+```
+
+The script tests a visible algebra error, correct work, an incomplete expression, continued typing, and speech interruption through the actual gateway service. Synthetic frames, audio, and bounded transcript checks stay in memory; output contains only decisions, counts, and timings. It creates no accounts, classes, or saved conversations. Use `--scenario error|correct|incomplete|typing|barge` for one case. The barge-in fixture uses a separate test-only Live connection to generate a spoken sentence and requires `ffmpeg` on PATH. The production feature uses one Live connection. These synthetic checks are a smoke test, not an accuracy benchmark or a substitute for testing real browser microphone/playback behavior.
+
+## Automatic screen coaching
+
+Request `mode: "check_steps"` to review screen work without a question or microphone. Reviews prefer settled frames but also run during continued typing. A coaching-only `report_screen_review` tool reports an outcome before a hint; correct, incomplete, and uncertain outcomes finish silently. Playback interruption uses the existing browser protocol. Reviews and pending tools are bounded and cancelled on interruption/disconnect. `LIVE_REVIEW_TIMEOUT_SECONDS` defaults to 60; a stuck review ends its session rather than overlapping another check. Pillow is installed through the Python requirements for bounded JPEG validation and viewport comparison.
+
+See the [proactive coaching design](../docs/proactive-coaching-design.md) for timing, known limits, verification evidence, and remaining frontend copy/source-lifecycle work.
 
 ## Authentication and ownership
 
