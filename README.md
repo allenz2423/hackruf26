@@ -1,38 +1,92 @@
-# Screen Tutor
+# Jot
 
-**An AI tutor that runs in the browser, sees the screen you choose to share, talks through your work, and places temporary visual notes over the preview in the page.**
+**The study buddy that sees your screen and teaches instead of telling.**
 
-Screen Tutor is a HackRU Fall 2026 project concept. In the web UI, the student can share a display, application window, or browser tab, ask a question by voice or text, and get an explanation grounded in the visible work. When a visual reference helps, the tutor can point to a region of the shared-screen preview with a highlight, underline, or short note. Marks are rendered by the page as a removable overlay; the model does not click, type, or change the student's work.
+Jot (working name: Screen Tutor) is a HackRU Fall 2026 project for the **Education track**. It is an AI tutor that runs in the browser. A student shares a tab, a window, or their screen, or opens one of their own class PDFs. They ask out loud or by typing, and Jot answers about exactly what it sees. It starts with hints, not answers, and can point at the exact step that needs attention with a temporary mark on the preview.
 
-Students can also upload their own course materials (notes, documents, syllabi, lecture slides, and video/audio lectures) and organize them by class (Math, Science, and so on). Each class gets its own tutor that uses that class's materials, and the app can generate quizzes, study guides, practice tests, and flashcards from them.
+- **Presentation:** [Jot-ScreenTutor-HackRU-Presentation.pptx](Jot-ScreenTutor-HackRU-Presentation.pptx), 12 slides with speaker notes. The narrated demo video is embedded on slide 5.
+- **Demo video:** a 1:40 narrated walkthrough, built from [demo-video/](demo-video/README.md).
 
-For automatic spoken corrections, enable **Check my steps** before **Share screen**. The tutor checks changed screen content without needing a question or microphone input, and speaks a short hint when it identifies a clear mistake. Leave a completed step visible briefly so it can review it. It skips unchanged views and leaves time between corrections. Optionally turn on the microphone to explain your steps; speaking interrupts the tutor, and checks wait for a pause. End the session to change modes. Feedback can miss errors.
+## What it does
 
-If the tutor keeps referring to erased or outdated work, use **Reset memory** in the Conversation panel. It clears the conversation and marks and opens a fresh tutor connection while keeping your screen shared. Turn the microphone on again afterward.
+**Tutoring on the student's own work**
 
-## Design
+- **Share, ask, understand.** The browser's own picker chooses what to share. Students talk or type and can interrupt Jot anytime.
+- **Marks on the exact spot.** Jot can box, underline, point at, or add a note to a region of the shared preview, such as the step where a sign flipped. Marks are drawn by the page and fade after a few seconds.
+- **Hints before answers.** The tutor nudges with questions first and explains a prerequisite or a small worked example only when hints aren't working.
+- **Check my steps.** Turn it on before sharing, and Jot follows along as the student works. It speaks a short hint only when it sees a clear mistake, and stays quiet for correct, unfinished, or unclear work.
+- **Language lock.** Keeps the tutor in one of 11 languages, even when the materials are in another.
+- **Quick tutor for guests.** Anyone can try tutoring without an account.
 
-See the [product overview](docs/design.md), [frontend design](docs/frontend-design.md), and [backend design](docs/backend-design.md).
+**Built around the student's course** (requires an account)
 
-See the [proactive coaching and barge-in design](docs/proactive-coaching-design.md) for the implemented backend, silent-typing behavior, spoken interruptions, test results, and frontend handoff.
+- **Classes.** Each class has its own color, icon, and library of uploads: notes, documents, syllabi, lecture slides, past tests, and lecture recordings. Jot extracts the text and transcribes lectures.
+- **Class tutor.** In a class, Jot reads that class's materials, or only the uploads the student picks, and says when they don't cover something.
+- **Open material.** Show a class PDF, image, or document on the tutor stage instead of a screen. The student turns pages and Jot can mark them.
+- **Study sets.** Generate quizzes, flashcards, practice exams, and study guides from the student's own uploads, with each question linked back to its source. Study guides download as PDF or LaTeX.
+- **Saved recaps** (opt-in, per class). When a session ends, Jot can save a short recap of topics and next steps, to pick up where the student left off. Students can view and clear them.
+- **Your own Jot.** Pick a color, face, and accessory for the mascot that talks with you.
 
-## Status
+## Safe by design
 
-The FastAPI backend uses SQLite for class-library data and private local storage
-for uploaded files. Local/demo ownership is scoped by a configured UUID, so no
-external auth provider is required. The default SQLite database and uploaded
-files live under `backend/.local/` and need persistent storage for deployed
-environments.
+- Jot sees only what the student shares, through the browser's picker.
+- Live screen frames and microphone audio are relayed in memory and never recorded or stored. Only opt-in recaps are saved.
+- The model's only visual action is a temporary mark, which the browser validates before drawing. It cannot click, type, or control any app.
+- The Gemini API key stays on the server. The browser gets a short-lived, one-use session ticket.
 
-## Proposed stack
+## Run it locally
 
-- HTML, CSS, and JavaScript for the browser UI, with a provider-neutral WebSocket connection to the backend.
-- Python, FastAPI, and Pydantic for server-owned Live sessions and content processing.
-- Gemini Live API using `gemini-3.8-live` for real-time multimodal tutoring.
-- SQLite for backend-owned class-library data.
-- The backend owns all provider SDK use, model configuration, instructions, and tools. The browser receives only a short-lived, one-use WebSocket ticket; the long-lived API key never leaves the server.
+You need Python 3.12, Node.js 18 or newer, and a [Gemini API key](https://aistudio.google.com/apikey).
 
-See [backend setup and configuration](backend/README.md) to run the session
-gateway locally.
+1. **Configure.** Copy `.env.example` to `.env`. Set `GEMINI_API_KEY`, and set `FILE_URL_SIGNING_SECRET` to a random string of at least 32 characters.
+2. **Start the backend** (port 8000):
 
-The MVP annotates the shared-screen preview inside the web page. It does not draw over other applications outside the browser. The current Gemini model and API behavior are linked in the [design doc](docs/design.md#gemini-live-integration).
+   ```bash
+   cd backend
+   python -m venv .venv
+   .venv/Scripts/pip install -r requirements.txt   # macOS/Linux: .venv/bin/pip
+   cd ..
+   backend/.venv/Scripts/python -m uvicorn app.main:app --app-dir backend --reload
+   ```
+
+3. **Start the frontend** in a second terminal:
+
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   ```
+
+4. **Open** http://127.0.0.1:5173. Use **Quick tutor** as a guest, or create an account to make classes.
+
+The SQLite database and uploaded files live under `backend/.local/`. Optional extras are covered in the [backend README](backend/README.md): Lean proof checking, and Tectonic for saving study guides as PDF.
+
+### Tests
+
+```bash
+cd frontend && npm test
+PYTHONPATH=backend backend/.venv/Scripts/python -m unittest discover -s backend/tests   # from the repo root
+```
+
+The backend tests use in-memory SQLite and fake Live and Lean runners, so they don't call Gemini.
+
+## How it works
+
+The browser previews the shared screen, samples about one frame a second, and relays frames and microphone audio over a same-origin WebSocket. The FastAPI server holds the API key, issues one-use session tickets, builds class context, and runs the tutor's tools. These are `add_annotations` for marks, a bounded calculator, a Lean proof check, and Google Search. Gemini Live (`gemini-3.8-live`) sees the frames, hears the student, speaks back, and asks for marks, which the server converts and the browser validates against the exact frame they refer to.
+
+| Part | Stack |
+| --- | --- |
+| [frontend/](frontend/) | HTML, CSS, vanilla JavaScript modules, Vite, pdf.js |
+| [backend/](backend/) | Python, FastAPI, Pydantic v2, Google's `google-genai` SDK, SQLite, Uvicorn |
+| [demo-video/](demo-video/README.md) | The narrated demo film: Gemini text-to-speech, Lyria music, rendered with Chrome and ffmpeg |
+| [build_presentation.py](build_presentation.py) | Builds the presentation with python-pptx |
+
+The page draws marks over its own preview. It cannot draw over other desktop apps.
+
+## Design docs
+
+- [Product and system design](docs/design.md)
+- [Frontend design](docs/frontend-design.md)
+- [Backend design](docs/backend-design.md) and [backend setup](backend/README.md)
+- [Proactive coaching and barge-in](docs/proactive-coaching-design.md)
+- [Sharing classes (proposal)](docs/sharing-design.md)
