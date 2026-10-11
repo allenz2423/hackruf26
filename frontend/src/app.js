@@ -315,8 +315,10 @@ async function renderClassTab({ id, tab }) {
       root,
       klass,
       onMaterialAdded: (material) => {
-        updateClass(klass.id, { materials: [...klass.materials, material] });
-        renderClassTab({ id, tab });
+        const currentClass = getClassById(klass.id) || klass;
+        const materials = currentClass.materials.filter((item) => item.id !== material.id);
+        klass.materials = [...materials, material];
+        return updateClass(klass.id, { materials: klass.materials });
       },
       onAttemptCompleted: (materialId, attempt) => {
         const currentClass = getClassById(klass.id);

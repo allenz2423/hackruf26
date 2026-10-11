@@ -101,6 +101,14 @@ Classes ─┬─ Math 151 ─┬─ Library   (uploads: notes, docs, syllabus, 
 - **Flashcards view:** flip card with keyboard support (Space to flip, arrows to move), “Got it” / “Study again” sorting, and shuffle.
 - **AI-generated label and Flag:** every generated item is labeled as AI-generated, and each question or card has a Flag as wrong action.
 
+### SQLite study generation integration
+
+Class-library calls use same-origin HTTP without requiring a bearer token in local SQLite mode. Before generation, `course-sync.js` maps browser-only class and upload records to backend UUIDs, retrieves original files from IndexedDB (or uses pasted source text), submits the selected sources, and waits for their backend processing status to be `ready`. Local IDs remain stable for routing and file previews; backend UUIDs are persisted as `backendId` fields. The source selector currently supports whole class, notes only, and syllabus only.
+
+Study generation submits an explicit upload scope, keeps the returned pending material ID, and polls status sequentially. Pending and failed items remain visible for recovery; generation errors do not create template quizzes. Navigation stops client polling without claiming to cancel the server job. Old browser-only templates remain labeled as local drafts.
+
+Remote quiz detail omits answer keys. Submit choice IDs, true/false values, and short-answer text to the backend attempts endpoint for scoring and answer explanations. A submission failure keeps the student's answers available for retry instead of displaying a fabricated local score. Remote flags and mapped upload preview/retry/delete actions also call the backend without a token prerequisite. See [the backend integration contract](backend-design.md#quiz-generation-integration-for-the-frontend-agent) for request formats and recovery rules.
+
 ### Tutor tab
 
 The screen-sharing workspace described above, with the class selected. The page tells the backend the class ID when starting the session so the tutor gets that class's materials. Tutor answers that rely on an upload show a source chip linking to it.
@@ -113,6 +121,7 @@ The screen-sharing workspace described above, with the class selected. The page 
 - `audio.js` — optional microphone input, tutor audio playback, interruption, and mute/pause behavior.
 - `annotations.js` — tool argument validation, frame-to-preview coordinate mapping, SVG/canvas drawing, expiration, and dismissal.
 - `api.js` — same-origin calls to the Python backend.
+- `course-sync.js` — browser-to-backend class/upload ID mapping, source submission, and sequential upload/material status polling.
 - `router.js` — hash routes for the classes, library, study, and tutor pages.
 - `classes.js` — class list and class create/rename/delete.
 - `library.js` — upload zone, file validation, upload progress, status polling, upload detail view, transcript player, and syllabus outline.

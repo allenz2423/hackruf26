@@ -1,5 +1,5 @@
 import { escapeHtml, toast } from "./ui.js";
-import { submitAttemptApi, flagMaterialItemApi, getAccessToken } from "./api.js";
+import { submitAttemptApi, flagMaterialItemApi } from "./api.js";
 
 function formatTime(totalSeconds) {
   const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
@@ -273,13 +273,13 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
     root.querySelectorAll("[data-flag-item]").forEach((button) => {
       button.addEventListener("click", async () => {
         const questionId = button.dataset.flagItem;
-        const token = await getAccessToken();
-        if (token && material.isRemote) {
+        if (material.isRemote) {
           try {
             await flagMaterialItemApi(material.id, questionId, "Student reported question for review");
             toast("Question flagged for review.");
-          } catch {
-            toast("Flag recorded locally.");
+          } catch (error) {
+            toast(error.message, { tone: "error" });
+            return;
           }
         } else {
           toast("Question flagged.");
@@ -333,24 +333,25 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
     let scorePercent = Math.round((correctCount / Math.max(1, material.questions.length)) * 100);
     let questionResults = null;
 
-    const token = await getAccessToken();
-    // If remote material on backend, submit attempt for verified scoring
-    if (token && material.isRemote) {
+    // Remote answer keys stay on the server until the attempt is submitted.
+    if (material.isRemote) {
+      const submitBtn = form.querySelector("button[type=submit]");
+      submitBtn.disabled = true;
+      submitBtn.textContent = "Submitting…";
       try {
         const attemptRes = await submitAttemptApi(material.id, answersMap);
-        if (attemptRes) {
-          if (typeof attemptRes.score_percent === "number") {
-            scorePercent = Math.round(attemptRes.score_percent);
-          }
-          if (typeof attemptRes.correct_count === "number") {
-            correctCount = attemptRes.correct_count;
-          }
-          if (Array.isArray(attemptRes.question_results)) {
-            questionResults = attemptRes.question_results;
-          }
+        if (typeof attemptRes.score_percent !== "number" || !Array.isArray(attemptRes.question_results)) {
+          throw new Error("The server did not return a quiz score. Try submitting again.");
         }
+        scorePercent = Math.round(attemptRes.score_percent);
+        correctCount = attemptRes.correct_count;
+        questionResults = attemptRes.question_results;
       } catch (err) {
-        console.warn("Backend attempt submission failed, using local scoring:", err);
+        submitted = false;
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Submit for score";
+        toast(`Could not score this quiz: ${err.message}`, { tone: "error" });
+        return;
       }
     }
 

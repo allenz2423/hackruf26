@@ -110,7 +110,81 @@ Class deletion cascades through notes, generated materials, attempts, and relate
 
 Uploads are validated by extension, signature, size, and kind. Text files, DOCX, PPTX, and text-based PDFs are parsed locally where possible. Images, scanned PDFs, and lectures use Gemini content processing. Lecture transcripts and generated study materials are saved in SQLite and reused.
 
+Structured content requests use `response_json_schema` with a compact schema derived from the Pydantic model, plus `response_mime_type: application/json`. This preserves JSON Schema keywords such as `additionalProperties` instead of converting them to the legacy provider schema's unsupported `additional_properties` field. The provider schema inlines local references, converts constant values to enums, normalizes nullable types, and omits length/range/format metadata to avoid rejection of complex nested question schemas. Types, required fields, enums, and object structure remain explicit. The same path handles upload summaries, syllabus extraction, lecture transcription, assessments, and generated study materials. Returned JSON is still validated locally with the full original Pydantic model and the existing count/answer/citation checks before saving; provider simplification does not relax backend validation. See [Gemini structured-output documentation](https://ai.google.dev/gemini-api/docs/generate-content/structured-output).
+
 Background jobs are in-process for the hackathon build. A restart can interrupt active processing, so production should use a durable queue before running multiple instances or workers.
+
+## Quiz Generation Integration for the Frontend Agent
+
+### SQLite access and existing browser data
+
+Class-library APIs do **not** require an authentication token in the current local SQLite mode. Call them through the same-origin HTTP client even when `getAccessToken()` returns an empty string. Browser mutations must carry an allowed `Origin`; a normal same-origin browser `fetch` supplies it. The backend assigns `LOCAL_OWNER_ID` and never accepts a client-supplied owner.
+
+The earlier browser implementation gated study generation on a nonempty token and called `createLocalMaterial()` instead. Its three generic question strings produced the reported “Quick check on New class workspace” local draft, without calling Gemini. That fallback has been removed. Generation, remote material loading/deletion, scoring, and remote flags now call the SQLite APIs without a token prerequisite.
+
+`frontend/src/course-sync.js` performs source reconciliation when the student generates a material. It retains the browser's class/upload IDs and persists `backendId` mappings in local class metadata. Class creation and initial file selection can still create browser-only records; only selected source content is synchronized by this generation path. Original files remain retrievable under their existing IndexedDB IDs.
+
+Before requesting generation, the frontend must reconcile its browser-only records with the backend:
+
+1. Create a backend class using `POST /api/classes` with `{"name":"Bio 170"}` and retain the returned UUID. A browser slug such as `bio-170-<timestamp>` is not a backend class ID. Preserve any local IDs needed for routing, and persist the mapping to the backend UUID.
+2. Submit the actual course files to `POST /api/classes/{class_id}/uploads`. For an existing local upload, retrieve the original `File` from `frontend/src/file-store.js` using its local upload ID. A filename, class title, or local `ready` label supplies no course content. If the original is unavailable, ask the student to upload it again.
+3. Send multipart `file` with optional `kind` and `title`, or multipart `text`, `kind`, and `title` for pasted notes. File kinds are `notes`, `document`, `syllabus`, `slides`, `lecture_audio`, and `lecture_video`; text uploads accept only `notes`, `document`, or `syllabus`. Do not set a JSON `Content-Type` on multipart requests.
+4. Persist the returned upload UUID mapping immediately and reuse it on retries. Poll `GET /api/uploads/{upload_id}` until every selected upload is `ready`; `failed` requires an error and the existing retry action. Browser-only upload metadata does not establish backend readiness.
+5. Generate using those backend IDs. During migration, prefer an explicit `uploads` scope containing the uploads currently selected in the UI, so removed local sources do not reappear through an older backend copy. An `all` scope includes only uploads already ready on the backend and silently excludes processing or failed uploads.
+
+### Generation request and completion
+
+`POST /api/classes/{class_id}/study-materials` accepts:
+
+```json
+{
+  "kind": "quiz",
+  "scope": {
+    "kind": "uploads",
+    "upload_ids": ["<backend-upload-uuid>"]
+  },
+  "options": {
+    "count": 10,
+    "difficulty": "mixed",
+    "question_types": ["multiple_choice", "true_false", "short_answer"]
+  }
+}
+```
+
+Use actual UUID values in requests. Supported material kinds are `quiz`, `practice_exam`, `study_guide`, and `flashcards`. `count` must be 4–50; difficulty must be `mixed`, `easier`, or `harder`. `question_types` is optional and applies only to quizzes and practice exams; when omitted, all three question kinds are requested. `time_limit_minutes` is optional, must be 1–300, and applies only to `practice_exam`. Extra request fields are rejected.
+
+The response is HTTP `202` with a material summary containing `id`, `class_id`, `kind`, `status`, `item_count`, `scope`, and `options`. It acknowledges a background job; it does not include completed questions. Poll `GET /api/study-materials/{id}` without a token prerequisite. Use sequential polling to avoid overlapping requests:
+
+| Status | Required client behavior |
+| --- | --- |
+| `generating` | Keep the pending material ID and show progress; allow the student to return later. |
+| `ready` | Render the typed `content` returned by the detail endpoint and mark it as AI-generated. |
+| `failed` | Show the failure and allow a new generation request. Do not save a template as a successful quiz. |
+| Network error or client polling deadline | Retain the pending ID and offer another status check; a polling deadline does not mean the server job failed. |
+
+The backend's `_create_material_job()` calls `GeminiContentService.generate_material()` with the ready source text, server-owned system prompt, and a response schema for the requested format. It validates the exact item count, unique question IDs, requested question kinds, answer keys, and source citations before saving `ready`. Failure saves `failed` with `failure_code: "generation_failed"`; the backend never creates placeholder quizzes.
+
+### Quiz rendering and scoring
+
+For `quiz` and `practice_exam`, public material detail contains `content.format` and `content.questions`. Each question has a stable `id`, `kind`, `prompt`, optional choices as `{"id":"a","text":"..."}`, and source citations using backend `upload_id` values. Preserve those IDs when displaying questions and selections.
+
+Answer keys, accepted answers, rubrics, and explanations are intentionally omitted from public quiz detail. Submit remote quizzes through `POST /api/study-materials/{id}/attempts`, with an `answers` object mapping question IDs to selected choice IDs, `"true"`/`"false"`, or the student's short-answer text. This call also does not require an auth token. The response provides `score_percent`, `correct_count`, and `question_results` with the correct answers, explanations, and sources for review. Do not score backend quizzes using missing client-side answer keys. Remote flags use `POST /api/study-materials/{id}/flags` without a token prerequisite as well.
+
+### Errors and recovery
+
+| Error | Recovery |
+| --- | --- |
+| `invalid_class_id` | Create or reconcile the backend class, then use its UUID. |
+| `no_ready_uploads` | Upload actual source content and wait for processing. |
+| `uploads_not_ready` | Wait for the explicitly selected sources to finish, or retry a failed upload. |
+| `not_found` | Reconcile stale class/upload IDs and use uploads belonging to the selected class. |
+| `invalid_scope` / `syllabus_not_ready` | Use a valid topic/exam from a processed class syllabus. |
+| `invalid_request` / `invalid_options` | Correct field names, option ranges, and format-specific options. |
+| `content_processing_unavailable` / `database_unavailable` | Show the service error and offer retry; retain existing local source files. |
+
+Removing the generation token gate alone is insufficient for existing browser-only classes: their class IDs and upload IDs must be reconciled first. The implemented generation path performs that reconciliation, respects the whole-class/notes/syllabus source selector, persists pending generation IDs, and polls sequentially. Navigation stops client polling while the server job remains available through its saved ID. The Library preview, retry, and delete actions resolve mapped upload IDs; retry polling persists processing status. Generation and scoring failures show an error and retain recoverable state instead of inventing questions or scores.
+
+Existing local drafts remain labeled as local drafts; generate a new material from the real sources to replace them. Remote quizzes are rendered by the quiz player and scored through the attempts endpoint. The application callback updates a material by its backend ID, so its transition from `generating` to `ready` does not create duplicate saved entries.
 
 ## Security Boundaries
 

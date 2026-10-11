@@ -1,6 +1,8 @@
 import { icon } from "./icons.js";
 import { escapeHtml, formatBytes, openDialog, toast } from "./ui.js";
 import { saveUploadedFile } from "./file-store.js";
+import { getBackendUploadId, waitForUpload } from "./course-sync.js";
+import { updateClass } from "./classes.js";
 import {
   getAccessToken,
   getUploadsApi,
@@ -331,25 +333,28 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
     }
   }
 
-  function pollUploadStatus(uploadId) {
-    const interval = setInterval(async () => {
-      try {
-        const detail = await getUploadDetailApi(uploadId);
-        const item = klass.uploads.find((u) => u.id === uploadId);
-        if (item) {
+  async function pollUploadStatus(uploadId, backendUploadId = uploadId) {
+    const controller = new AbortController();
+    const stopWaiting = () => controller.abort();
+    window.addEventListener("hashchange", stopWaiting, { once: true });
+    try {
+      await waitForUpload(backendUploadId, {
+        signal: controller.signal,
+        onStatus: async (detail) => {
+          const item = klass.uploads.find((u) => u.id === uploadId);
+          if (!item) return;
           item.status = detail.status;
           item.progress = detail.processing_progress ?? 100;
           if (detail.summary) item.summary = detail.summary;
-          if (detail.extracted_text) item.content = detail.extracted_text;
+          await updateClass(klass.id, { uploads: klass.uploads });
           renderUploads();
         }
-        if (detail.status === "ready" || detail.status === "failed") {
-          clearInterval(interval);
-        }
-      } catch {
-        clearInterval(interval);
-      }
-    }, 3000);
+      });
+    } catch (error) {
+      if (!controller.signal.aborted) toast(error.message, { tone: "error" });
+    } finally {
+      window.removeEventListener("hashchange", stopWaiting);
+    }
   }
 
   pasteBtn.addEventListener("click", async () => {
@@ -416,10 +421,10 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
       const upload = klass.uploads.find((item) => item.id === previewId);
       if (upload) {
         // If remote, fetch full detail including extracted text & signed URL
-        const token = await getAccessToken();
-        if (token && upload.isRemote && !upload.content) {
+        const backendUploadId = getBackendUploadId(upload);
+        if (backendUploadId && !upload.content) {
           try {
-            const detail = await getUploadDetailApi(previewId);
+            const detail = await getUploadDetailApi(backendUploadId);
             upload.content = detail.extracted_text;
             upload.summary = detail.summary;
             upload.fileUrl = detail.file_url;
@@ -442,9 +447,16 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
     const retryId = event.target.closest("[data-retry]")?.dataset.retry;
     if (retryId) {
       try {
-        await retryUploadApi(retryId);
+        const upload = klass.uploads.find((item) => item.id === retryId);
+        const backendUploadId = upload && getBackendUploadId(upload);
+        if (!backendUploadId) throw new Error("Upload this source to the backend before retrying processing.");
+        const detail = await retryUploadApi(backendUploadId);
+        upload.status = detail.status;
+        upload.progress = detail.processing_progress ?? 0;
+        await updateClass(klass.id, { uploads: klass.uploads });
+        renderUploads();
         toast("Processing retry requested.");
-        pollUploadStatus(retryId);
+        pollUploadStatus(retryId, backendUploadId);
       } catch (e) {
         toast(e.message, { tone: "error" });
       }
@@ -454,9 +466,15 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
     const button = event.target.closest("[data-remove]");
     if (button) {
       const uploadId = button.dataset.remove;
-      const token = await getAccessToken();
-      if (token) {
-        deleteUploadApi(uploadId).catch(() => {});
+      const upload = klass.uploads.find((item) => item.id === uploadId);
+      const backendUploadId = upload && getBackendUploadId(upload);
+      if (backendUploadId) {
+        try {
+          await deleteUploadApi(backendUploadId);
+        } catch (error) {
+          toast(error.message, { tone: "error" });
+          return;
+        }
       }
       onUploadRemoved?.(uploadId);
     }
