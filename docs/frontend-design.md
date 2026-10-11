@@ -134,6 +134,14 @@ Keep the backend session in one controller so capture, audio, transcript, and an
 
 The browser-to-backend event contract is intentionally separate from provider payloads. The backend owns all provider connections, model configuration, instructions, and tool execution.
 
+### Microphone controls
+
+- Voice input stays off until the student clicks the microphone button in a connected session. The browser requests microphone permission separately from screen sharing. Clicking the button again stops microphone tracks; text and screen tutoring continue.
+- Show a permission-request state with a cancel action, a listening indicator, the selected microphone label, and an input level meter. If the device becomes muted or disconnected, show its current state. Explain denied permission, missing devices, and device-access failures with a retry instruction.
+- Request mono input with echo cancellation, noise suppression, and automatic gain control when supported. The audio worklet resamples input to 16 kHz and sends little-endian 16-bit PCM chunks over the existing `audio` event. The level meter stays local and measures input volume; it does not perform speech recognition.
+- Keep continuous microphone input available while enabled. The Live service detects speech pauses; send `audio_end` when input stops. Stop queued tutor speech when the service reports an interruption.
+- Stop microphone tracks and playback on session failure, End, navigation away from the tutor, and page exit. Ignore late permission results from a cancelled request so they cannot restart capture. Never record or save live audio.
+
 ## Annotation rendering
 
 `add_annotations` is the only provider-requested visual action. The backend attaches the `frame_id` of the latest frame it forwarded. Each item contains a shape, a short label, and a normalized rectangle. The frontend:

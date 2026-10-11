@@ -1,4 +1,4 @@
-export function createRouter(routes, fallback) {
+export function createRouter(routes, fallback, { beforeRender = () => {} } = {}) {
   let currentRoute = null;
 
   function match(hash) {
@@ -27,6 +27,7 @@ export function createRouter(routes, fallback) {
   }
 
   function render() {
+    beforeRender();
     currentRoute = match(window.location.hash);
     currentRoute.route.render(currentRoute.params);
   }

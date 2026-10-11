@@ -1,6 +1,7 @@
 import { requestLiveSession } from "./api.js";
 
 const SESSION_PROTOCOL = "screen-tutor.v1";
+const MAX_BUFFERED_BYTES = 4_000_000;
 
 function websocketUrl() {
   const url = new URL("/api/live", window.location.href);
@@ -30,13 +31,18 @@ export class LiveSessionController {
     this.readyTimer = null;
     this.resolveReady = null;
     this.rejectReady = null;
+    this.connectionId = 0;
   }
 
   async connect() {
+    this.rejectPending(new Error("A new tutoring session was started."));
+    this.detachSocket();
+    const connectionId = ++this.connectionId;
     this.failed = false;
     this.intentionalClose = false;
     this.onStatusChange("connecting");
     const { ticket } = await requestLiveSession(this.classId);
+    if (connectionId !== this.connectionId) throw new Error("The tutoring session was ended.");
     const socket = new WebSocket(websocketUrl(), [SESSION_PROTOCOL, `ticket.${ticket}`]);
     this.socket = socket;
 
@@ -44,24 +50,23 @@ export class LiveSessionController {
       this.resolveReady = resolve;
       this.rejectReady = reject;
       this.readyTimer = window.setTimeout(() => {
-        this.markFailed();
-        reject(new Error("The tutoring service did not become ready. Please try again."));
+        this.markFailed(new Error("The tutoring service did not become ready. Please try again."));
       }, 30_000);
 
-      socket.onmessage = (event) => this.handleMessage(event.data);
+      socket.onmessage = (event) => {
+        if (this.socket === socket && !this.failed) this.handleMessage(event.data);
+      };
       socket.onerror = () => {
-        const error = new Error("The tutoring service could not connect. Please try again.");
-        this.markFailed();
-        this.rejectPending(error);
+        if (this.socket !== socket) return;
+        this.markFailed(new Error("The tutoring service could not connect. Please try again."));
       };
       socket.onclose = () => {
+        if (this.socket !== socket) return;
         if (this.intentionalClose) {
           this.onStatusChange("closed");
           return;
         }
-        const error = new Error("The tutoring session ended unexpectedly. Please try again.");
-        this.markFailed();
-        this.rejectPending(error);
+        this.markFailed(new Error("The tutoring session ended unexpectedly. Please try again."));
       };
     });
   }
@@ -86,12 +91,14 @@ export class LiveSessionController {
     resolve?.();
   }
 
-  markFailed() {
+  markFailed(error = new Error("The tutoring session could not continue. Please try again.")) {
     if (this.failed) return;
     this.failed = true;
     this.outputText = "";
+    this.rejectPending(error);
+    this.detachSocket();
     this.onAudioInterrupted();
-    this.onStatusChange("error");
+    this.onStatusChange("error", error.message);
   }
 
   handleMessage(raw) {
@@ -109,8 +116,7 @@ export class LiveSessionController {
     }
 
     if (message.type === "error") {
-      this.markFailed();
-      this.rejectPending(new Error(message.message || "The tutoring session could not continue."));
+      this.markFailed(new Error(message.message || "The tutoring session could not continue."));
       return;
     }
 
@@ -173,7 +179,11 @@ export class LiveSessionController {
   }
 
   sendAudio(data) {
-    if (data) this.send({ type: "audio", data });
+    if (this.socket?.bufferedAmount > MAX_BUFFERED_BYTES) {
+      this.markFailed(new Error("The connection is too slow for microphone audio. Reconnect to try again."));
+      return false;
+    }
+    return data ? this.send({ type: "audio", data }) : false;
   }
 
   endAudioInput() {
@@ -189,15 +199,25 @@ export class LiveSessionController {
     });
   }
 
+  detachSocket() {
+    const socket = this.socket;
+    this.socket = null;
+    if (!socket) return;
+    socket.onmessage = null;
+    socket.onerror = null;
+    socket.onclose = null;
+    socket.close(1000);
+  }
+
   close() {
+    this.connectionId += 1;
     this.intentionalClose = true;
     this.failed = true;
     if (this.readyTimer) window.clearTimeout(this.readyTimer);
     this.readyTimer = null;
     this.rejectPending(new Error("The tutoring session was ended."));
     this.onAudioInterrupted();
-    this.socket?.close(1000);
-    this.socket = null;
+    this.detachSocket();
     this.outputText = "";
     this.onStatusChange("closed");
   }

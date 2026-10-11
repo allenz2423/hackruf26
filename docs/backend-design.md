@@ -75,6 +75,8 @@ Errors use `{"code": "...", "message": "...", "request_id": "..."}` with user-sa
 4. The backend opens a Live API connection with its server-only key and fixed server-owned model, instructions, class context, modalities, and tool declarations.
 5. The browser sends typed questions, JPEG frames (at most one per second), and enabled 16 kHz PCM audio. The backend forwards them in memory and streams audio/transcript events back. No media, transcript, or session history is logged or persisted.
 
+The SDK's `session.receive()` iterator ends after each completed model turn. The backend starts another receive iteration for the next turn, keeping the same Live connection open until the student ends it or a real disconnection occurs.
+
 If `class_id` is supplied, the backend checks ownership in SQLite and builds class context from ready uploads. The client cannot choose the provider, model, system instructions, modalities, or tool declarations. Tickets contain no provider credential and do not grant direct model access.
 
 ### WebSocket events
