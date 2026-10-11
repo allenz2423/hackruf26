@@ -303,3 +303,7 @@ Existing local drafts remain labeled as local drafts; generate a new material fr
 ### Avatar ("Create your own Jot")
 
 `users.avatar` stores a customised Jot as JSON with exactly three ids: `color` (9 choices), `face` (5), and `accessory` (6, including `none`). The server validates them against fixed lists (`Avatar` in `schemas.py`), rejects anything else with `400`, and returns the avatar as `user.avatar` (`null` until one is saved). `PATCH /api/auth/me` with `{"avatar": null}` removes it. The browser draws the character from those ids; no image or free text is stored. Keep the lists in step with `frontend/src/avatar.js`.
+
+### Tutor language lock
+
+`POST /api/live-sessions` accepts an optional `language` from a fixed list (`TutorLanguage` in `app/live_modes.py`: `auto`, `en`, `es`, `fr`, `de`, `pt`, `it`, `zh`, `ja`, `ko`, `hi`, `ar`). Anything else is rejected with `400`, and the client cannot send its own instructions. The language travels on the one-use ticket into `live_connect_config`, which appends a fixed, server-written language-lock instruction (spoken replies, written replies, and mark labels in that language; quotes kept in their original language) ahead of any untrusted class material. `auto` adds nothing. The lock is enforced through the session's instructions, not a speech-model setting, so it is strong but not absolute; test the chosen model in each language before relying on it.

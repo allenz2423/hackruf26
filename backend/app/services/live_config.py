@@ -6,7 +6,7 @@ import json
 
 from google.genai import types
 
-from app.live_modes import TutorMode
+from app.live_modes import LANGUAGE_NAMES, TutorLanguage, TutorMode
 
 LIVE_SYSTEM_INSTRUCTION = """
 You are Screen Tutor, a concise and patient tutor. Start with a hint or a
@@ -51,6 +51,17 @@ When the student explicitly asks for a mark and the target is clearly visible,
 use add_annotations rather than only describing where the mark would go.
 Never request or imply clicking, typing, scrolling, shell commands, or control
 of the student's computer or applications.
+""".strip()
+
+LANGUAGE_LOCK_INSTRUCTION = """
+Language lock is on for this session: {name} ({native}). Speak and write only in
+{name} for every spoken reply, every written reply, and the label of any mark you
+place on the student's screen. The student may ask in another language, and the
+shared screen or class materials may be in another language. Understand them, then
+answer in {name}. When you quote source text exactly, keep the quotation in its
+original language and explain it in {name}. If the student asks you to switch
+languages, say briefly, in {name}, that the language lock is set for this session
+and that they can change it in the tutor settings before starting a new session.
 """.strip()
 
 CHECK_STEPS_INSTRUCTION = """
@@ -287,6 +298,7 @@ def live_connect_config(
     class_context: str | None = None,
     *,
     mode: TutorMode = TutorMode.CONVERSATION,
+    language: TutorLanguage = TutorLanguage.AUTO,
     include_lean_tool: bool = True,
 ) -> types.LiveConnectConfig:
     """Construct the fixed server-owned Live session configuration."""
@@ -294,6 +306,9 @@ def live_connect_config(
     coaching = mode == TutorMode.CHECK_STEPS
     if coaching:
         instruction += f"\n\n{CHECK_STEPS_INSTRUCTION}"
+    if language in LANGUAGE_NAMES:
+        name, native = LANGUAGE_NAMES[language]
+        instruction += "\n\n" + LANGUAGE_LOCK_INSTRUCTION.format(name=name, native=native)
     if class_context:
         instruction = (
             f"{instruction}\n\n"

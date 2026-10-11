@@ -23,7 +23,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from app.api.schemas import CalculatorRequest, LeanProofRequest
 from app.config import Settings
-from app.live_modes import TutorMode
+from app.live_modes import TutorLanguage, TutorMode
 from app.security.rate_limit import InMemoryRateLimiter
 from app.services.calculator import CalculatorInputError, evaluate_expression
 from app.services.lean_proofs import (
@@ -74,6 +74,7 @@ class LiveSessionTicket:
     class_context: str | None
     expires_at: datetime
     mode: TutorMode = TutorMode.CONVERSATION
+    language: TutorLanguage = TutorLanguage.AUTO
 
 
 class LiveSessionTicketStore:
@@ -84,14 +85,18 @@ class LiveSessionTicketStore:
         self._lock = asyncio.Lock()
 
     async def issue(
-        self, class_context: str | None, *, mode: TutorMode = TutorMode.CONVERSATION
+        self,
+        class_context: str | None,
+        *,
+        mode: TutorMode = TutorMode.CONVERSATION,
+        language: TutorLanguage = TutorLanguage.AUTO,
     ) -> tuple[str, datetime]:
         now = datetime.now(UTC)
         expires_at = now + timedelta(seconds=TICKET_TTL_SECONDS)
         ticket = secrets.token_urlsafe(32)
         async with self._lock:
             self._remove_expired(now)
-            self._tickets[ticket] = LiveSessionTicket(class_context, expires_at, mode)
+            self._tickets[ticket] = LiveSessionTicket(class_context, expires_at, mode, language)
         return ticket, expires_at
 
     async def consume(self, ticket: str) -> LiveSessionTicket | None:
@@ -179,6 +184,7 @@ class GeminiLiveSessionService:
         class_context: str | None,
         *,
         mode: TutorMode = TutorMode.CONVERSATION,
+        language: TutorLanguage = TutorLanguage.AUTO,
     ) -> None:
         request_id = secrets.token_hex(12)
         send_lock = asyncio.Lock()
@@ -200,6 +206,7 @@ class GeminiLiveSessionService:
             config = live_connect_config(
                 class_context,
                 mode=mode,
+                language=language,
                 include_lean_tool=self._settings.lean_tool_enabled,
             )
             async with self._client.aio.live.connect(

@@ -9,7 +9,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.live_modes import TutorMode
+from app.live_modes import TutorLanguage, TutorMode
 
 
 class LiveSessionRequest(BaseModel):
@@ -18,6 +18,7 @@ class LiveSessionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     class_id: UUID | None = None
     mode: TutorMode = TutorMode.CONVERSATION
+    language: TutorLanguage = TutorLanguage.AUTO
 
 
 class CalculatorRequest(BaseModel):

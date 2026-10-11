@@ -104,7 +104,7 @@ async def create_live_session_ticket(
     response.headers["Pragma"] = "no-cache"
 
     store: LiveSessionTicketStore = request.app.state.live_session_ticket_store
-    ticket, expires_at = await store.issue(class_context, mode=payload.mode)
+    ticket, expires_at = await store.issue(class_context, mode=payload.mode, language=payload.language)
     return LiveSessionTicketResponse(ticket=ticket, expires_at=expires_at)
 
 
