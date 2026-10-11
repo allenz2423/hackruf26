@@ -378,7 +378,7 @@ function renderTutor(klass = null) {
         <p class="tutor-privacy-note">${icon("monitor", { size: 16 })}<span>Screen frames and enabled microphone audio pass through Jot's server for tutoring. They are not saved.</span></p>
         <div class="screen-stage">
           <video id="screen-preview" autoplay muted playsinline aria-label="Shared screen preview"></video>
-          <svg id="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg>
+          <svg id="annotation-layer" preserveAspectRatio="xMidYMid meet" aria-hidden="true"></svg>
           <div class="empty-stage">
             <span class="empty-icon">${icon("monitor", { size: 30 })}</span>
             <strong>Share a screen to start</strong>
@@ -475,6 +475,7 @@ function renderTutor(klass = null) {
     video,
     onEnded: () => {
       if (disposed) return;
+      annotations.clear();
       emptyStage.hidden = false;
       setStatus({ session: "screen_paused", screen: "paused" });
     },
@@ -483,6 +484,7 @@ function renderTutor(klass = null) {
   const annotations = new AnnotationController({
     layer: document.querySelector("#annotation-layer"),
     list: document.querySelector("#annotation-list"),
+    video,
     getFrames: () => capture.getFrames()
   });
   audioController = new AudioController({
@@ -515,6 +517,7 @@ function renderTutor(klass = null) {
   disposeTutor = () => {
     disposed = true;
     stopSession();
+    annotations.destroy();
     Object.assign(state, {
       session: "idle", connection: "offline", screen: "not sharing",
       mic: "off", micDevice: "", messages: []
