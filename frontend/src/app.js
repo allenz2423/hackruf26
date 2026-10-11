@@ -844,87 +844,158 @@ function renderTutor(klass = null) {
 
 const USERNAME_RULE = /^[A-Za-z0-9_.-]{3,32}$/;
 
-// Log in and Join Jot are for guests only; a logged-in visitor never reaches them.
+// Log in and Join Jot are full-screen pages of their own. They always ask for
+// credentials and let the server decide whether they are valid; nothing here
+// ever signs anyone in without a successful answer from the backend.
 function renderLogin({ mode = "signin" } = {}) {
   const signup = mode === "signup";
+  accountMenuAbort?.abort();
 
-  shell(`
-    <section class="login-page">
-      <div class="panel login-card">
-        <div class="login-heading">
-          <h1>${signup ? "Join Jot" : "Log in"}</h1>
-          <p class="muted">${signup ? "Create an account to keep your classes, uploads, and study sets." : "Welcome back! Log in to open your classes."}</p>
-        </div>
-        <form id="login-form" class="login-form" novalidate>
-          <label class="field">
-            <span>${signup ? "Username" : "Username or email"}</span>
-            <input name="identifier" type="text" required autocomplete="username" autocapitalize="none" spellcheck="false"${signup ? ' maxlength="32" aria-describedby="login-username-hint"' : ""} />
-            ${signup ? '<small id="login-username-hint" class="field-hint">3 to 32 letters, numbers, dots, dashes, or underscores.</small>' : ""}
-          </label>
-          ${signup ? `
-            <label class="field">
-              <span>Email <span class="muted">(optional)</span></span>
-              <input name="email" type="email" autocomplete="email" />
-            </label>
-          ` : ""}
-          <label class="field">
-            <span>Password</span>
-            <input name="password" type="password" required autocomplete="${signup ? "new-password" : "current-password"}"${signup ? ' aria-describedby="login-password-hint"' : ""} />
-            ${signup ? '<small id="login-password-hint" class="field-hint">At least 8 characters.</small>' : ""}
-          </label>
-          <p id="login-error" class="form-error" role="alert" hidden></p>
-          <button class="btn btn-primary btn-large" type="submit">${signup ? "Create account" : "Log in"}</button>
-        </form>
-        <p class="login-switch">${signup ? 'Already have an account? <a href="#/login">Log in</a>' : 'New to Jot? <a href="#/signup">Create an account</a>'}</p>
-        <a class="home-guest" href="#/study">Continue as guest</a>
+  const alreadyIn = `
+    <div class="login-heading">
+      <h1>You're already logged in</h1>
+      <p class="muted">You're logged in as <strong>${escapeHtml(displayName(currentUser))}</strong>. Log out first if you want to ${signup ? "create a different account" : "use another account"}.</p>
+    </div>
+    <div class="account-actions">
+      <a class="btn btn-primary" href="#/classes">Go to your classes</a>
+      <button id="login-logout" class="btn btn-danger-ghost" type="button">${icon("logOut", { size: 18 })} Log out</button>
+    </div>
+  `;
+
+  const form = `
+    <div class="login-heading">
+      <h1>${signup ? "Join Jot" : "Log in"}</h1>
+      <p class="muted">${signup ? "Create an account to keep your classes, uploads, and study sets." : "Enter your details to open your classes."}</p>
+    </div>
+    <form id="login-form" class="login-form" novalidate>
+      <div class="field">
+        <label for="login-identifier">${signup ? "Username" : "Username or email"}</label>
+        <input id="login-identifier" name="identifier" type="text" required autocomplete="username" autocapitalize="none" spellcheck="false" aria-describedby="login-identifier-msg"${signup ? ' maxlength="32"' : ""} />
+        <small id="login-identifier-msg" class="field-hint">${signup ? "3 to 32 letters, numbers, dots, dashes, or underscores." : ""}</small>
       </div>
-    </section>
-  `, { section: "login" });
+      ${signup ? `
+        <div class="field">
+          <label for="login-email">Email <span class="muted">(optional)</span></label>
+          <input id="login-email" name="email" type="email" autocomplete="email" />
+        </div>
+      ` : ""}
+      <div class="field">
+        <label for="login-password">Password</label>
+        <div class="password-row">
+          <input id="login-password" name="password" type="password" required autocomplete="${signup ? "new-password" : "current-password"}" aria-describedby="login-password-msg" />
+          <button id="login-toggle" class="btn btn-secondary password-toggle" type="button" aria-controls="login-password" aria-pressed="false">Show</button>
+        </div>
+        <small id="login-password-msg" class="field-hint">${signup ? "At least 8 characters." : ""}</small>
+      </div>
+      <p id="login-error" class="form-error" role="alert" hidden></p>
+      <button class="btn btn-primary btn-large" type="submit">${signup ? "Create account" : "Log in"}</button>
+    </form>
+    <p class="login-switch">${signup ? 'Already have an account? <a href="#/login">Log in</a>' : 'New to Jot? <a href="#/signup">Create an account</a>'}</p>
+    <a class="home-guest" href="#/study">Continue as guest</a>
+  `;
 
-  const form = document.querySelector("#login-form");
+  app.innerHTML = `
+    <main id="main-content" class="home auth-screen" tabindex="-1">
+      <div class="auth-screen-inner">
+        <a class="brand" href="#/home">
+          <span class="brand-mark" aria-hidden="true"><img src="${jotMascot}" alt="" /></span>
+          Jot
+        </a>
+        <div class="panel login-card">${currentUser ? alreadyIn : form}</div>
+        <a class="auth-back" href="#/home">${icon("arrowLeft", { size: 16 })} Back to welcome</a>
+      </div>
+    </main>
+  `;
+
+  if (currentUser) {
+    document.querySelector("#login-logout").addEventListener("click", logOut);
+    return;
+  }
+
+  const formEl = document.querySelector("#login-form");
   const errorBox = document.querySelector("#login-error");
-  const submit = form.querySelector('button[type="submit"]');
+  const submit = formEl.querySelector('button[type="submit"]');
   const idleLabel = submit.textContent;
+  const { identifier, password } = formEl.elements;
 
-  const fail = (message, field) => {
-    errorBox.textContent = message;
-    errorBox.hidden = false;
-    field?.focus();
+  const hints = new Map([
+    [identifier, document.querySelector("#login-identifier-msg")],
+    [password, document.querySelector("#login-password-msg")]
+  ]);
+  const defaultHints = new Map([...hints].map(([field, hint]) => [field, hint.textContent]));
+
+  const markInvalid = (field, message) => {
+    field.setAttribute("aria-invalid", "true");
+    const hint = hints.get(field);
+    hint.textContent = message;
+    hint.classList.add("is-error");
+    field.focus();
+  };
+  const clearInvalid = (field) => {
+    field.removeAttribute("aria-invalid");
+    const hint = hints.get(field);
+    hint.textContent = defaultHints.get(field);
+    hint.classList.remove("is-error");
+  };
+  const clearAll = () => {
+    errorBox.hidden = true;
+    clearInvalid(identifier);
+    clearInvalid(password);
+  };
+  identifier.addEventListener("input", () => clearInvalid(identifier));
+  password.addEventListener("input", () => clearInvalid(password));
+
+  const toggle = document.querySelector("#login-toggle");
+  toggle.addEventListener("click", () => {
+    const show = password.type === "password";
+    password.type = show ? "text" : "password";
+    toggle.textContent = show ? "Hide" : "Show";
+    toggle.setAttribute("aria-pressed", String(show));
+  });
+
+  const setBusy = (busy) => {
+    for (const element of formEl.elements) element.disabled = busy;
+    submit.textContent = busy ? (signup ? "Creating your account..." : "Checking your details...") : idleLabel;
   };
 
-  form.addEventListener("submit", async (event) => {
+  formEl.addEventListener("submit", async (event) => {
     event.preventDefault();
-    errorBox.hidden = true;
+    clearAll();
 
-    const { identifier, password } = form.elements;
     const name = identifier.value.trim();
-
-    if (!name) return fail(signup ? "Choose a username." : "Enter your username or email.", identifier);
+    if (!name) return markInvalid(identifier, signup ? "Choose a username." : "Enter your username or email.");
     if (signup && !USERNAME_RULE.test(name)) {
-      return fail("Usernames are 3 to 32 characters: letters, numbers, dots, dashes, or underscores.", identifier);
+      return markInvalid(identifier, "Usernames are 3 to 32 characters: letters, numbers, dots, dashes, or underscores.");
     }
-    if (!password.value) return fail("Enter your password.", password);
-    if (signup && password.value.length < 8) return fail("Use at least 8 characters for your password.", password);
+    if (!password.value) return markInvalid(password, "Enter your password.");
+    if (signup && password.value.length < 8) return markInvalid(password, "Use at least 8 characters.");
 
-    submit.disabled = true;
-    submit.textContent = signup ? "Creating account..." : "Logging in...";
-
+    setBusy(true);
     try {
+      // The server checks the details. Only a successful answer logs anyone in.
       const user = signup
-        ? await signUp({ username: name, password: password.value, email: form.elements.email.value.trim() })
+        ? await signUp({ username: name, password: password.value, email: formEl.elements.email.value.trim() })
         : await signIn(name, password.value);
       await applyAuth(user);
       toast(signup ? `Welcome to Jot, ${displayName(user)}!` : `Welcome back, ${displayName(user)}!`);
       redirect("#/classes");
     } catch (error) {
-      submit.disabled = false;
-      submit.textContent = idleLabel;
+      setBusy(false);
       password.value = "";
-      fail(error.message || "Something went wrong. Please try again.", signup && error.code === "username_taken" ? identifier : password);
+      errorBox.textContent = error.message || "Something went wrong. Please try again.";
+      errorBox.hidden = false;
+      if (error.code === "username_taken") {
+        markInvalid(identifier, "That username is taken.");
+      } else if (error.code === "invalid_credentials") {
+        identifier.setAttribute("aria-invalid", "true");
+        markInvalid(password, "Check your password and try again.");
+      } else {
+        password.focus();
+      }
     }
   });
 
-  form.elements.identifier.focus();
+  identifier.focus();
 }
 
 // The account page is for logged-in users only; it is where they log out.
@@ -968,8 +1039,8 @@ const router = createRouter(
     { path: "/home", render: renderHome },
     { path: "/study", render: requireGuest(renderGuestWorkspace) },
     { path: "/guest", render: requireGuest(renderGuestWorkspace) },
-    { path: "/login", render: requireGuest(() => renderLogin({ mode: "signin" })) },
-    { path: "/signup", render: requireGuest(() => renderLogin({ mode: "signup" })) },
+    { path: "/login", render: () => renderLogin({ mode: "signin" }) },
+    { path: "/signup", render: () => renderLogin({ mode: "signup" }) },
     { path: "/classes", render: requireUser(renderClasses) },
     { path: "/classes/:id/:tab", render: requireUser(renderClassTab) },
     { path: "/account", render: requireUser(renderAccount, "Log in to see your account.") },

@@ -3443,12 +3443,6 @@ p {
 
 /* Log in / Join Jot */
 
-.login-page {
-  display: grid;
-  justify-items: center;
-  padding-top: var(--space-6);
-}
-
 .login-card {
   display: grid;
   gap: var(--space-5);
@@ -3553,4 +3547,65 @@ p {
   .login-card {
     padding: var(--space-5);
   }
+}
+
+/* Log in / Join Jot: a standalone screen */
+
+.auth-screen-inner {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-5);
+  width: min(440px, 100%);
+}
+
+.auth-screen .brand {
+  font-size: 2rem;
+}
+
+.auth-screen .brand-mark {
+  flex-basis: 48px;
+  width: 48px;
+  height: 48px;
+}
+
+.auth-screen .login-card {
+  width: 100%;
+}
+
+.auth-back {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 44px;
+  color: var(--muted);
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.auth-back:hover {
+  color: var(--primary);
+}
+
+.password-row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.password-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.password-toggle {
+  min-width: 72px;
+}
+
+.field-hint.is-error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.field input[aria-invalid="true"] {
+  border-color: var(--danger);
+  box-shadow: inset 0 0 0 1px var(--danger);
 }
