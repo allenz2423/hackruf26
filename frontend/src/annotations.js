@@ -2,6 +2,7 @@ const ALLOWED_SHAPES = new Set(["pointer", "rectangle", "underline", "note"]);
 const MAX_LABEL_LENGTH = 80;
 const MAX_MARKS = 8;
 const MARK_TTL_MS = 12000;
+const MAX_FRAME_AGE_MS = 10000;
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
 const LABEL_FONT_SIZE = 14;
@@ -9,6 +10,13 @@ const MIN_LABEL_FONT_SIZE = 8;
 
 function isFiniteUnit(value) {
   return Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+function sourceDimensions(frame) {
+  return {
+    width: frame.sourceWidth ?? frame.width,
+    height: frame.sourceHeight ?? frame.height
+  };
 }
 
 function validateAnnotation(item, frames) {
@@ -20,6 +28,11 @@ function validateAnnotation(item, frames) {
   const frame = frames.get(item.frame_id);
   if (![frame.width, frame.height].every((size) => Number.isFinite(size) && size > 0)) {
     return "The referenced frame dimensions are invalid.";
+  }
+  const capturedAt = Date.parse(frame.capturedAt);
+  const age = Date.now() - capturedAt;
+  if (!Number.isFinite(capturedAt) || age < 0 || age > MAX_FRAME_AGE_MS) {
+    return "The referenced frame is too old. Request a mark on a new frame.";
   }
   if (typeof item?.label !== "string" || item.label.length > MAX_LABEL_LENGTH) return "Annotation label is invalid.";
   if (![rect.x, rect.y, rect.width, rect.height].every(isFiniteUnit)) return "Annotation coordinates are out of bounds.";
@@ -55,21 +68,24 @@ export class AnnotationController {
       return { accepted, errors: ["Too many annotations were requested."] };
     }
 
+    this.marks = this.marks.filter((mark) => mark.createdAt > Date.now() - MARK_TTL_MS);
     for (const item of items) {
       const error = validateAnnotation(item, frames);
       if (error) {
         errors.push(error);
       } else if (
-        frames.get(item.frame_id).width !== this.video.videoWidth
-        || frames.get(item.frame_id).height !== this.video.videoHeight
+        sourceDimensions(frames.get(item.frame_id)).width !== this.video.videoWidth
+        || sourceDimensions(frames.get(item.frame_id)).height !== this.video.videoHeight
       ) {
         errors.push("The shared screen changed size. Request a mark on a new frame.");
+      } else if (this.marks.length + accepted.length >= MAX_MARKS) {
+        errors.push("Clear existing marks or wait for them to expire before adding more.");
       } else {
         accepted.push({
           ...item,
           shape: item.shape || item.kind,
           rect: item.rect || item.region,
-          frame: { width: frames.get(item.frame_id).width, height: frames.get(item.frame_id).height },
+          frame: sourceDimensions(frames.get(item.frame_id)),
           id: crypto.randomUUID(),
           createdAt: Date.now()
         });

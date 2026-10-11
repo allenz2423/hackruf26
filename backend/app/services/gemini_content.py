@@ -723,5 +723,7 @@ class GeminiContentService:
                     raise ContentGenerationFailure("A generated multiple-choice answer was invalid.")
             elif kind == "true_false" and question["answer"].casefold() not in {"true", "false"}:
                 raise ContentGenerationFailure("A generated true/false answer was invalid.")
-            elif kind == "short_answer" and not question.get("accepted_answers"):
-                question["accepted_answers"] = [question["answer"]]
+            elif kind == "short_answer":
+                accepted = question.get("accepted_answers") or []
+                if question["answer"] not in accepted:
+                    question["accepted_answers"] = [question["answer"], *accepted]

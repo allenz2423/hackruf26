@@ -131,6 +131,27 @@ async def create_database(settings: Settings) -> SQLiteDatabase:
     return SQLiteDatabase(connection)
 
 
+async def recover_interrupted_jobs(database: SQLiteDatabase) -> None:
+    """Make jobs left by a stopped single-process server available for retry."""
+    async with database.acquire() as connection:
+        async with connection.transaction():
+            await connection.execute(
+                "UPDATE uploaded_assessments SET processing_status = 'failed', "
+                "failure_code = 'processing_interrupted', "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE processing_status = 'processing'"
+            )
+            await connection.execute(
+                "UPDATE course_notes SET status = 'failed', failure_code = 'processing_interrupted', "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE status = 'processing'"
+            )
+            await connection.execute(
+                "UPDATE study_materials SET status = 'failed', "
+                "failure_code = 'generation_interrupted', "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE status = 'generating'"
+            )
+
+
 def json_value(value: object, fallback: object = None) -> object:
     """Decode JSON text stored in SQLite while tolerating legacy values."""
     if value is None:

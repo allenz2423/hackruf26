@@ -4,15 +4,29 @@ import {
   getClassesApi,
   createClassApi,
   updateClassApi,
-  deleteClassApi,
-  getAccessToken
+  deleteClassApi
 } from "./api.js";
 
 const STORE_KEY = "screen-tutor-classes";
 const VERSION_KEY = "screen-tutor-sample-version";
 const SAMPLE_SEED_KEY = `${STORE_KEY}-algebra-examples-v1`;
 
-const CLASS_PALETTE = ["#2563eb", "#7c3aed", "#059669", "#d97706", "#dc2626", "#0891b2"];
+// Earlier builds saved saturated defaults; map them to the current ink palette.
+const LEGACY_CLASS_COLORS = {
+  "#2563eb": "#3f6577",
+  "#7c3aed": "#7a4a72",
+  "#059669": "#4f7340",
+  "#d97706": "#8a6414",
+  "#dc2626": "#b04a2f",
+  "#0891b2": "#26707a"
+};
+const CLASS_PALETTE = ["#3f6577", "#7a4a72", "#4f7340", "#8a6414", "#b04a2f", "#26707a"];
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function getBackendClassId(klass) {
+  if (UUID_PATTERN.test(klass?.backendId || "")) return klass.backendId;
+  return UUID_PATTERN.test(klass?.id || "") ? klass.id : null;
+}
 
 function cloneData(value) {
   return JSON.parse(JSON.stringify(value));
@@ -24,6 +38,7 @@ function normalizeClass(klass) {
     focus: "",
     updatedAt: new Date().toISOString(),
     ...klass,
+    color: LEGACY_CLASS_COLORS[klass.color] || klass.color,
     uploads: Array.isArray(klass.uploads) ? klass.uploads : [],
     materials: Array.isArray(klass.materials) ? klass.materials : []
   };
@@ -58,7 +73,7 @@ function addAlgebraExamples(classes) {
     mathClass = {
       id: "math-151",
       name: "Math 151",
-      color: "#2563eb",
+      color: "#3f6577",
       icon: "M",
       uploads: [],
       materials: []
@@ -129,21 +144,28 @@ export function getClassById(classId) {
  * all local classes and added materials so no user-created classes are lost.
  */
 export async function syncClassesFromApi() {
-  const token = await getAccessToken();
-  if (!token) return getClasses();
-
   try {
     const remoteClasses = await getClassesApi();
     if (!Array.isArray(remoteClasses)) return getClasses();
 
     const current = readClasses();
     const currentById = new Map(current.map((c) => [c.id, c]));
+    const currentByBackendId = new Map(current.filter((c) => c.backendId).map((c) => [c.backendId, c]));
     const currentByName = new Map(current.map((c) => [c.name.trim().toLowerCase(), c]));
+    const matchedLocalIds = new Set();
 
     const mergedRemote = remoteClasses.map((rc, idx) => {
-      const local = currentById.get(rc.id) || currentByName.get(rc.name.trim().toLowerCase()) || {};
+      let local = currentByBackendId.get(rc.id) || currentById.get(rc.id);
+      if (!local) {
+        const candidate = currentByName.get(rc.name.trim().toLowerCase());
+        if (candidate && !getBackendClassId(candidate) && !matchedLocalIds.has(candidate.id)) local = candidate;
+      }
+      local ||= {};
+      if (local.id) matchedLocalIds.add(local.id);
       return {
-        id: rc.id,
+        ...local,
+        id: local.id || rc.id,
+        backendId: rc.id,
         name: rc.name,
         color: local.color || CLASS_PALETTE[idx % CLASS_PALETTE.length],
         icon: rc.name.trim().charAt(0).toUpperCase() || "C",
@@ -158,10 +180,9 @@ export async function syncClassesFromApi() {
     });
 
     const remoteIds = new Set(mergedRemote.map((rc) => rc.id));
-    const remoteNames = new Set(mergedRemote.map((rc) => rc.name.trim().toLowerCase()));
 
     // Keep all existing classes that aren't on remote so newly added classes always stay!
-    const preservedLocal = current.filter((c) => !remoteIds.has(c.id) && !remoteNames.has(c.name.trim().toLowerCase()));
+    const preservedLocal = current.filter((c) => !remoteIds.has(c.id) && !matchedLocalIds.has(c.id));
 
     const combined = [...mergedRemote, ...preservedLocal];
     saveClasses(combined);
@@ -174,33 +195,34 @@ export async function syncClassesFromApi() {
 
 export async function createClass(name) {
   const trimmed = name.trim();
-  const token = await getAccessToken();
+  const classes = readClasses();
+  const existing = classes.find((c) => c.name.trim().toLowerCase() === trimmed.toLowerCase());
+  if (existing) return existing;
   let created = null;
 
-  if (token) {
-    try {
-      const remote = await createClassApi(trimmed);
-      created = {
-        id: remote.id,
-        name: remote.name,
-        color: CLASS_PALETTE[Math.floor(Math.random() * CLASS_PALETTE.length)],
-        icon: remote.name.charAt(0).toUpperCase() || "C",
-        nextExam: "",
-        focus: "New class workspace",
-        uploads: [],
-        materials: [],
-        updatedAt: remote.updated_at || new Date().toISOString()
-      };
-    } catch (e) {
-      console.warn("Failed to create class via API, falling back to local:", e);
-    }
+  try {
+    const remote = await createClassApi(trimmed);
+    created = {
+      id: remote.id,
+      backendId: remote.id,
+      name: remote.name,
+      color: CLASS_PALETTE[Math.floor(Math.random() * CLASS_PALETTE.length)],
+      icon: remote.name.charAt(0).toUpperCase() || "C",
+      nextExam: "",
+      focus: "New class workspace",
+      uploads: [],
+      materials: [],
+      updatedAt: remote.updated_at || new Date().toISOString()
+    };
+  } catch (e) {
+    console.warn("Failed to create class via API, falling back to local:", e);
   }
 
   if (!created) {
     created = {
       id: makeId(trimmed),
       name: trimmed,
-      color: "#7c3aed",
+      color: "#7a4a72",
       icon: trimmed.charAt(0).toUpperCase() || "C",
       nextExam: "",
       focus: "New class workspace",
@@ -210,33 +232,17 @@ export async function createClass(name) {
     };
   }
 
-  const classes = readClasses();
-  // Check if class with identical name already exists
-  const existingIdx = classes.findIndex((c) => c.name.trim().toLowerCase() === trimmed.toLowerCase());
-  if (existingIdx >= 0) {
-    classes[existingIdx] = { ...classes[existingIdx], ...created };
-    saveClasses(classes);
-    return classes[existingIdx];
-  }
-
   classes.push(created);
   saveClasses(classes);
   return created;
 }
 
 export async function updateClass(classId, patch) {
-  const token = await getAccessToken();
-  if (token && patch.name) {
-    try {
-      await updateClassApi(classId, patch.name);
-    } catch (e) {
-      console.warn("Failed to update class on API:", e);
-    }
-  }
-
   const classes = readClasses();
   const index = classes.findIndex((item) => item.id === classId);
   if (index === -1) return null;
+  const remoteId = getBackendClassId(classes[index]);
+  if (remoteId && patch.name) await updateClassApi(remoteId, patch.name);
 
   classes[index] = { ...classes[index], ...patch, updatedAt: new Date().toISOString() };
   saveClasses(classes);
@@ -244,12 +250,13 @@ export async function updateClass(classId, patch) {
 }
 
 export async function deleteClass(classId) {
-  const token = await getAccessToken();
-  if (token) {
+  const klass = getClassById(classId);
+  const remoteId = getBackendClassId(klass);
+  if (remoteId) {
     try {
-      await deleteClassApi(classId);
+      await deleteClassApi(remoteId);
     } catch (e) {
-      console.warn("Failed to delete class on API:", e);
+      if (e.status !== 404) throw e;
     }
   }
 

@@ -12,6 +12,7 @@ import {
   syncClassesFromApi
 } from "./classes.js";
 import { LiveSessionController } from "./live-session.js";
+import { getBackendClassId, prepareTutorClass } from "./course-sync.js";
 import { icon } from "./icons.js";
 import { renderLibraryTab } from "./library.js";
 import { createRouter } from "./router.js";
@@ -127,7 +128,7 @@ function syncTutorControls() {
 function shell(content, { section = "classes" } = {}) {
   const isGuest = !currentUser?.email;
   const userLabel = currentUser?.email ? currentUser.email.split("@")[0] : "Guest";
-  const brandHref = isGuest ? "#/study" : "#/classes";
+  const brandHref = "#/home";
   const showSessionStatus = section === "tutor" || !["idle", "ended"].includes(state.session);
 
   app.innerHTML = `
@@ -164,6 +165,35 @@ function shell(content, { section = "classes" } = {}) {
   });
 }
 
+function renderHome() {
+  const name = currentUser?.email ? currentUser.email.split("@")[0] : "";
+
+  const copy = currentUser
+    ? `<p class="home-greeting">Welcome back, ${escapeHtml(name)}! Pick up where you left off, or open a class to study or get tutoring from its materials.</p>
+        <div class="home-actions">
+          <a class="btn btn-primary btn-large" href="#/classes">Go to your classes</a>
+          <a class="home-guest" href="#/auth">Account</a>
+        </div>`
+    : `<p class="home-greeting">Welcome! Share your screen and ask me anything out loud, or drop in your notes and lectures and I'll turn them into quizzes, flashcards, and study guides.</p>
+        <div class="home-actions">
+          <a class="btn btn-primary btn-large" href="#/auth">Log in</a>
+          <a class="home-guest" href="#/study">Continue as guest</a>
+          <p class="home-note">Guests can try everything, but nothing is saved.</p>
+        </div>`;
+
+  app.innerHTML = `
+    <main id="main-content" class="home" tabindex="-1">
+      <div class="home-inner">
+        <div class="home-logo">
+          <span class="home-mascot" aria-hidden="true"><img src="${jotMascot}" alt="" /></span>
+          <h1>Jot</h1>
+        </div>
+        ${copy}
+      </div>
+    </main>
+  `;
+}
+
 async function renderGuestWorkspace() {
   if (currentUser) {
     window.location.hash = "#/classes";
@@ -190,16 +220,12 @@ async function renderClasses() {
         <div>
           <h1>Your classes</h1>
           <p class="muted">Upload materials to a class, then study or get tutoring from them.</p>
+          <p class="desk-summary">${classes.length} ${classes.length === 1 ? "class" : "classes"} · ${totalUploads} ${totalUploads === 1 ? "upload" : "uploads"} · ${totalMaterials} study ${totalMaterials === 1 ? "set" : "sets"}</p>
         </div>
         <div class="page-actions">
           <button id="restore-sample-data" class="btn btn-secondary" type="button">${icon("sparkles", { size: 18 })} Restore sample data</button>
           <button id="new-class" class="btn btn-primary" type="button">${icon("plus", { size: 18 })} New class</button>
         </div>
-      </div>
-      <div class="metric-strip" aria-label="Workspace summary">
-        <div class="metric"><strong>${classes.length}</strong><span>Classes</span></div>
-        <div class="metric"><strong>${totalUploads}</strong><span>Uploads</span></div>
-        <div class="metric"><strong>${totalMaterials}</strong><span>Study sets</span></div>
       </div>
       <div class="class-grid" id="class-grid"></div>
     </section>
@@ -207,7 +233,7 @@ async function renderClasses() {
 
   const grid = document.querySelector("#class-grid");
   grid.innerHTML = classes.map((klass) => `
-    <article class="class-card" style="--class-color: ${escapeHtml(klass.color || "#2563eb")}">
+    <article class="class-card" style="--class-color: ${escapeHtml(klass.color || "#3f6577")}">
       <a href="#/classes/${encodeURIComponent(klass.id)}/library" class="class-card-main">
         <span class="class-icon" aria-hidden="true">${escapeHtml(klass.icon || "C")}</span>
         <span class="class-name">${escapeHtml(klass.name)}</span>
@@ -263,8 +289,12 @@ async function renderClasses() {
       const klass = getClassById(renameId);
       const name = await openDialog({ title: "Rename class", input: { label: "Class name", value: klass.name } });
       if (name) {
-        await updateClass(renameId, { name, icon: name.charAt(0).toUpperCase() });
-        renderClasses();
+        try {
+          await updateClass(renameId, { name, icon: name.charAt(0).toUpperCase() });
+          renderClasses();
+        } catch (error) {
+          toast(`Could not rename this class: ${error.message}`, { tone: "error" });
+        }
       }
     }
 
@@ -277,10 +307,14 @@ async function renderClasses() {
         danger: true
       });
       if (confirmed) {
-        await Promise.allSettled([deleteUploadedFiles((klass.uploads || []).map((u) => u.id))]);
-        await deleteClass(deleteId);
-        toast(`Deleted ${klass.name}.`);
-        renderClasses();
+        try {
+          await deleteClass(deleteId);
+          await Promise.allSettled([deleteUploadedFiles((klass.uploads || []).map((u) => u.id))]);
+          toast(`Deleted ${klass.name}.`);
+          renderClasses();
+        } catch (error) {
+          toast(`Could not delete this class: ${error.message}`, { tone: "error" });
+        }
       }
     }
   });
@@ -307,7 +341,7 @@ async function renderClassTab({ id, tab }) {
     <section>
       <a class="back-link" href="#/classes">${icon("arrowLeft", { size: 16 })} All classes</a>
       <div class="class-header">
-        <div class="class-title" style="--class-color: ${escapeHtml(klass.color || "#2563eb")}">
+        <div class="class-title" style="--class-color: ${escapeHtml(klass.color || "#3f6577")}">
           <span class="class-icon" aria-hidden="true">${escapeHtml(klass.icon || "C")}</span>
           <div>
             <h1>${escapeHtml(klass.name)}</h1>
@@ -472,8 +506,9 @@ function renderTutor(klass = null) {
   let disposed = false;
   let sessionRequestId = 0;
   let audioController = null;
+  let classPreparation = null;
   const live = new LiveSessionController({
-    classId: klass?.id || null,
+    classId: klass ? getBackendClassId(klass) : null,
     onMessage: (message) => appendMessage(message.role, message.text),
     onStatusChange: (connection, errorMessage) => {
       if (disposed) return;
@@ -535,6 +570,8 @@ function renderTutor(klass = null) {
 
   function stopSession() {
     sessionRequestId += 1;
+    classPreparation?.abort();
+    classPreparation = null;
     capture.stop();
     void audioController.close().catch(() => {});
     live.close();
@@ -563,7 +600,15 @@ function renderTutor(klass = null) {
       if (disposed || requestId !== sessionRequestId || !stream) return;
       emptyStage.hidden = true;
       setStatus({ session: "connecting", screen: "sharing" });
-      if (state.connection !== "connected") await live.connect({ mode: state.tutorMode });
+      if (state.connection !== "connected") {
+        if (klass) {
+          classPreparation = new AbortController();
+          live.classId = await prepareTutorClass(klass, { signal: classPreparation.signal });
+          if (disposed || requestId !== sessionRequestId) return;
+          classPreparation = null;
+        }
+        await live.connect({ mode: state.tutorMode });
+      }
       if (disposed || requestId !== sessionRequestId) return;
       setStatus({ session: "active" });
     } catch (error) {
@@ -839,6 +884,7 @@ async function renderAuth() {
 
 const router = createRouter(
   [
+    { path: "/home", render: renderHome },
     { path: "/study", render: renderGuestWorkspace },
     { path: "/guest", render: renderGuestWorkspace },
     { path: "/classes", render: renderClasses },
@@ -851,7 +897,7 @@ const router = createRouter(
       if (currentUser) {
         renderClasses();
       } else {
-        renderGuestWorkspace();
+        renderHome();
       }
     }
   },
@@ -886,7 +932,7 @@ window.addEventListener("pageshow", (event) => {
     router.render();
   });
 
-  if (!currentUser && (!window.location.hash || window.location.hash === "#" || window.location.hash === "#/classes")) {
+  if (!currentUser && window.location.hash === "#/classes") {
     window.location.hash = "#/study";
   } else {
     router.render();

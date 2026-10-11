@@ -6,17 +6,13 @@ import {
   uploadFileApi,
   uploadTextApi
 } from "./api.js";
-import { getClassById, updateClass } from "./classes.js";
+import { getBackendClassId, getClassById, updateClass } from "./classes.js";
 import { getUploadedFile } from "./file-store.js";
 
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const POLL_INTERVAL_MS = 3000;
 const PROCESSING_WAIT_MS = 10 * 60 * 1000;
 
-export function getBackendClassId(klass) {
-  if (UUID_PATTERN.test(klass.backendId || "")) return klass.backendId;
-  return UUID_PATTERN.test(klass.id || "") ? klass.id : null;
-}
+export { getBackendClassId };
 
 export function getBackendUploadId(upload) {
   return upload.backendId || (upload.isRemote ? upload.id : null);
@@ -90,14 +86,8 @@ function selectedUploads(klass, scope) {
   return [...klass.uploads];
 }
 
-/** Reconcile browser-only sources with SQLite before requesting generation. */
-export async function prepareStudySources(klass, { scope = "all", signal, onProgress } = {}) {
-  const uploads = selectedUploads(klass, scope);
-  if (!uploads.length) {
-    throw new Error("Add course material matching the selected scope in the Library tab first.");
-  }
+async function prepareBackendClass(klass, { signal } = {}) {
   throwIfAborted(signal);
-  onProgress?.("Preparing your course materials…");
   let classId = getBackendClassId(klass);
   let remoteUploads = [];
   if (classId) {
@@ -115,6 +105,19 @@ export async function prepareStudySources(klass, { scope = "all", signal, onProg
     klass.backendId = classId;
     await updateClass(klass.id, { backendId: classId });
   }
+  throwIfAborted(signal);
+  return { classId, remoteUploads };
+}
+
+/** Reconcile browser-only sources with SQLite before requesting generation. */
+export async function prepareStudySources(klass, { scope = "all", signal, onProgress } = {}) {
+  const uploads = selectedUploads(klass, scope);
+  if (!uploads.length) {
+    throw new Error("Add course material matching the selected scope in the Library tab first.");
+  }
+  throwIfAborted(signal);
+  onProgress?.("Preparing your course materials…");
+  const { classId, remoteUploads } = await prepareBackendClass(klass, { signal });
   const remoteById = new Map(remoteUploads.map((upload) => [upload.id, upload]));
   const sources = [];
   for (const upload of uploads) {
@@ -154,6 +157,12 @@ export async function prepareStudySources(klass, { scope = "all", signal, onProg
     uploadIds.push(detail.id);
   }
   return { classId, uploadIds };
+}
+
+/** Prepare the class UUID and actual notes before opening its Live connection. */
+export async function prepareTutorClass(klass, options = {}) {
+  if (klass.uploads?.length) return (await prepareStudySources(klass, options)).classId;
+  return (await prepareBackendClass(klass, options)).classId;
 }
 
 export function waitForStudyMaterial(materialId, options = {}) {

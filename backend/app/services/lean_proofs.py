@@ -18,6 +18,7 @@ MAX_PROOF_CHARS = 8_000
 MAX_DIAGNOSTIC_BYTES = 16_000
 MAX_DIAGNOSTIC_CHARS = 4_000
 LEAN_HEARTBEAT_LIMIT = 300_000
+LEAN_PRELUDE = "import Mathlib.Tactic\n"
 LEAN_CPU_LIMIT_SECONDS = 15
 LEAN_FILE_LIMIT_BYTES = 2 * 1024 * 1024
 OUTPUT_LIMIT_MARKER = "\nLean diagnostics were truncated because the output limit was reached."
@@ -62,7 +63,7 @@ class LeanProofService:
         if self._lake is None or not self._project_dir.is_dir():
             raise LeanRuntimeUnavailable
         status, _ = await self._run_source(
-            "import Mathlib\nexample : True := by trivial\n",
+            f"{LEAN_PRELUDE}example : True := by trivial\n",
             timeout_seconds=max(30.0, self._settings.lean_timeout_seconds),
         )
         if status != "verified":
@@ -98,8 +99,7 @@ class LeanProofService:
 
         proof_body = "\n".join(f"  {line}" if line else "  " for line in proof.splitlines())
         return (
-            "import Mathlib\n"
-            f"set_option maxHeartbeats {LEAN_HEARTBEAT_LIMIT}\n"
+            LEAN_PRELUDE + f"set_option maxHeartbeats {LEAN_HEARTBEAT_LIMIT}\n"
             f"theorem screenTutorClaim : {proposition} := by\n"
             f"{proof_body}\n"
         )

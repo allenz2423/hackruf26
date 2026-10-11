@@ -70,6 +70,8 @@ Classes ─┬─ Math 151 ─┬─ Library   (uploads: notes, docs, syllabus, 
 
 ### Library tab (uploads)
 
+The local SQLite workspace calls class/upload APIs without an access-token prerequisite. Existing browser route and IndexedDB IDs stay stable; a persisted `backendId` identifies the corresponding backend class or upload. Library refresh merges remote records into those mappings without discarding locally retained source files. New classes and uploads save through the API, with local files retained for recovery after network failures. Pasted notes use a multiline field with the backend's 1,000,000-character limit. Rename and deletion use the mapped backend UUID and surface API failures.
+
 ```text
 ┌────────────────────────────────────────────────────────────────────┐
 │ Math 151      [Library]  Study   Tutor                             │
@@ -137,7 +139,7 @@ Keep the backend session in one controller so capture, audio, transcript, and an
 1. The student presses **Share screen**. In that click handler, call `navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })`. Let the browser choose the source; do not attempt to select one from JavaScript or reuse permission silently.
 2. Show the returned stream in a `<video>` element using `srcObject`. The local preview does not pass through the backend.
 3. Request a one-use ticket from `POST /api/live-sessions`, then open `WS /api/live` on the same origin using the ticket subprotocol. If ticket creation or connection fails, stop capture tracks and show a retry action.
-4. While screen sharing is active, sample the preview to JPEG no more than once per second. Send each frame over the backend WebSocket with a client-generated `frame_id` and keep a short in-memory map of frame IDs to capture dimensions and timestamps.
+4. While screen sharing is active, sample the preview to JPEG no more than once per second, scaling its longest dimension to at most 1280 pixels without enlarging small sources. Send each frame over the backend WebSocket with a client-generated `frame_id` and keep a short in-memory map of frame IDs to JPEG dimensions, original source dimensions, and timestamps. Stop clears the frame map and the sampling canvas.
 5. Send typed questions as text. When the student enables the microphone, request microphone permission separately and stream audio over the same WebSocket. Screen-only plus typed input remains available when microphone permission is denied.
 6. Play returned tutor audio and show transcript events as captions/conversation text. The backend translates provider events into a small, provider-neutral event protocol.
 7. When the student ends screen sharing, stop the tracks, close the backend session, clear frame buffers, and remove annotations. When only the microphone is paused, stop sending audio while keeping text/screen tutoring available.
@@ -163,7 +165,7 @@ When Check my steps is enabled, show a reminder to turn on the microphone, expla
 - Accepts only known shapes (`pointer`, `rectangle`, `underline`, `note`) and finite coordinates in the `0..1` range.
 - Rejects unknown frames, old frame IDs, out-of-bounds regions, long labels, and excessive mark counts.
 - Maps normalized coordinates to the displayed video content area, accounting for `object-fit`, letterboxing, and resize. Prefer an SVG `viewBox` tied to the source frame dimensions so marks stay aligned.
-- Uses the captured frame dimensions for the SVG `viewBox` and centered aspect-preserving scaling to match the video preview. Discards marks if the shared source changes dimensions, and recalculates label sizing when the preview is resized.
+- Uses the original source dimensions for the SVG `viewBox` and centered aspect-preserving scaling to match the video preview. Downscaled JPEG frames retain their source dimensions for validation, so normalized coordinates still align. Rejects frames older than ten seconds, limits the total active marks to eight across requests, discards marks if the shared source changes dimensions, and recalculates label sizing when the preview is resized.
 - Places each explanatory label inside its region, wraps long text, and reduces its font size to fit. Labels cannot spill outside the box. For regions too small for readable text, show an abbreviated label or omit it in the preview; the annotation list retains the complete explanation.
 - Renders marks as pointer-events-disabled UI elements; they must not intercept input to the video or conversation controls.
 - Gives each mark a dismiss button in an accessible list and expires marks automatically. If an annotation references a stale frame, return an error tool response and display the spoken explanation without a mark.
@@ -201,6 +203,8 @@ The browser may stop a screen track when the user ends sharing from its own cont
 - Show distinct errors for denied permissions, unsupported capture, failed ticket issuance, backend session disconnect, and expired session. Do not continue sending a stream after an error or user stop.
 
 ## Frontend acceptance criteria
+
+Run `npm test --prefix frontend` for the isolated preview/annotation regressions and `npm run build --prefix frontend` for the production bundle. The regression tests use synthetic elements and never capture screen content, call Gemini, or modify saved course data. Actual SVG letterboxing and label layout require a browser integration check.
 
 - A student can share a target through the browser picker and see a synchronized preview in the page.
 - Typed questions work without microphone permission; voice can be enabled separately.

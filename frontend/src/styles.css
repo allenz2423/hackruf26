@@ -1,33 +1,38 @@
-/* Jot design tokens: quiet study workspace with slate-blue actions. */
+/* Jot: a desk of paper index cards, inked in the mascot's slate blue,
+   marked up with a highlighter. Paper is warm, ink is cool, one yellow. */
 :root {
   color-scheme: light dark;
 
-  --bg: #f4f7f8;
-  --surface: #ffffff;
-  --surface-muted: #e9eff1;
-  --text: #263a41;
-  --muted: #50585b;
-  --line: #d9e2e5;
-  --line-strong: #b5c3c8;
-  --primary: #456c7a;
-  --primary-hover: #263a41;
-  --on-primary: #ffffff;
-  --primary-soft: #e1eff5;
-  --accent: #527e8d;
-  --success: #087b59;
-  --success-soft: #eaf5ef;
-  --warning: #92530c;
-  --warning-soft: #fff3df;
-  --danger: #dc2626;
-  --danger-soft: #fef2f2;
-  --stage: #1b2a30;
-  --ring: rgba(69, 108, 122, 0.45);
-  --shadow-sm: 0 1px 2px rgba(24, 37, 34, 0.05);
-  --shadow-md: 0 10px 24px rgba(24, 37, 34, 0.09);
+  --bg: #f4efe3;
+  --surface: #fffdf7;
+  --surface-muted: #ebe5d6;
+  --text: #1c2e37;
+  --muted: #4d5f68;
+  --line: #ddd5c2;
+  --line-strong: #968b73;
+  --edge: #d3cab4;
+  --primary: #3f6577;
+  --primary-hover: #2b4756;
+  --on-primary: #fffdf7;
+  --primary-soft: #e3ecee;
+  --accent: #3f6577;
+  --hl: #f6d94a;
+  --hl-soft: #fbeea0;
+  --on-hl: #1c2e37;
+  --success: #2f6b3d;
+  --success-soft: #e7efdd;
+  --warning: #8a5a0b;
+  --warning-soft: #f8ecc8;
+  --danger: #b3261e;
+  --danger-soft: #f8e3dc;
+  --stage: #17242b;
+  --ring: rgba(63, 101, 119, 0.5);
+  --shadow-sm: none;
+  --shadow-md: 0 12px 28px -12px rgba(28, 46, 55, 0.28), 0 2px 4px rgba(28, 46, 55, 0.06);
 
   --radius-sm: 8px;
-  --radius-md: 8px;
-  --radius-lg: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -38,36 +43,41 @@
   --dur-fast: 120ms;
   --dur-base: 200ms;
   --ease: cubic-bezier(0.2, 0, 0, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
-  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "Bricolage Grotesque", "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  font-family: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   font-size: 16px;
   line-height: 1.5;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1a272c;
-    --surface: #263a41;
-    --surface-muted: #2f454d;
-    --text: #eef4f6;
-    --muted: #b3c0c5;
-    --line: #3b535c;
-    --line-strong: #50585b;
-    --primary: #7fc3da;
-    --primary-hover: #a0d4e5;
-    --on-primary: #13262d;
-    --primary-soft: #2a4650;
-    --accent: #7fc3da;
-    --success: #69d0a4;
-    --success-soft: #19372d;
-    --warning: #f3bf69;
-    --warning-soft: #3a2f1b;
-    --danger: #ff8989;
-    --danger-soft: #3b2222;
-    --stage: #10191d;
-    --ring: rgba(127, 195, 218, 0.55);
-    --shadow-sm: none;
-    --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.35);
+    --bg: #121d24;
+    --surface: #1b2a33;
+    --surface-muted: #24363f;
+    --text: #efeadc;
+    --muted: #a9b6bb;
+    --line: #2e424c;
+    --line-strong: #5f7a85;
+    --edge: #2e424c;
+    --primary: #86c9e0;
+    --primary-hover: #aedaea;
+    --on-primary: #10202a;
+    --primary-soft: #223943;
+    --accent: #86c9e0;
+    --hl: #e9cb3a;
+    --hl-soft: #4a4318;
+    --on-hl: #1c2e37;
+    --success: #8fcf9a;
+    --success-soft: #1d3523;
+    --warning: #f1c262;
+    --warning-soft: #3a2f16;
+    --danger: #ff9b8f;
+    --danger-soft: #3c2320;
+    --stage: #0b1317;
+    --ring: rgba(134, 201, 224, 0.6);
+    --shadow-md: 0 12px 28px -10px rgba(0, 0, 0, 0.55), 0 2px 4px rgba(0, 0, 0, 0.3);
   }
 }
 
@@ -1082,6 +1092,7 @@ main {
 }
 
 .field input,
+.field textarea,
 .field select {
   min-height: 44px;
   padding: 0 var(--space-3);
@@ -2982,5 +2993,513 @@ main {
     align-items: center;
     flex-direction: row;
     flex-wrap: wrap;
+  }
+}
+
+/* =========================================================
+   Jot craft layer
+   Paper desk, ink type, one highlighter. Loaded last so it
+   refines the shared components above without forking them.
+   ========================================================= */
+
+:root {
+  --mark: var(--hl);
+  caret-color: var(--primary);
+  accent-color: var(--primary);
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --mark: #5a4e14;
+  }
+}
+
+::selection {
+  background: var(--hl);
+  color: var(--on-hl);
+}
+
+/* Type */
+
+h1,
+h2,
+h3,
+.brand,
+.class-name {
+  font-family: var(--font-display);
+  text-wrap: balance;
+}
+
+h1 {
+  width: fit-content;
+  max-width: 100%;
+  margin-inline: -0.14em;
+  padding-inline: 0.14em;
+  font-size: clamp(1.875rem, 1.2rem + 2.6vw, 2.75rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.08;
+  /* The highlighter pass under the page title. */
+  background-image: linear-gradient(transparent 58%, var(--mark) 58% 90%, transparent 90%);
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  animation: swipe 720ms var(--ease-out) 140ms backwards;
+}
+
+h2 {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+p {
+  text-wrap: pretty;
+}
+
+.class-meta,
+.desk-summary,
+.pill,
+.row-meta {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Header and navigation */
+
+.app-header {
+  background: var(--bg);
+  backdrop-filter: none;
+  border-bottom-color: var(--edge);
+}
+
+.brand {
+  font-size: 1.5rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.brand-mark {
+  position: relative;
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
+  overflow: hidden;
+  transition: transform 320ms var(--ease-out);
+}
+
+.brand-mark img {
+  position: absolute;
+  top: -36%;
+  left: -30%;
+  width: 131%;
+  max-width: none;
+  height: auto;
+}
+
+.brand:hover .brand-mark {
+  transform: rotate(9deg) scale(1.06);
+}
+
+.primary-nav a {
+  margin-inline: var(--space-1);
+  padding-inline: var(--space-2);
+  border-radius: 0;
+  background-color: transparent;
+  background-image: linear-gradient(transparent 62%, var(--mark) 62% 86%, transparent 86%);
+  background-repeat: no-repeat;
+  background-position: 0 0;
+  background-size: 0 100%;
+  transition: background-size 240ms var(--ease-out), color var(--dur-fast) var(--ease);
+}
+
+.primary-nav a:hover,
+.primary-nav a[aria-current="page"] {
+  background-color: transparent;
+  background-size: 100% 100%;
+  color: var(--text);
+}
+
+/* Folder tabs */
+
+.class-header {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  width: 100%;
+  padding: 0;
+  border-bottom: 1px solid var(--line-strong);
+  border-radius: 0;
+  background: none;
+}
+
+.tabs a {
+  min-height: 44px;
+  margin-bottom: -1px;
+  padding-inline: var(--space-4);
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+
+.tabs a:hover {
+  background: var(--surface-muted);
+}
+
+.tabs a[aria-current="page"] {
+  position: relative;
+  border-color: var(--line-strong);
+  background: var(--surface);
+  box-shadow: none;
+  color: var(--text);
+}
+
+.tabs a[aria-current="page"]::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 1px;
+  background: var(--surface);
+}
+
+/* Surfaces: one edge, no shadow at rest */
+
+.panel {
+  border-color: var(--edge);
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+}
+
+/* Classes: index cards dealt onto the desk */
+
+.desk-summary {
+  margin-top: var(--space-2);
+  color: var(--muted);
+  font-size: 0.9375rem;
+}
+
+.class-grid {
+  gap: var(--space-5) var(--space-4);
+  padding-top: var(--space-3);
+}
+
+.class-card {
+  --tilt: 0deg;
+  overflow: visible;
+  border-color: var(--edge);
+  box-shadow: none;
+  transform: rotate(var(--tilt));
+  transform-origin: 50% 0;
+  animation: deal 640ms var(--ease-out) backwards;
+  animation-delay: calc(var(--i, 0) * 70ms + 180ms);
+}
+
+.class-card:nth-child(4n + 1) { --tilt: -0.7deg; --i: 0; }
+.class-card:nth-child(4n + 2) { --tilt: 0.5deg; --i: 1; }
+.class-card:nth-child(4n + 3) { --tilt: -0.3deg; --i: 2; }
+.class-card:nth-child(4n + 4) { --tilt: 0.8deg; --i: 3; }
+.class-card:nth-child(n + 5) { --i: 4; }
+
+.class-card:hover {
+  border-color: color-mix(in srgb, var(--class-color, var(--primary)) 55%, var(--edge));
+  box-shadow: var(--shadow-md);
+  transform: translateY(-4px) rotate(0deg);
+}
+
+/* Divider tab on the top edge of the card. */
+.class-card::before {
+  content: "";
+  position: absolute;
+  top: -8px;
+  left: 22px;
+  width: 54px;
+  height: 9px;
+  border-radius: 7px 7px 0 0;
+  background: var(--class-color, var(--primary));
+}
+
+.class-card-main {
+  padding-top: var(--space-5);
+}
+
+.class-icon {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  border: 0;
+  border-radius: 34%;
+  background: var(--class-color, var(--primary));
+  color: #fffdf7;
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 800;
+  transform: rotate(-7deg);
+  transition: transform 320ms var(--ease-out);
+}
+
+/* The little gloss from the mascot. */
+.class-icon::before {
+  content: "";
+  position: absolute;
+  top: 6px;
+  left: 7px;
+  width: 11px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 253, 247, 0.32);
+  transform: rotate(-35deg);
+}
+
+.class-card:hover .class-icon {
+  transform: rotate(5deg) scale(1.05);
+}
+
+.class-title .class-icon {
+  width: 42px;
+  height: 42px;
+  font-size: 1.125rem;
+}
+
+.card-actions {
+  border-top-color: var(--edge);
+}
+
+.new-class-card {
+  border: 2px dashed var(--line-strong);
+  border-radius: var(--radius-lg);
+  color: var(--muted);
+}
+
+.new-class-card:hover {
+  border-color: var(--primary);
+  background: var(--hl-soft);
+  color: var(--on-hl);
+}
+
+@media (prefers-color-scheme: dark) {
+  .new-class-card:hover {
+    color: var(--text);
+  }
+}
+
+/* Empty states: the mascot, cropped to its block */
+
+.empty-state .empty-icon {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  overflow: hidden;
+  border-radius: 0;
+  background: transparent url("./assets/jot-mascot.png") no-repeat -29px -35px / 125px auto;
+  color: transparent;
+}
+
+.empty-state .empty-icon svg {
+  display: none;
+}
+
+/* Upload tray */
+
+.upload-zone {
+  border: 2px dashed var(--line-strong);
+}
+
+.upload-zone:hover,
+.upload-zone.is-dragging {
+  border-color: var(--primary);
+  background: var(--hl-soft);
+}
+
+.upload-zone-icon {
+  border-radius: 34%;
+  background: var(--hl);
+  color: var(--on-hl);
+  transform: rotate(-6deg);
+  transition: transform 320ms var(--ease-out);
+}
+
+.upload-zone:hover .upload-zone-icon,
+.upload-zone.is-dragging .upload-zone-icon {
+  transform: rotate(3deg) scale(1.06);
+}
+
+/* Flashcards: an index card with its red header rule */
+
+.interactive-card {
+  border: 1px solid var(--line-strong);
+  box-shadow: none;
+  background-image: linear-gradient(transparent 50px, color-mix(in srgb, #c4483c 62%, transparent) 50px 52px, transparent 52px);
+  background-repeat: no-repeat;
+}
+
+.interactive-card:hover {
+  border-color: var(--primary);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-3px);
+}
+
+.interactive-card.is-flipped {
+  border-color: var(--line-strong);
+  background-color: color-mix(in srgb, var(--hl-soft) 78%, var(--surface));
+}
+
+/* Tutor marks are highlighter strokes */
+
+.mark {
+  fill: rgba(246, 217, 74, 0.34);
+  stroke: #f6d94a;
+  stroke-width: 1.5;
+}
+
+.mark-label {
+  color: #1c2e37;
+}
+
+.mark-label-text {
+  background: #f6d94a;
+}
+
+/* Press feedback */
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+/* Motion: one entrance, the highlighter swipe and the card deal */
+
+@keyframes swipe {
+  from { background-size: 0% 100%; }
+}
+
+@keyframes deal {
+  from {
+    opacity: 0;
+    transform: translateY(18px) rotate(calc(var(--tilt) * 5));
+  }
+}
+
+@media (max-width: 640px) {
+  .tabs a {
+    padding-inline: var(--space-2);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  h1,
+  .class-card {
+    animation: none;
+  }
+}
+
+/* Welcome page */
+
+.home {
+  display: grid;
+  place-items: center;
+  max-width: none;
+  min-height: 100vh;
+  margin: 0;
+  padding: var(--space-6) var(--space-4);
+}
+
+.home-inner {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-5);
+  width: min(560px, 100%);
+  text-align: center;
+}
+
+.home-logo {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.home-mascot {
+  position: relative;
+  flex: none;
+  width: clamp(84px, 18vw, 124px);
+  aspect-ratio: 1;
+  overflow: hidden;
+  animation: settle 800ms var(--ease-out) 100ms backwards;
+}
+
+.home-mascot img {
+  position: absolute;
+  top: -36%;
+  left: -30%;
+  width: 131%;
+  max-width: none;
+  height: auto;
+}
+
+.home-logo h1 {
+  margin-block: 0;
+  font-size: clamp(4rem, 14vw, 6rem);
+  line-height: 1;
+}
+
+.home-greeting {
+  max-width: 44ch;
+  font-size: 1.1875rem;
+  line-height: 1.55;
+}
+
+.home-actions {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+.btn-large {
+  width: min(320px, 100%);
+  min-height: 56px;
+  font-size: 1.0625rem;
+}
+
+.home-guest {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  color: var(--primary);
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 4px;
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.home-guest:hover {
+  background: var(--mark);
+  color: var(--text);
+}
+
+.home-note {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+@keyframes settle {
+  from {
+    opacity: 0;
+    transform: translateY(-28px) rotate(-16deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-mascot {
+    animation: none;
   }
 }
