@@ -17,8 +17,16 @@ class LiveSessionRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     class_id: UUID | None = None
+    # Limit the tutor's class context to these uploads; omitted means every ready upload.
+    upload_ids: tuple[UUID, ...] | None = Field(default=None, max_length=100)
     mode: TutorMode = TutorMode.CONVERSATION
     language: TutorLanguage = TutorLanguage.AUTO
+
+    @model_validator(mode="after")
+    def uploads_need_a_class(self) -> LiveSessionRequest:
+        if self.upload_ids is not None and self.class_id is None:
+            raise ValueError("upload_ids requires class_id.")
+        return self
 
 
 class CalculatorRequest(BaseModel):

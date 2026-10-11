@@ -6,6 +6,7 @@ import re
 import sqlite3
 import tempfile
 import unittest
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -259,6 +260,54 @@ class AccountBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(
             member.post("/api/live-sessions", json={"class_id": class_id}).status_code, 200
+        )
+
+    def test_class_tutor_can_limit_context_to_chosen_uploads(self) -> None:
+        self.signup(self.client, "Ada_L")
+        class_id = self.client.post("/api/classes", json={"name": "Physics"}).json()["id"]
+        app = self.client.app
+        note_ids = {}
+        for title in ("Kinematics notes", "Old midterm"):
+            note_ids[title] = str(uuid4())
+            self.client.portal.call(
+                app.state.database.execute,
+                "INSERT INTO course_notes (id, class_id, title, source_type, extracted_text, status, processing_progress) "
+                "VALUES (?1, ?2, ?3, 'pasted_text', ?4, 'ready', 100)",
+                note_ids[title], class_id, title, f"Text of {title}",
+            )
+
+        def context_for(body: dict) -> str:
+            response = self.client.post("/api/live-sessions", json={"class_id": class_id, **body})
+            self.assertEqual(response.status_code, 200)
+            ticket = self.client.portal.call(app.state.live_session_ticket_store.consume, response.json()["ticket"])
+            return ticket.class_context
+
+        everything = context_for({})
+        self.assertIn("Kinematics notes", everything)
+        self.assertIn("Old midterm", everything)
+        chosen = context_for({"upload_ids": [note_ids["Kinematics notes"]]})
+        self.assertIn("Kinematics notes", chosen)
+        self.assertNotIn("Old midterm", chosen)
+        none = context_for({"upload_ids": []})
+        self.assertIn("Physics", none)
+        self.assertNotIn("Source:", none)
+
+        # Another student's upload id never pulls in their notes, and ids need a class.
+        other = self.other_client()
+        self.signup(other, "Grace_H")
+        other_class = other.post("/api/classes", json={"name": "Grace's"}).json()["id"]
+        foreign = str(uuid4())
+        self.client.portal.call(
+            app.state.database.execute,
+            "INSERT INTO course_notes (id, class_id, title, source_type, extracted_text, status, processing_progress) "
+            "VALUES (?1, ?2, 'Secret', 'pasted_text', 'private', 'ready', 100)",
+            foreign, other_class,
+        )
+        self.assertNotIn("Secret", context_for({"upload_ids": [foreign]}))
+        self.assertEqual(self.client.post("/api/live-sessions", json={"upload_ids": [foreign]}).status_code, 400)
+        self.assertEqual(
+            self.client.post("/api/live-sessions", json={"class_id": class_id, "upload_ids": ["not-a-uuid"]}).status_code,
+            400,
         )
 
     def test_logout_ends_the_session_even_if_the_cookie_is_replayed(self) -> None:

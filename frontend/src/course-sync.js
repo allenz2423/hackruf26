@@ -177,6 +177,18 @@ export async function prepareTutorClass(klass, options = {}) {
   return (await prepareBackendClass(klass, options)).classId;
 }
 
+/**
+ * Prepare the class and the uploads the student chose for tutor context.
+ * `selectedUploadIds` null means every upload; the returned `uploadIds` is then null too.
+ */
+export async function prepareTutorSources(klass, { selectedUploadIds = null, signal } = {}) {
+  if (selectedUploadIds === null) return { classId: await prepareTutorClass(klass, { signal }), uploadIds: null };
+  const existing = new Set((klass.uploads || []).map((upload) => upload.id));
+  const chosen = selectedUploadIds.filter((id) => existing.has(id));
+  if (!chosen.length) return { classId: (await prepareBackendClass(klass, { signal })).classId, uploadIds: [] };
+  return prepareStudySources(klass, { scope: "selected", selectedUploadIds: chosen, signal });
+}
+
 export function waitForStudyMaterial(materialId, options = {}) {
   return waitForJob(() => getStudyMaterialDetailApi(materialId), options);
 }

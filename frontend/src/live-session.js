@@ -20,6 +20,8 @@ export class LiveSessionController {
     onTutorText
   } = {}) {
     this.classId = classId;
+    // Backend upload ids for the class context; null uses every ready upload.
+    this.uploadIds = null;
     this.onMessage = onMessage || (() => {});
     this.onAnnotationRequest = onAnnotationRequest || (() => ({ accepted: 0, errors: [] }));
     this.onAudioData = onAudioData || (() => {});
@@ -43,7 +45,7 @@ export class LiveSessionController {
     this.failed = false;
     this.intentionalClose = false;
     this.onStatusChange("connecting");
-    const { ticket } = await requestLiveSession(this.classId, mode, language);
+    const { ticket } = await requestLiveSession(this.classId, mode, language, this.uploadIds);
     if (connectionId !== this.connectionId) throw new Error("The tutoring session was ended.");
     const socket = new WebSocket(websocketUrl(), [SESSION_PROTOCOL, `ticket.${ticket}`]);
     this.socket = socket;

@@ -39,7 +39,7 @@ function setTextPreview(container, text) {
   container.innerHTML = `<pre class="document-text">${escapeHtml(text)}</pre>`;
 }
 
-async function readPowerPoint(file) {
+export async function readPowerPoint(file) {
   const archive = await JSZip.loadAsync(file);
   const slideNames = Object.keys(archive.files)
     .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
@@ -54,7 +54,7 @@ async function readPowerPoint(file) {
   return slides.filter(Boolean).join("\n\n");
 }
 
-async function readWordDocument(file) {
+export async function readWordDocument(file) {
   const archive = await JSZip.loadAsync(file);
   const documentFile = archive.file("word/document.xml");
   if (!documentFile) return "";

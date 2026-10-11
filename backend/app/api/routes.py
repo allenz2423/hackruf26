@@ -82,12 +82,19 @@ async def create_live_session_ticket(
         )
         if class_row is None:
             raise ApiError(404, "not_found", "The requested resource was not found.")
+        # The student may limit context to chosen uploads; ids outside this class match nothing.
+        selected = ""
+        upload_ids = tuple(dict.fromkeys(payload.upload_ids or ()))
+        if payload.upload_ids is not None:
+            placeholders = ", ".join(f"?{index}" for index in range(2, len(upload_ids) + 2))
+            selected = f"AND id IN ({placeholders}) " if upload_ids else "AND 0 "
         notes = await database_connection.fetch(
             "SELECT title, substr(COALESCE(summary, extracted_text, ''), 1, 40000) AS context "
             "FROM course_notes "
-            "WHERE class_id = ?1 AND status = 'ready' ORDER BY "
+            f"WHERE class_id = ?1 AND status = 'ready' {selected}ORDER BY "
             "CASE WHEN kind = 'syllabus' THEN 0 ELSE 1 END, created_at",
             payload.class_id,
+            *upload_ids,
         )
         context_parts = [f"Class: {class_row['name']}\n"]
         remaining = 40_000

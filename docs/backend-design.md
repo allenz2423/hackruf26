@@ -53,7 +53,7 @@ Class-library routes always scope reads and writes to the configured owner UUID.
 ## HTTP API
 
 - `GET /healthz`
-- `POST /api/live-sessions` with `{}` or optional `class_id` (UUID) and `mode` (`conversation` or `check_steps`); returns a one-use connection ticket and expiry
+- `POST /api/live-sessions` with `{}` or optional `class_id` (UUID), optional `upload_ids` (up to 100 upload UUIDs; requires `class_id`; only ready uploads in that class are used, and an empty list means no upload context), and `mode` (`conversation` or `check_steps`); returns a one-use connection ticket and expiry
 - `WS /api/live` using the ticket as a WebSocket subprotocol
 - `POST /api/tools/calculate`
 - `POST /api/tools/verify-lean`
@@ -135,7 +135,7 @@ The frontend caps the longest JPEG frame dimension at 1280 pixels to stay within
 - `google_search`: provider-managed grounding, configured by the backend.
 - `calculate_expression`: evaluated by the backend's bounded symbolic parser.
 - `verify_lean_proof`: checked by the backend's bounded Lean runner when enabled.
-- `add_annotations`: the backend binds ordinary requests to the latest forwarded frame and automatic requests to the exact reviewed frame; the browser validates and renders temporary marks over the in-page preview, then returns a bounded result.
+- `add_annotations`: the model gives each mark as `box_2d` = `[ymin, xmin, ymax, xmax]` on a 0–1000 scale (Gemini's native box format, which it places far more accurately than 0–1 rectangles). The backend converts these to the browser's normalized 0–1 `region` (`annotation_items_for_client` in `live_config.py`, clamped inside the frame; malformed boxes are reported back to the model, not forwarded), binds ordinary requests to the latest forwarded frame and automatic requests to the exact reviewed frame; the browser validates and renders temporary marks over the in-page preview, then returns a bounded result. The browser event format is unchanged.
 - `report_screen_review`: coaching-only control tool; accepts exactly a bounded active `review_id` and one decision enum, authorizes a hint or completes a review silently. It has no visual action or HTTP endpoint.
 
 No tool may click, type, control the desktop, run shell commands, or draw outside the web page.

@@ -143,18 +143,26 @@ SCREEN_RESUMED_CONTEXT = (
 )
 
 
+BOX_SCALE = 1000
+
+
 def annotation_tool() -> types.Tool:
-    """Return the approved visual tool with a narrow JSON schema."""
-    number = types.Schema(type=types.Type.NUMBER, minimum=0, maximum=1)
-    region = types.Schema(
-        type=types.Type.OBJECT,
-        properties={
-            "x": number,
-            "y": number,
-            "width": number,
-            "height": number,
-        },
-        required=["x", "y", "width", "height"],
+    """Return the approved visual tool with a narrow JSON schema.
+
+    Locations use Gemini's native box format, ``box_2d`` = [ymin, xmin, ymax, xmax]
+    scaled 0-1000, which the model places far more accurately than other formats.
+    ``annotation_items_for_client`` converts it to the browser's 0-1 rectangles.
+    """
+    coordinate = types.Schema(type=types.Type.INTEGER, minimum=0, maximum=BOX_SCALE)
+    box = types.Schema(
+        type=types.Type.ARRAY,
+        items=coordinate,
+        min_items=4,
+        max_items=4,
+        description=(
+            "Bounding box of the exact target as [ymin, xmin, ymax, xmax], each an "
+            "integer from 0 to 1000 relative to the full frame (0,0 is the top-left)."
+        ),
     )
     item = types.Schema(
         type=types.Type.OBJECT,
@@ -163,10 +171,10 @@ def annotation_tool() -> types.Tool:
                 type=types.Type.STRING,
                 enum=["pointer", "rectangle", "underline", "note"],
             ),
-            "region": region,
+            "box_2d": box,
             "label": types.Schema(type=types.Type.STRING),
         },
-        required=["kind", "region", "label"],
+        required=["kind", "box_2d", "label"],
     )
     parameters = types.Schema(
         type=types.Type.OBJECT,
@@ -177,13 +185,47 @@ def annotation_tool() -> types.Tool:
         name="add_annotations",
         description=(
             "Request a small number of temporary marks over the most recently supplied "
-            "screen frame. Use normalized coordinates from 0 to 1 and a short explanatory "
-            "label. The server attaches the frame identifier."
+            "screen frame. Give each mark a tight box_2d around the exact words, symbols, "
+            "or region it refers to, and a short explanatory label. The server attaches "
+            "the frame identifier."
         ),
         behavior=types.Behavior.BLOCKING,
         parameters=parameters,
     )
     return types.Tool(function_declarations=[declaration])
+
+
+def annotation_items_for_client(items: object) -> tuple[list[dict[str, object]], list[str]]:
+    """Convert model marks (box_2d, 0-1000) to the browser's normalized 0-1 regions.
+
+    Returns the converted items and an error for each item that was malformed. The
+    browser still validates every region against its own frame before rendering.
+    """
+    converted: list[dict[str, object]] = []
+    errors: list[str] = []
+    if not isinstance(items, list):
+        return converted, ["items must be a list."]
+    for index, item in enumerate(items[:5]):
+        box = item.get("box_2d") if isinstance(item, dict) else None
+        if (
+            not isinstance(box, list)
+            or len(box) != 4
+            or not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in box)
+        ):
+            errors.append(f"Item {index + 1}: box_2d must be [ymin, xmin, ymax, xmax].")
+            continue
+        ymin, xmin, ymax, xmax = (min(max(float(value), 0.0), BOX_SCALE) / BOX_SCALE for value in box)
+        # Keep the far edges a hair inside the frame so x + width never rounds past 1.
+        ymax, xmax = min(ymax, 1.0 - 1e-9), min(xmax, 1.0 - 1e-9)
+        if ymax <= ymin or xmax <= xmin:
+            errors.append(f"Item {index + 1}: box_2d needs ymax > ymin and xmax > xmin.")
+            continue
+        converted.append({
+            "kind": item.get("kind"),
+            "label": item.get("label"),
+            "region": {"x": xmin, "y": ymin, "width": xmax - xmin, "height": ymax - ymin},
+        })
+    return converted, errors
 
 
 def calculator_tool() -> types.Tool:

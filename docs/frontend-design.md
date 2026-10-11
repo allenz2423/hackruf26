@@ -126,6 +126,9 @@ Remote quiz detail omits answer keys. Submit choice IDs, true/false values, and 
 
 The screen-sharing workspace described above, with the class selected. The page tells the backend the class ID when starting the session so the tutor gets that class's materials. Tutor answers that rely on an upload show a source chip linking to it.
 
+- **Tutor materials.** The "Using <class> · All materials" pill opens a checklist of the class's uploads. The chosen IDs go to `POST /api/live-sessions` as `upload_ids`; choosing every upload sends none, so new uploads join automatically. The choice is kept per class in this browser (`tutor-materials.js`) and is locked while a session runs.
+- **Open material.** Next to Share screen, this shows one of the class's uploads on the stage instead of the screen: PDFs (pdf.js, loaded only when needed, with its worker bundled as a plain `.js` chunk), images, and text from notes, documents, and slides (paginated, one page per slide). `material-stage.js` draws each page into a canvas whose `captureStream()` takes the display stream's place, so frame sampling, the preview, and annotation validation are unchanged. A page bar turns pages (marks clear on each turn) and Close pauses the stage like Pause. The material on stage is always added to the tutor's context. The file comes from browser storage or, failing that, the upload's signed backend URL fetched same-origin; nothing is saved. Audio and video uploads are not offered. The student can switch between the screen and a material without pausing; cancelling the screen picker keeps the material on stage.
+
 ## Accounts, guests, and access
 
 Guests and logged-in users never share a screen or a cache. The backend enforces this; the client only mirrors it.

@@ -52,6 +52,7 @@ from app.services.live_config import (
     NO_CURRENT_SCREEN_CONTEXT,
     SCREEN_PAUSED_CONTEXT,
     SCREEN_RESUMED_CONTEXT,
+    annotation_items_for_client,
     live_connect_config,
 )
 
@@ -823,6 +824,7 @@ class GeminiLiveSessionService:
                         coaching.silenced_generation = coaching.generation
                     result = {"accepted": True, "decision": outcome.decision}
         elif name == "add_annotations":
+            marks, mark_errors = annotation_items_for_client(args.get("items", []))
             frame_id = (
                 coaching.review.frame_id
                 if coaching is not None and coaching.review is not None
@@ -854,6 +856,8 @@ class GeminiLiveSessionService:
                         ),
                     }
                 }
+            elif mark_errors and not marks:
+                result = {"error": {"code": "invalid_annotation", "message": " ".join(mark_errors)}}
             elif not call_id:
                 result = {
                     "error": {
@@ -868,7 +872,7 @@ class GeminiLiveSessionService:
                     payload = {
                         "type": "annotation_request",
                         "call_id": call_id,
-                        "payload": {"frame_id": frame_id, "items": args.get("items", [])},
+                        "payload": {"frame_id": frame_id, "items": marks},
                     }
                     if coaching is None:
                         await send_client(payload)

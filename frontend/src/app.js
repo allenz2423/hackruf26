@@ -16,7 +16,9 @@ import {
   hasLocalClassData
 } from "./classes.js";
 import { LiveSessionController } from "./live-session.js";
-import { getBackendClassId, prepareTutorClass } from "./course-sync.js";
+import { getBackendClassId, prepareTutorSources } from "./course-sync.js";
+import { MaterialStage } from "./material-stage.js";
+import { chooseMaterial, chooseTutorSources, loadTutorSources, saveTutorSources, sourcesSummary } from "./tutor-materials.js";
 import { icon } from "./icons.js";
 import { renderLibraryTab } from "./library.js";
 import { createRouter } from "./router.js";
@@ -61,7 +63,7 @@ const state = {
 const TONES = {
   session: { active: "good", connecting: "busy", selecting_screen: "busy", screen_paused: "busy", reconnecting: "busy", error: "bad" },
   connection: { connected: "good", connecting: "busy", error: "bad" },
-  screen: { sharing: "live", selecting: "busy", paused: "busy" },
+  screen: { sharing: "live", material: "live", selecting: "busy", paused: "busy" },
   mic: { on: "live", requesting: "busy", muted: "busy" }
 };
 
@@ -88,10 +90,23 @@ function syncTutorControls() {
   if (!share) return;
 
   const sharing = state.screen === "sharing" || state.screen === "selecting";
+  const onStage = sharing || state.screen === "material";
   const inSession = !["idle", "ended", "error"].includes(state.session);
-  share.disabled = sharing || ["connecting", "reconnecting"].includes(state.session);
-  document.querySelector("#pause-screen").disabled = !sharing;
+  const starting = ["connecting", "reconnecting"].includes(state.session);
+  // A material on the stage can be swapped for the screen and back without pausing.
+  share.disabled = sharing || starting;
+  const openMaterial = document.querySelector("#open-material");
+  if (openMaterial) openMaterial.disabled = state.screen === "selecting" || starting;
+  document.querySelector("#pause-screen").disabled = !onStage;
   document.querySelector("#end-session").disabled = !inSession;
+  const sources = document.querySelector("#tutor-sources");
+  if (sources) {
+    const sourcesLocked = inSession || ["connecting", "connected"].includes(state.connection);
+    sources.disabled = sourcesLocked;
+    sources.title = sourcesLocked
+      ? "End the session to change which materials the tutor reads"
+      : "Choose which materials the tutor reads";
+  }
   const resetMemory = document.querySelector("#reset-tutor-memory");
   if (resetMemory) {
     resetMemory.disabled = state.connection !== "connected" || !["active", "screen_paused"].includes(state.session);
@@ -310,10 +325,11 @@ function wireMenu(menu, { signal, onSelect } = {}) {
   }, { signal });
 }
 
-function shell(content, { section = "classes" } = {}) {
+// `section` picks the highlighted nav link; `tutor` marks any tutor page, including a class's Tutor tab.
+function shell(content, { section = "classes", tutor = section === "tutor" } = {}) {
   const isGuest = !currentUser;
   const brandHref = "#/home";
-  const showSessionStatus = section === "tutor" || !["idle", "ended"].includes(state.session);
+  const showSessionStatus = tutor || !["idle", "ended"].includes(state.session);
 
   app.innerHTML = `
     <a class="skip-link" href="#main-content">Skip to content</a>
@@ -561,7 +577,7 @@ async function renderClassTab({ id, tab }) {
           <span class="class-icon" aria-hidden="true">${classBadge(klass)}</span>
           <div>
             <h1>${escapeHtml(klass.name)}</h1>
-            <p class="muted">${escapeHtml(klass.focus || "Class study workspace")}</p>
+            ${klass.focus ? `<p class="muted">${escapeHtml(klass.focus)}</p>` : ""}
           </div>
         </div>
         <nav class="tabs" aria-label="${escapeHtml(klass.name)} sections">
@@ -574,7 +590,7 @@ async function renderClassTab({ id, tab }) {
       </div>
       <div id="class-tab"></div>
     </section>
-  `, { section: tab === "tutor" ? "tutor" : "classes" });
+  `, { section: "classes", tutor: tab === "tutor" });
 
   const root = document.querySelector("#class-tab");
 
@@ -639,23 +655,38 @@ function renderTutor(klass = null) {
     <section class="tutor-workspace">
       <div class="panel stage-panel">
         <div class="stage-topline">
-          <span class="pill no-dot">${icon("book", { size: 14 })} Using <strong>${klass ? escapeHtml(klass.name) : "no class"}</strong></span>
+          ${klass
+            ? `<button id="tutor-sources" class="pill no-dot pill-button" type="button" aria-haspopup="dialog">${icon("book", { size: 14 })} Using <strong>${escapeHtml(klass.name)}</strong> · <span id="tutor-sources-summary"></span></button>`
+            : `<span class="pill no-dot">${icon("book", { size: 14 })} Using <strong>no class</strong></span>`}
           <div class="stage-controls">
             <button id="share-screen" class="btn btn-primary" type="button" aria-label="Share screen" title="Share screen">${icon("monitor", { size: 18 })}<span class="btn-label">Share screen</span></button>
+            ${klass ? `<button id="open-material" class="btn btn-secondary" type="button" aria-haspopup="dialog" aria-label="Open a class material on the stage" title="Open a class material on the stage">${icon("file", { size: 18 })}<span class="btn-label">Open material</span></button>` : ""}
             <button id="pause-screen" class="btn btn-secondary" type="button" disabled aria-label="Pause screen sharing" title="Pause screen sharing">${icon("pause", { size: 18 })}<span class="btn-label">Pause</span></button>
             <button id="end-session" class="btn btn-danger-ghost" type="button" disabled aria-label="End session" title="End session">${icon("stop", { size: 18 })}<span class="btn-label">End</span></button>
           </div>
         </div>
-        <p class="tutor-privacy-note">${icon("monitor", { size: 16 })}<span>Screen frames and enabled microphone audio pass through Jot's server for tutoring. They are not saved.</span></p>
+        <p class="tutor-privacy-note">${icon("monitor", { size: 16 })}<span>${klass ? "Screen or material frames" : "Screen frames"} and enabled microphone audio pass through Jot's server for tutoring. They are not saved.</span></p>
         <div class="screen-stage">
-          <video id="screen-preview" autoplay muted playsinline aria-label="Shared screen preview"></video>
+          <video id="screen-preview" autoplay muted playsinline aria-label="${klass ? "Stage preview" : "Shared screen preview"}"></video>
           <svg id="annotation-layer" preserveAspectRatio="xMidYMid meet" aria-hidden="true"></svg>
           <div class="empty-stage">
             <span class="empty-icon">${icon("monitor", { size: 30 })}</span>
-            <strong>Share a screen to start</strong>
-            <span>Pick a window, tab, or display. The tutor sees only what you share, and you can pause anytime.</span>
+            <strong>${klass ? "Share a screen or open a material" : "Share a screen to start"}</strong>
+            <span>${klass
+              ? "Share a window, tab, or display, or show one of this class's uploads. The tutor sees only what is on the stage, and you can pause anytime."
+              : "Pick a window, tab, or display. The tutor sees only what you share, and you can pause anytime."}</span>
           </div>
         </div>
+        ${klass ? `
+        <div class="material-bar" id="material-bar" hidden>
+          <span class="material-name">${icon("file", { size: 16 })}<span id="material-name"></span></span>
+          <div class="material-pager">
+            <button id="material-prev" class="btn btn-ghost btn-icon" type="button" aria-label="Previous page" title="Previous page">${icon("arrowLeft", { size: 18 })}</button>
+            <span id="material-page" aria-live="polite"></span>
+            <button id="material-next" class="btn btn-ghost btn-icon" type="button" aria-label="Next page" title="Next page">${icon("arrowRight", { size: 18 })}</button>
+          </div>
+          <button id="material-close" class="btn btn-ghost" type="button">${icon("x", { size: 16 })} Close</button>
+        </div>` : ""}
         <div class="annotation-bar">
           <ul id="annotation-list" aria-label="Marks on screen"></ul>
           <button id="clear-marks" class="btn btn-ghost" type="button">${icon("eraser", { size: 18 })} Clear marks</button>
@@ -709,7 +740,10 @@ function renderTutor(klass = null) {
       <div class="page-heading">
         <div>
           <h1>Quick tutor</h1>
-          <p class="muted">Get help with anything on your screen. Open a class to use its materials too.</p>
+          <p class="muted">Get help with anything on your screen.</p>
+          <p class="tutor-scope-note">${icon("book", { size: 16 })}<span>${currentUser
+            ? `Not using any class materials. <a href="#/classes">Open a class</a> to tutor from your notes.`
+            : `Not using any class materials. <a href="#/login">Log in</a> to tutor from your own class notes.`}</span></p>
         </div>
       </div>
       ${content}
@@ -736,6 +770,41 @@ function renderTutor(klass = null) {
   let audioController = null;
   let classPreparation = null;
   let buddy = null;
+  // A class upload shown on the stage in place of a shared screen.
+  let material = null;
+  let selectedSources = klass ? loadTutorSources(klass) : null;
+  const materialBar = document.querySelector("#material-bar");
+
+  function currentClass() {
+    return klass ? getClassById(klass.id) || klass : null;
+  }
+
+  function refreshSourcesSummary() {
+    const summary = document.querySelector("#tutor-sources-summary");
+    if (summary) summary.textContent = sourcesSummary(currentClass(), selectedSources);
+  }
+
+  function updateMaterialBar() {
+    if (!materialBar) return;
+    materialBar.hidden = !material;
+    if (!material) return;
+    document.querySelector("#material-name").textContent = material.name;
+    document.querySelector("#material-page").textContent = `Page ${material.pageIndex + 1} of ${material.pageCount}`;
+    document.querySelector("#material-prev").disabled = material.pageIndex === 0;
+    document.querySelector("#material-next").disabled = material.pageIndex >= material.pageCount - 1;
+  }
+
+  function closeMaterial() {
+    material?.close();
+    material = null;
+    updateMaterialBar();
+  }
+
+  function stopStage() {
+    capture.stop();
+    closeMaterial();
+  }
+
   const live = new LiveSessionController({
     classId: klass ? getBackendClassId(klass) : null,
     onMessage: (message) => {
@@ -752,7 +821,7 @@ function renderTutor(klass = null) {
       if (connection === "error") {
         const wasActive = ["active", "screen_paused"].includes(state.session);
         if (wasActive) sessionRequestId += 1;
-        capture.stop();
+        stopStage();
         void audioController?.close().catch(() => {});
         annotations.clear();
         emptyStage.hidden = false;
@@ -781,6 +850,7 @@ function renderTutor(klass = null) {
     video,
     onEnded: () => {
       if (disposed) return;
+      closeMaterial();
       live.pauseScreen();
       annotations.clear();
       emptyStage.hidden = false;
@@ -827,7 +897,7 @@ function renderTutor(klass = null) {
     sessionRequestId += 1;
     classPreparation?.abort();
     classPreparation = null;
-    capture.stop();
+    stopStage();
     void audioController.close().catch(() => {});
     live.close();
     annotations.clear();
@@ -846,22 +916,33 @@ function renderTutor(klass = null) {
     disposeTutor = null;
   };
 
-  document.querySelector("#share-screen").addEventListener("click", async () => {
+  // Put a screen share or a material on the stage, connecting first if needed.
+  // `openStream` attaches its stream to the capture and resolves to it, or to null.
+  async function startStage(openStream, screen) {
     const requestId = ++sessionRequestId;
+    const previous = { session: state.session, screen: state.screen };
     try {
       setStatus({ session: "selecting_screen", screen: "selecting" });
-      const captureRequest = capture.start();
-      const playbackReady = audioController.preparePlayback();
-      const [stream] = await Promise.all([captureRequest, playbackReady]);
-      if (disposed || requestId !== sessionRequestId || !stream) return;
+      const [stream] = await Promise.all([openStream(requestId), audioController.preparePlayback()]);
+      if (disposed || requestId !== sessionRequestId) return;
+      if (!stream) {
+        setStatus(previous);
+        return;
+      }
       emptyStage.hidden = true;
-      setStatus({ session: "connecting", screen: "sharing" });
+      annotations.clear();
+      setStatus({ session: "connecting", screen });
       if (state.connection !== "connected") {
         if (klass) {
           classPreparation = new AbortController();
-          live.classId = await prepareTutorClass(klass, { signal: classPreparation.signal });
+          // The material on the stage is always part of the tutor's context.
+          let chosen = selectedSources;
+          if (chosen && material && !chosen.includes(material.upload.id)) chosen = [...chosen, material.upload.id];
+          const prepared = await prepareTutorSources(currentClass(), { selectedUploadIds: chosen, signal: classPreparation.signal });
           if (disposed || requestId !== sessionRequestId) return;
           classPreparation = null;
+          live.classId = prepared.classId;
+          live.uploadIds = prepared.uploadIds;
         }
         await live.connect({ mode: state.tutorMode, language: state.tutorLanguage });
       }
@@ -869,19 +950,95 @@ function renderTutor(klass = null) {
       setStatus({ session: "active" });
     } catch (error) {
       if (disposed || requestId !== sessionRequestId) return;
+      // Cancelling the screen picker while something is already on stage keeps the session going.
+      if (error?.name === "NotAllowedError" && capture.stream && state.connection === "connected") {
+        setStatus(previous);
+        return;
+      }
       stopSession();
       setStatus({ session: "error", screen: "not sharing", connection: "offline" });
       toast(error.message, { tone: "error" });
     }
+  }
+
+  document.querySelector("#share-screen").addEventListener("click", () => startStage(async () => {
+    const stream = await capture.start();
+    // The screen replaced any material; capture.start already stopped its stream.
+    if (stream) closeMaterial();
+    return stream;
+  }, "sharing"));
+
+  document.querySelector("#open-material")?.addEventListener("click", async () => {
+    const upload = await chooseMaterial(currentClass());
+    if (!upload || disposed) return;
+    await startStage(async (requestId) => {
+      const stage = new MaterialStage(upload);
+      try {
+        const stream = await stage.open();
+        if (disposed || requestId !== sessionRequestId) {
+          stage.close();
+          return null;
+        }
+        const replaced = material;
+        material = stage;
+        capture.attach(stream);
+        replaced?.close();
+        updateMaterialBar();
+        return stream;
+      } catch (error) {
+        stage.close();
+        // A material that cannot be shown leaves whatever is on stage in place.
+        if (capture.stream) {
+          toast(error.message, { tone: "error" });
+          return null;
+        }
+        throw error;
+      }
+    }, "material");
   });
 
-  document.querySelector("#pause-screen").addEventListener("click", () => {
-    capture.stop();
+  async function turnPage(step) {
+    if (!material) return;
+    const next = material.pageIndex + step;
+    if (next < 0 || next >= material.pageCount) return;
+    annotations.clear();
+    const shown = material;
+    // showPage sets the new page number at once; large PDF pages can take a moment to draw.
+    const rendering = shown.showPage(next);
+    updateMaterialBar();
+    try {
+      await rendering;
+    } catch (error) {
+      toast(`Could not show that page: ${error.message}`, { tone: "error" });
+    }
+    if (material !== shown) return;
+    // Send the new page right away instead of waiting for the next sample.
+    window.setTimeout(() => capture.sampleFrame(), 200);
+  }
+
+  document.querySelector("#material-prev")?.addEventListener("click", () => turnPage(-1));
+  document.querySelector("#material-next")?.addEventListener("click", () => turnPage(1));
+
+  function pauseStage() {
+    stopStage();
     live.pauseScreen();
     annotations.clear();
     emptyStage.hidden = false;
     setStatus({ session: "screen_paused", screen: "paused" });
+  }
+
+  document.querySelector("#pause-screen").addEventListener("click", pauseStage);
+  document.querySelector("#material-close")?.addEventListener("click", pauseStage);
+
+  document.querySelector("#tutor-sources")?.addEventListener("click", async () => {
+    const klassNow = currentClass();
+    const next = await chooseTutorSources(klassNow, selectedSources);
+    if (next === undefined || disposed) return;
+    selectedSources = next;
+    saveTutorSources(klassNow, next);
+    refreshSourcesSummary();
   });
+  refreshSourcesSummary();
 
   document.querySelector("#end-session").addEventListener("click", () => {
     stopSession();
@@ -908,7 +1065,7 @@ function renderTutor(klass = null) {
       if (disposed || requestId !== sessionRequestId) return;
       if (capture.stream) {
         capture.sampleFrame();
-        setStatus({ session: "active", screen: "sharing" });
+        setStatus({ session: "active", screen: material ? "material" : "sharing" });
       } else {
         live.pauseScreen();
         setStatus({ session: "screen_paused", screen: "paused" });

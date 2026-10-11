@@ -14,7 +14,7 @@ These instructions apply to all work in this repository. Read the relevant desig
 
 - Frontend implementation belongs in `frontend/`; backend implementation belongs in `backend/`.
 - Accounts are backend-owned: `POST /api/auth/signup`, `POST /api/auth/login`, `POST /api/auth/logout`, and `GET /api/auth/me` (`{"user": null}` for a guest). The session is an HttpOnly cookie; the frontend never reads or stores a token. Class-library endpoints and class tutoring require a logged-in account (`401` otherwise); quick tutoring and the calculator work for guests.
-- The backend exposes `POST /api/live-sessions`. The frontend sends `{}` or an optional `class_id` and receives a short-lived, one-use WebSocket ticket and expiry; it receives no provider credential or model metadata.
+- The backend exposes `POST /api/live-sessions`. The frontend sends `{}` or an optional `class_id` (with optional `upload_ids` to limit the class context to chosen uploads) and receives a short-lived, one-use WebSocket ticket and expiry; it receives no provider credential or model metadata.
 - The frontend connects to same-origin `WS /api/live` using that ticket as a WebSocket subprotocol. The backend chooses the provider, model, tools, and configuration; the client cannot expand permissions.
 - The backend forwards live media in memory and never logs or stores it. The frontend validates annotation geometry against its local frame map and renders marks only over the matching preview.
 - An annotation references a `frame_id` and uses normalized coordinates from 0 to 1 relative to that exact captured frame. The frontend validates geometry and renders it only over the corresponding preview.
