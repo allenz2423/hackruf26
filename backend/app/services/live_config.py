@@ -16,6 +16,24 @@ visual text is unclear. Keep spoken turns brief and invite the student to
 continue. Use the student's class notes only when they are provided for this
 session.
 
+Screen frames are changing snapshots, not permanent facts. Use the newest
+readable screen frame to describe what is visible now. Older frames and your
+earlier statements are historical context only: erased, replaced, or corrected
+work must not be described as still present. Do not invent text to fill gaps in
+the current image. Class notes are reference material, not the current screen.
+
+Treat the student's latest correction as an update to your understanding. If
+they say a value, equation, or error is gone or has been fixed, withdraw the
+outdated claim and reassess the current step. Do not repeat the earlier warning
+unless the same mistake is independently visible in the newest readable frame.
+If the student and your visual reading disagree, ask one short question about
+the current content instead of insisting that your previous observation is
+right. When sharing is paused or no recent frame is available, say you cannot
+see the current work and rely only on what the student explicitly describes.
+Frames can lag behind edits. If the student says they just erased or corrected
+something, do not use an image captured before that correction to contradict
+them. Wait for a newer view or ask for the current step.
+
 Use Google Search to check current or uncertain factual claims. Explain when
 sources disagree or the available evidence is limited. Use
 calculate_expression for exact arithmetic or symbolic algebra when that improves
@@ -58,6 +76,28 @@ when feedback is uncertain. The student may interrupt your feedback by speaking.
 """.strip()
 
 COACHING_SILENCE_DURATION_MS = 900
+
+CURRENT_SCREEN_CONTEXT = (
+    "Current screen snapshot for this question follows. It replaces older images "
+    "as visual evidence, but was captured before the student's accompanying "
+    "message and may lag their edits. Respect their latest correction; do not "
+    "carry erased text or corrected errors forward from previous observations."
+)
+NO_CURRENT_SCREEN_CONTEXT = (
+    "No recent screen snapshot is available for this question. Do not claim "
+    "that old screen content is still visible. Ask for the current step if needed."
+)
+SCREEN_PAUSED_CONTEXT = (
+    "Screen Tutor capture status: screen sharing has stopped. There is no current "
+    "screen view; earlier images are historical only. Do not mark or describe "
+    "them as current. This is a context update, not a question to answer."
+)
+SCREEN_RESUMED_CONTEXT = (
+    "Screen Tutor capture status: screen sharing has resumed with a new current "
+    "frame. Reassess the newly arriving screen; do not reuse old locations or "
+    "assume that previously visible errors remain. This is a context update, "
+    "not a question to answer."
+)
 
 
 def annotation_tool() -> types.Tool:
@@ -212,17 +252,18 @@ def live_connect_config(
         response_modalities=[types.Modality.AUDIO],
         output_audio_transcription=types.AudioTranscriptionConfig(),
         session_resumption=types.SessionResumptionConfig(),
-        realtime_input_config=(
-            types.RealtimeInputConfig(
-                automatic_activity_detection=types.AutomaticActivityDetection(
+        realtime_input_config=types.RealtimeInputConfig(
+            automatic_activity_detection=(
+                types.AutomaticActivityDetection(
                     disabled=False,
                     end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
                     silence_duration_ms=COACHING_SILENCE_DURATION_MS,
-                ),
-                activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
-            )
-            if coaching
-            else None
+                )
+                if coaching
+                else None
+            ),
+            activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
+            turn_coverage=types.TurnCoverage.TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO,
         ),
         tools=tools,
     )

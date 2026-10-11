@@ -92,9 +92,19 @@ Automatic speech detection uses a 900 ms silence window in this mode to allow sh
 
 The class Tutor sends the backend class UUID from the persisted `backendId` mapping, resolved by `getBackendClassId(klass)`, to `POST /api/live-sessions`. Its browser route slug is not a backend ID. Before opening Live, `prepareTutorClass()` reconciles the class and actual source files through the existing class/upload APIs and waits for processing to finish. Empty classes are created without requiring an upload. Navigation or End cancels client preparation and prevents a late connection. Quick Tutor omits `class_id` and works without a class. Both paths send the selected predefined mode. The backend retains UUID validation and ownership checks.
 
+### Changing screen content and corrections
+
+Screen frames are changing snapshots, not permanent facts. The backend instructions require the newest readable frame and the student's latest correction to take precedence over older visual observations and assistant claims. Erased, replaced, or corrected work must not remain a current error. Class reference material supplies methods and definitions; it is not evidence that an old equation still appears on screen.
+
+The Live configuration explicitly includes all incoming video between spoken turns, including screen changes made during silence. For a typed question, the backend includes its latest JPEG snapshot with the question in one ordered content update when the frame is at most ten seconds old. Only one bounded JPEG is retained in active session memory; it is replaced on the next frame and cleared on screen pause or disconnect. No images, corrections, or conversations are saved or logged.
+
+The browser sends `screen_paused` whenever sharing stops while Live remains connected. The backend invalidates the current frame and adds a fixed server-owned context notice; on the next frame it signals that a new current screen is available. Annotation requests are rejected without a frame or when its age exceeds ten seconds.
+
+**Reset tutor memory** closes the existing gateway connection and requests a new one-use ticket for the same predefined mode and class. The new provider connection receives current class context but no old frames, turns, transcript, or resumption handle. Screen capture remains under the student's existing permission; a new frame is sampled after readiness. The browser clears its transcript and marks, stops queued speech, and turns off the microphone until the student enables it again. Normal ticket rate limits and failure cleanup still apply. Prompting improves grounding but cannot guarantee that a model will never make another error; reset provides an explicit way to discard the previous conversation.
+
 ### WebSocket events
 
-The browser may send only `text`, `audio`, `audio_end`, `frame`, and `annotation_result` events. Event payloads are size-limited and validated; frame payloads must be JPEG and are rate-limited. The backend emits `ready`, `assistant`, `annotation_request`, and sanitized `error` events. WebSocket media stays in active session memory only.
+The browser may send only `text`, `audio`, `audio_end`, `frame`, `screen_paused` (no additional fields), and `annotation_result` events. Event payloads are size-limited and validated; frame payloads must be JPEG and are rate-limited. The backend emits `ready`, `assistant`, `annotation_request`, and sanitized `error` events. WebSocket media stays in active session memory only.
 
 The frontend caps the longest JPEG frame dimension at 1280 pixels to stay within the backend's 2,200,000-byte decoded frame limit, including detailed 4K displays. Original source dimensions stay in the browser's frame map for annotation alignment and source-resize validation. The browser rejects annotation references older than ten seconds and caps active marks at eight across requests. The HTTP and WebSocket formats remain unchanged.
 

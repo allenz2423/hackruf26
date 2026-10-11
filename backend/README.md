@@ -48,7 +48,7 @@ Class-library rows are scoped to `LOCAL_OWNER_ID` in SQLite. In development, sam
 ## API
 
 - `GET /healthz`
-- `POST /api/live-sessions` with `{}` or optional `{"class_id":"<uuid>"}`; returns a one-use ticket, not a provider credential
+- `POST /api/live-sessions` with `{}` or optional `class_id` (UUID) and `mode` (`conversation` or `check_steps`); returns a one-use ticket, not a provider credential
 - `WS /api/live` using the ticket as a WebSocket subprotocol
 - `POST /api/tools/calculate`
 - `POST /api/tools/verify-lean`
@@ -65,6 +65,13 @@ Class-library rows are scoped to `LOCAL_OWNER_ID` in SQLite. In development, sam
 - `GET|DELETE /api/study-materials/{material_id}`
 - `POST /api/study-materials/{material_id}/attempts`
 - `POST /api/study-materials/{material_id}/flags`
+
+Live screen changes supersede historical observations. The browser sends
+`screen_paused` when sharing stops; the backend invalidates its latest snapshot
+and rejects marks without a recent frame. Typed questions include the latest
+bounded snapshot in memory. Reset tutor memory obtains a fresh ticket and opens
+a new conversation without replaying old frames or history. See the
+[Live grounding contract](../docs/backend-design.md#changing-screen-content-and-corrections).
 
 The full request/response shapes, status codes, processing lifecycle, and data boundaries are in the [backend design](../docs/backend-design.md#http-api).
 

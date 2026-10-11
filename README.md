@@ -8,6 +8,8 @@ Students can also upload their own course materials (notes, documents, syllabi, 
 
 For spoken solution walkthroughs, enable **Check my steps** before Share screen, then turn on the microphone. Explain a step and pause for a short corrective hint. The tutor can mark a visible mistake and lets you interrupt its speech. End the session to change modes. Feedback can miss errors and is given at pauses, rather than guaranteed during uninterrupted speech.
 
+If the tutor keeps referring to erased or outdated work, use **Reset memory** in the Conversation panel. It clears the conversation and marks and opens a fresh tutor connection while keeping your screen shared. Turn the microphone on again afterward.
+
 ## Design
 
 See the [product overview](docs/design.md), [frontend design](docs/frontend-design.md), and [backend design](docs/backend-design.md).

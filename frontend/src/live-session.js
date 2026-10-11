@@ -190,6 +190,12 @@ export class LiveSessionController {
     this.send({ type: "audio_end" });
   }
 
+  pauseScreen() {
+    this.outputText = "";
+    this.onAudioInterrupted();
+    return this.send({ type: "screen_paused" });
+  }
+
   sendFrame(frame) {
     if (!frame?.jpeg || !frame?.frame_id) return;
     this.send({

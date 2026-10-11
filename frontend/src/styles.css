@@ -1620,6 +1620,21 @@ main {
   background: var(--surface-muted);
 }
 
+.conversation-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.tutor-memory-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
 .check-steps-control {
   display: flex;
   align-items: center;

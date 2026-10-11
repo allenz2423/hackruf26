@@ -77,9 +77,13 @@ function syncTutorControls() {
 
   const sharing = state.screen === "sharing" || state.screen === "selecting";
   const inSession = !["idle", "ended", "error"].includes(state.session);
-  share.disabled = sharing;
+  share.disabled = sharing || ["connecting", "reconnecting"].includes(state.session);
   document.querySelector("#pause-screen").disabled = !sharing;
   document.querySelector("#end-session").disabled = !inSession;
+  const resetMemory = document.querySelector("#reset-tutor-memory");
+  if (resetMemory) {
+    resetMemory.disabled = state.connection !== "connected" || !["active", "screen_paused"].includes(state.session);
+  }
   const coachingToggle = document.querySelector("#check-steps");
   if (coachingToggle) {
     const coaching = state.tutorMode === "check_steps";
@@ -447,7 +451,11 @@ function renderTutor(klass = null) {
       </div>
       <aside class="panel conversation-panel" aria-label="Tutor conversation">
         <div class="conversation-head">
-          <h2>Conversation</h2>
+          <div class="conversation-title-row">
+            <h2>Conversation</h2>
+            <button id="reset-tutor-memory" class="btn btn-ghost" type="button" disabled aria-label="Reset tutor memory" aria-describedby="reset-memory-description">${icon("refresh", { size: 16 })} Reset memory</button>
+          </div>
+          <p id="reset-memory-description" class="tutor-memory-hint">Clear the conversation and marks if the tutor refers to old work. Your screen stays shared; the microphone turns off.</p>
           <div class="coaching-controls">
             <label class="check-steps-control" for="check-steps">
               <input id="check-steps" type="checkbox" aria-describedby="coaching-description" />
@@ -538,6 +546,7 @@ function renderTutor(klass = null) {
     video,
     onEnded: () => {
       if (disposed) return;
+      live.pauseScreen();
       annotations.clear();
       emptyStage.hidden = false;
       setStatus({ session: "screen_paused", screen: "paused" });
@@ -621,6 +630,7 @@ function renderTutor(klass = null) {
 
   document.querySelector("#pause-screen").addEventListener("click", () => {
     capture.stop();
+    live.pauseScreen();
     annotations.clear();
     emptyStage.hidden = false;
     setStatus({ session: "screen_paused", screen: "paused" });
@@ -632,6 +642,38 @@ function renderTutor(klass = null) {
   });
 
   document.querySelector("#clear-marks").addEventListener("click", () => annotations.clear());
+  document.querySelector("#reset-tutor-memory").addEventListener("click", async () => {
+    if (state.connection !== "connected" || !["active", "screen_paused"].includes(state.session)) return;
+    const requestId = ++sessionRequestId;
+    // A fresh ticket creates a new provider conversation. No old messages or
+    // frames are replayed, and no new capture permission is requested.
+    audioController.disable();
+    live.close();
+    annotations.clear();
+    capture.clearFrames();
+    state.messages = [];
+    document.querySelector("#conversation-list").replaceChildren();
+    setStatus({ session: "connecting", connection: "connecting", mic: "off", micDevice: "" });
+    try {
+      await audioController.preparePlayback();
+      if (disposed || requestId !== sessionRequestId) return;
+      await live.connect({ mode: state.tutorMode });
+      if (disposed || requestId !== sessionRequestId) return;
+      if (capture.stream) {
+        capture.sampleFrame();
+        setStatus({ session: "active", screen: "sharing" });
+      } else {
+        live.pauseScreen();
+        setStatus({ session: "screen_paused", screen: "paused" });
+      }
+      toast("Tutor memory reset. Turn on the microphone when you're ready to continue.");
+    } catch (error) {
+      if (disposed || requestId !== sessionRequestId) return;
+      stopSession();
+      setStatus({ session: "error", screen: "not sharing", connection: "offline" });
+      toast(`Could not reset the tutor: ${error.message}`, { tone: "error" });
+    }
+  });
   document.querySelector("#check-steps").addEventListener("change", (event) => {
     if (event.currentTarget.disabled) return;
     setStatus({ tutorMode: event.currentTarget.checked ? "check_steps" : "conversation" });

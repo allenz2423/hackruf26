@@ -58,6 +58,7 @@ Students can also upload their own course materials (notes, documents, syllabi, 
 
 - Start with a hint or a clarifying question instead of immediately solving the whole problem.
 - Explain what is visible and name uncertainty when text or layout is unclear.
+- Treat newer screen frames and the student's corrections as updates. Do not describe erased or replaced work as still present, or keep flagging a step that has been corrected. Ask for the current step when uncertain.
 - Keep spoken turns brief and let the student interrupt.
 - Use marks sparingly; each one should clarify a spoken explanation.
 - When the student explicitly asks for a mark on a clearly visible target, place it rather than only describing it.
@@ -72,6 +73,7 @@ Students can also upload their own course materials (notes, documents, syllabi, 
 - Show when annotations are active. Let the student dismiss one mark or clear all marks.
 - On disconnect or permission loss, stop sending media and explain how to resume.
 - Select Check my steps before starting. End the session to change modes; microphone access is still enabled separately.
+- Provide Reset tutor memory to discard the current conversation and marks while retaining the authorized shared-screen preview. It starts a fresh tutor connection and leaves the microphone off until enabled again.
 
 ### Notes and study materials
 
