@@ -110,7 +110,7 @@ function syncTutorControls() {
 function shell(content, { section = "classes" } = {}) {
   const isGuest = !currentUser?.email;
   const userLabel = currentUser?.email ? currentUser.email.split("@")[0] : "Guest";
-  const brandHref = isGuest ? "#/study" : "#/classes";
+  const brandHref = isGuest ? "#/" : "#/classes";
   const showSessionStatus = section === "tutor" || !["idle", "ended"].includes(state.session);
 
   app.innerHTML = `
@@ -145,6 +145,30 @@ function shell(content, { section = "classes" } = {}) {
     event.preventDefault();
     document.querySelector("#main-content")?.focus();
   });
+}
+
+function renderHome() {
+  if (currentUser) {
+    window.location.hash = "#/classes";
+    return;
+  }
+
+  app.innerHTML = `
+    <main id="main-content" class="home" tabindex="-1">
+      <div class="home-inner">
+        <div class="home-logo">
+          <span class="home-mascot" aria-hidden="true"><img src="${jotMascot}" alt="" /></span>
+          <h1>Jot</h1>
+        </div>
+        <p class="home-greeting">Welcome! Share your screen and ask me anything out loud, or drop in your notes and lectures and I'll turn them into quizzes, flashcards, and study guides.</p>
+        <div class="home-actions">
+          <a class="btn btn-primary btn-large" href="#/auth">Log in</a>
+          <a class="home-guest" href="#/study">Continue as guest</a>
+          <p class="home-note">Guests can try everything, but nothing is saved.</p>
+        </div>
+      </div>
+    </main>
+  `;
 }
 
 async function renderGuestWorkspace() {
@@ -819,7 +843,7 @@ const router = createRouter(
       if (currentUser) {
         renderClasses();
       } else {
-        renderGuestWorkspace();
+        renderHome();
       }
     }
   },
@@ -854,7 +878,7 @@ window.addEventListener("pageshow", (event) => {
     router.render();
   });
 
-  if (!currentUser && (!window.location.hash || window.location.hash === "#" || window.location.hash === "#/classes")) {
+  if (!currentUser && window.location.hash === "#/classes") {
     window.location.hash = "#/study";
   } else {
     router.render();
