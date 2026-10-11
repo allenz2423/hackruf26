@@ -353,60 +353,66 @@ class GeminiLiveSessionService:
         peer: str,
         send_client: Any,
     ) -> None:
-        async for message in session.receive():
-            content = message.server_content
-            if content is not None:
-                event: dict[str, Any] = {
-                    "type": "assistant",
-                    "interrupted": bool(content.interrupted),
-                    "turn_complete": bool(content.turn_complete),
-                    "text": getattr(content.output_transcription, "text", None),
-                    "audio": [],
-                }
-                for part in getattr(content.model_turn, "parts", None) or []:
-                    inline_data = part.inline_data
-                    mime_type = inline_data.mime_type or "" if inline_data is not None else ""
-                    if inline_data is not None and mime_type.startswith("audio/"):
-                        event["audio"].append(
-                            {
-                                "data": _encode_audio(inline_data.data),
-                                "mime_type": mime_type,
-                            }
-                        )
-                    if part.text and not event["text"]:
-                        event["text"] = part.text
-                if (
-                    event["interrupted"]
-                    or event["turn_complete"]
-                    or event["text"]
-                    or event["audio"]
-                ):
-                    await send_client(event)
+        # receive() ends after one model turn; keep listening until disconnection.
+        while True:
+            received_message = False
+            async for message in session.receive():
+                received_message = True
+                content = message.server_content
+                if content is not None:
+                    event: dict[str, Any] = {
+                        "type": "assistant",
+                        "interrupted": bool(content.interrupted),
+                        "turn_complete": bool(content.turn_complete),
+                        "text": getattr(content.output_transcription, "text", None),
+                        "audio": [],
+                    }
+                    for part in getattr(content.model_turn, "parts", None) or []:
+                        inline_data = part.inline_data
+                        mime_type = inline_data.mime_type or "" if inline_data is not None else ""
+                        if inline_data is not None and mime_type.startswith("audio/"):
+                            event["audio"].append(
+                                {
+                                    "data": _encode_audio(inline_data.data),
+                                    "mime_type": mime_type,
+                                }
+                            )
+                        if part.text and not event["text"]:
+                            event["text"] = part.text
+                    if (
+                        event["interrupted"]
+                        or event["turn_complete"]
+                        or event["text"]
+                        or event["audio"]
+                    ):
+                        await send_client(event)
 
-            tool_call = message.tool_call
-            calls = list(getattr(tool_call, "function_calls", None) or [])
-            known_ids = {call.id for call in calls if call.id}
-            model_turn = content.model_turn if content is not None else None
-            for part in getattr(model_turn, "parts", None) or []:
-                function_call = part.function_call
-                if function_call is not None and function_call.id not in known_ids:
-                    calls.append(function_call)
-                    if function_call.id:
-                        known_ids.add(function_call.id)
-            if calls:
-                responses = []
-                for call in calls:
-                    response = await self._handle_function_call(
-                        call,
-                        session,
-                        frames,
-                        pending_annotations,
-                        peer,
-                        send_client,
-                    )
-                    responses.append(response)
-                async with upstream_send_lock:
-                    await session.send_tool_response(function_responses=responses)
+                tool_call = message.tool_call
+                calls = list(getattr(tool_call, "function_calls", None) or [])
+                known_ids = {call.id for call in calls if call.id}
+                model_turn = content.model_turn if content is not None else None
+                for part in getattr(model_turn, "parts", None) or []:
+                    function_call = part.function_call
+                    if function_call is not None and function_call.id not in known_ids:
+                        calls.append(function_call)
+                        if function_call.id:
+                            known_ids.add(function_call.id)
+                if calls:
+                    responses = []
+                    for call in calls:
+                        response = await self._handle_function_call(
+                            call,
+                            session,
+                            frames,
+                            pending_annotations,
+                            peer,
+                            send_client,
+                        )
+                        responses.append(response)
+                    async with upstream_send_lock:
+                        await session.send_tool_response(function_responses=responses)
+            if not received_message:
+                return
 
     async def _handle_function_call(
         self,

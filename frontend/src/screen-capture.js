@@ -6,6 +6,8 @@ export class ScreenCaptureController {
     this.stream = null;
     this.frames = new Map();
     this.frameTimer = null;
+    this.requestId = 0;
+    this.trackEndedHandler = null;
     this.canvas = document.createElement("canvas");
     this.context = this.canvas.getContext("2d");
   }
@@ -15,7 +17,12 @@ export class ScreenCaptureController {
       throw new Error("Screen sharing is not supported in this browser.");
     }
 
+    const requestId = ++this.requestId;
     const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    if (requestId !== this.requestId) {
+      stream.getTracks().forEach((track) => track.stop());
+      return null;
+    }
     this.attach(stream);
     return stream;
   }
@@ -28,10 +35,11 @@ export class ScreenCaptureController {
 
     const [track] = stream.getVideoTracks();
     if (track) {
-      track.addEventListener("ended", () => {
+      this.trackEndedHandler = () => {
         this.stop();
         this.onEnded();
-      });
+      };
+      track.addEventListener("ended", this.trackEndedHandler, { once: true });
     }
 
     this.frameTimer = window.setInterval(() => this.sampleFrame(), 1000);
@@ -70,15 +78,19 @@ export class ScreenCaptureController {
   }
 
   stop() {
+    this.requestId += 1;
     if (this.frameTimer) {
       window.clearInterval(this.frameTimer);
       this.frameTimer = null;
     }
 
     if (this.stream) {
+      const track = this.stream.getVideoTracks()[0];
+      if (track && this.trackEndedHandler) track.removeEventListener("ended", this.trackEndedHandler);
       this.stream.getTracks().forEach((track) => track.stop());
     }
 
+    this.trackEndedHandler = null;
     this.stream = null;
     this.frames.clear();
     this.video.srcObject = null;

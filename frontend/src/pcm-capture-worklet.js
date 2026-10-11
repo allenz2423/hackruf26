@@ -27,12 +27,16 @@ class PcmCaptureProcessor extends AudioWorkletProcessor {
     this.position -= samples.length;
 
     while (this.pending.length >= CHUNK_SIZE) {
-      const chunk = new Int16Array(CHUNK_SIZE);
+      const pcm = new ArrayBuffer(CHUNK_SIZE * 2);
+      const chunk = new DataView(pcm);
+      let energy = 0;
       for (let index = 0; index < CHUNK_SIZE; index += 1) {
-        chunk[index] = this.pending[index];
+        const sample = Math.trunc(this.pending[index]);
+        chunk.setInt16(index * 2, sample, true);
+        energy += (sample / 0x8000) ** 2;
       }
       this.pending = this.pending.slice(CHUNK_SIZE);
-      this.port.postMessage(chunk.buffer, [chunk.buffer]);
+      this.port.postMessage({ pcm, level: Math.sqrt(energy / CHUNK_SIZE) }, [pcm]);
     }
 
     return true;

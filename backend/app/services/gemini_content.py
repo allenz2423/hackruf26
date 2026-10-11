@@ -41,6 +41,63 @@ class ContentGenerationFailure(RuntimeError):
     """Gemini did not return content that meets the server schema and limits."""
 
 
+def _provider_response_schema(model: type[BaseModel]) -> dict:
+    """Send a compact structural schema; enforce full constraints after generation.
+
+    Nested Pydantic schemas include references, const values, UUID formats, and
+    many length/range constraints. Gemini can reject that combination even when
+    the schema is valid JSON Schema. Keep types, required fields, and enums on
+    the wire, and retain the original Pydantic model as the validation authority.
+    """
+    schema = model.model_json_schema()
+    definitions = schema.get("$defs", {})
+
+    def normalize(node: dict, references: frozenset[str] = frozenset()) -> dict:
+        if "$ref" in node:
+            reference = node["$ref"]
+            prefix = "#/$defs/"
+            if (
+                not reference.startswith(prefix)
+                or reference in references
+                or reference[len(prefix):] not in definitions
+            ):
+                raise ContentGenerationFailure(
+                    "The response schema contains an unsupported reference."
+                )
+            resolved = {**definitions[reference[len(prefix):]], **node}
+            resolved.pop("$ref")
+            return normalize(resolved, references | {reference})
+
+        result = {
+            key: node[key]
+            for key in ("type", "description", "enum", "required", "additionalProperties")
+            if key in node
+        }
+        if "const" in node:
+            result["enum"] = [node["const"]]
+        if "properties" in node:
+            result["properties"] = {
+                name: normalize(value, references)
+                for name, value in node["properties"].items()
+            }
+        if "items" in node:
+            result["items"] = normalize(node["items"], references)
+        if "anyOf" in node:
+            branches = [normalize(value, references) for value in node["anyOf"]]
+            if all(
+                set(branch) == {"type"} and isinstance(branch["type"], str)
+                for branch in branches
+            ):
+                result["type"] = [branch["type"] for branch in branches]
+            else:
+                result["anyOf"] = branches
+        if isinstance(result.get("additionalProperties"), dict):
+            result["additionalProperties"] = normalize(result["additionalProperties"], references)
+        return result
+
+    return normalize(schema)
+
+
 class GeminiContentService:
     """Run file extraction and study generation; never log student content."""
 
@@ -589,7 +646,9 @@ class GeminiContentService:
     ) -> T:
         config_values: dict[str, object] = {
             "response_mime_type": "application/json",
-            "response_schema": schema,
+            # Keep JSON Schema keywords intact instead of converting them to the
+            # legacy Schema protobuf (which rejects additional_properties).
+            "response_json_schema": _provider_response_schema(schema),
             "temperature": 0.2,
             "max_output_tokens": max_output_tokens,
         }

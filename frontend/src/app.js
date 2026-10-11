@@ -33,12 +33,14 @@ import {
 const app = document.querySelector("#app");
 
 let currentUser = null;
+let disposeTutor = null;
 
 const state = {
   session: "idle",
   connection: "offline",
   screen: "not sharing",
   mic: "off",
+  micDevice: "",
   messages: []
 };
 
@@ -46,7 +48,7 @@ const TONES = {
   session: { active: "good", connecting: "busy", selecting_screen: "busy", screen_paused: "busy", reconnecting: "busy", error: "bad" },
   connection: { connected: "good", connecting: "busy", error: "bad" },
   screen: { sharing: "live", selecting: "busy", paused: "busy" },
-  mic: { on: "live" }
+  mic: { on: "live", requesting: "busy", muted: "busy" }
 };
 
 const STATUS_LABELS = { session: "Session", connection: "Live", screen: "Screen", mic: "Mic" };
@@ -78,8 +80,28 @@ function syncTutorControls() {
   document.querySelector("#end-session").disabled = !inSession;
   const micToggle = document.querySelector("#mic-toggle");
   if (micToggle) {
-    micToggle.disabled = state.connection !== "connected" && state.mic !== "on";
-    micToggle.setAttribute("aria-pressed", String(state.mic === "on"));
+    const micActive = ["on", "muted", "requesting"].includes(state.mic);
+    micToggle.disabled = state.connection !== "connected" && !micActive;
+    micToggle.setAttribute("aria-pressed", String(micActive));
+    const action = state.mic === "requesting"
+      ? "Cancel microphone request"
+      : micActive ? "Turn microphone off" : "Turn microphone on";
+    micToggle.setAttribute("aria-label", action);
+    micToggle.title = action;
+  }
+  const micFeedback = document.querySelector("#mic-feedback");
+  if (micFeedback) {
+    micFeedback.dataset.mic = state.mic;
+    const descriptions = {
+      requesting: "Allow microphone access in your browser, or click the mic again to cancel.",
+      on: "Listening. Speak your question, then pause for the tutor to reply.",
+      muted: "Your microphone is temporarily muted or unavailable. Check your device.",
+      off: state.connection === "connected"
+        ? "Microphone off. Turn it on to ask a question aloud."
+        : "Share your screen to connect, then turn on the microphone."
+    };
+    document.querySelector("#mic-description").textContent = descriptions[state.mic] || descriptions.off;
+    document.querySelector("#mic-device").textContent = state.micDevice;
   }
   const sendButton = document.querySelector('#composer button[type="submit"]');
   if (sendButton) sendButton.disabled = state.connection !== "connected";
@@ -344,6 +366,7 @@ function appendMessage(role, text) {
 }
 
 function renderTutor(klass = null) {
+  disposeTutor?.();
   const container = klass ? document.querySelector("#class-tab") : null;
   const content = `
     <section class="tutor-workspace">
@@ -376,10 +399,17 @@ function renderTutor(klass = null) {
           <h2>Conversation</h2>
         </div>
         <ol id="conversation-list" class="conversation-list" data-empty-prompt="${escapeHtml(klass ? `Ask about your shared screen or ${klass.name}'s course materials.` : "Share your screen or ask a general question to get started.")}" aria-live="polite"></ol>
+        <div id="mic-feedback" class="mic-feedback" data-mic="off">
+          <div class="mic-feedback-text" role="status" aria-live="polite">
+            <span id="mic-description"></span>
+            <span id="mic-device" class="mic-device"></span>
+          </div>
+          <div class="mic-meter" aria-hidden="true"><span id="mic-level"></span></div>
+        </div>
         <form id="composer" class="composer">
           <label class="visually-hidden" for="question-input">Ask the tutor a question</label>
           <input id="question-input" name="question" autocomplete="off" placeholder="Ask a question…" />
-          <button type="button" id="mic-toggle" class="btn btn-secondary btn-icon" aria-pressed="false" aria-label="Microphone" title="Microphone">${icon("mic", { size: 20 })}</button>
+          <button type="button" id="mic-toggle" class="btn btn-secondary btn-icon" aria-pressed="false" aria-label="Turn microphone on" aria-describedby="mic-description" title="Turn microphone on">${icon("mic", { size: 20 })}</button>
           <button type="submit" class="btn btn-primary btn-icon" aria-label="Send" title="Send question">${icon("send", { size: 20 })}</button>
         </form>
       </aside>
@@ -414,14 +444,27 @@ function renderTutor(klass = null) {
 
   const video = document.querySelector("#screen-preview");
   const emptyStage = document.querySelector(".empty-stage");
+  const micLevel = document.querySelector("#mic-level");
+  let disposed = false;
+  let sessionRequestId = 0;
   let audioController = null;
   const live = new LiveSessionController({
     classId: klass?.id || null,
     onMessage: (message) => appendMessage(message.role, message.text),
-    onStatusChange: (connection) => {
+    onStatusChange: (connection, errorMessage) => {
+      if (disposed) return;
       setStatus({ connection });
-      if (connection === "error" && state.session === "active") {
-        toast("The tutoring service could not connect. Please try again.", { tone: "error" });
+      if (connection === "error") {
+        const wasActive = ["active", "screen_paused"].includes(state.session);
+        if (wasActive) sessionRequestId += 1;
+        capture.stop();
+        void audioController?.close().catch(() => {});
+        annotations.clear();
+        emptyStage.hidden = false;
+        setStatus({ session: "error", screen: "not sharing" });
+        if (wasActive) {
+          toast(errorMessage || "The tutoring session disconnected. Start it again to continue.", { tone: "error" });
+        }
       }
     },
     onAudioData: (data, mimeType) => audioController?.playPcm(data, mimeType),
@@ -435,6 +478,7 @@ function renderTutor(klass = null) {
   const capture = new ScreenCaptureController({
     video,
     onEnded: () => {
+      if (disposed) return;
       emptyStage.hidden = false;
       setStatus({ session: "screen_paused", screen: "paused" });
     },
@@ -446,29 +490,58 @@ function renderTutor(klass = null) {
     getFrames: () => capture.getFrames()
   });
   audioController = new AudioController({
-    onStatusChange: (mic) => {
-      setStatus({ mic });
-      if (mic === "off") live.endAudioInput();
+    onStatusChange: (mic, deviceLabel = "") => {
+      if (disposed) return;
+      const wasSendingAudio = state.mic === "on";
+      setStatus({ mic, micDevice: deviceLabel });
+      if (wasSendingAudio && ["off", "muted"].includes(mic)) live.endAudioInput();
     },
-    onAudioChunk: (chunk) => live.sendAudio(chunk)
+    onAudioChunk: (chunk) => {
+      if (!live.sendAudio(chunk)) audioController.disable();
+    },
+    onAudioLevel: (level) => {
+      if (!disposed) micLevel.style.transform = `scaleX(${level})`;
+    },
+    onError: (error) => {
+      if (!disposed) toast(error.message, { tone: "error" });
+    }
   });
 
+  function stopSession() {
+    sessionRequestId += 1;
+    capture.stop();
+    void audioController.close().catch(() => {});
+    live.close();
+    annotations.clear();
+    emptyStage.hidden = false;
+  }
+
+  disposeTutor = () => {
+    disposed = true;
+    stopSession();
+    Object.assign(state, {
+      session: "idle", connection: "offline", screen: "not sharing",
+      mic: "off", micDevice: "", messages: []
+    });
+    disposeTutor = null;
+  };
+
   document.querySelector("#share-screen").addEventListener("click", async () => {
+    const requestId = ++sessionRequestId;
     try {
       setStatus({ session: "selecting_screen", screen: "selecting" });
       const captureRequest = capture.start();
       const playbackReady = audioController.preparePlayback();
-      await captureRequest;
-      await playbackReady;
+      const [stream] = await Promise.all([captureRequest, playbackReady]);
+      if (disposed || requestId !== sessionRequestId || !stream) return;
       emptyStage.hidden = true;
       setStatus({ session: "connecting", screen: "sharing" });
-      await live.connect();
+      if (state.connection !== "connected") await live.connect();
+      if (disposed || requestId !== sessionRequestId) return;
       setStatus({ session: "active" });
     } catch (error) {
-      capture.stop();
-      void audioController.close();
-      live.close();
-      emptyStage.hidden = false;
+      if (disposed || requestId !== sessionRequestId) return;
+      stopSession();
       setStatus({ session: "error", screen: "not sharing", connection: "offline" });
       toast(error.message, { tone: "error" });
     }
@@ -482,20 +555,17 @@ function renderTutor(klass = null) {
   });
 
   document.querySelector("#end-session").addEventListener("click", () => {
-    capture.stop();
-    void audioController.close();
-    live.close();
-    annotations.clear();
-    emptyStage.hidden = false;
+    stopSession();
     setStatus({ session: "ended", screen: "not sharing", connection: "offline" });
   });
 
   document.querySelector("#clear-marks").addEventListener("click", () => annotations.clear());
   document.querySelector("#mic-toggle")?.addEventListener("click", async () => {
     try {
+      if (state.connection !== "connected" && !audioController.enabled && !audioController.requesting) return;
       await audioController.toggle();
     } catch (error) {
-      toast(error.message, { tone: "error" });
+      if (!disposed) toast(error.message, { tone: "error" });
     }
   });
 
@@ -753,8 +823,14 @@ const router = createRouter(
         renderGuestWorkspace();
       }
     }
-  }
+  },
+  { beforeRender: () => disposeTutor?.() }
 );
+
+window.addEventListener("pagehide", () => disposeTutor?.());
+window.addEventListener("pageshow", (event) => {
+  if (event.persisted) router.render();
+});
 
 // Initialize authentication and startup sync
 (async () => {
