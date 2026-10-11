@@ -256,6 +256,42 @@ export async function getStudyMaterialDetailApi(materialId) {
   return await apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}`);
 }
 
+async function downloadFile(path, fallbackFilename) {
+  const token = await getAccessToken();
+  const response = await fetch(path, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {}
+  });
+  if (!response.ok) {
+    const error = await readJson(response);
+    throw new Error(error.message || "Could not download the document. Try again.");
+  }
+  const filename = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1]
+    || fallbackFilename;
+  return { blob: await response.blob(), filename };
+}
+
+export async function downloadStudyFileApi(materialId, format = "pdf") {
+  if (!["pdf", "latex"].includes(format)) throw new Error("Unsupported study-guide file format.");
+  return downloadFile(`/api/study-materials/${encodeURIComponent(materialId)}/files/${format}`,
+    `study-guide.${format === "pdf" ? "pdf" : "tex"}`);
+}
+
+export async function getUploadDocumentApi(uploadId, detailLevel = "balanced", signal) {
+  return apiFetch(`/api/uploads/${encodeURIComponent(uploadId)}/document?detail_level=${encodeURIComponent(detailLevel)}`, { signal });
+}
+
+export async function createUploadDocumentApi(uploadId, detailLevel = "balanced", signal) {
+  return apiFetch(`/api/uploads/${encodeURIComponent(uploadId)}/document`, {
+    method: "POST", body: JSON.stringify({ detail_level: detailLevel }), signal
+  });
+}
+
+export async function downloadUploadDocumentApi(uploadId, format, detailLevel = "balanced") {
+  if (!["pdf", "latex", "original_text"].includes(format)) throw new Error("Unsupported document file format.");
+  const suffix = { pdf: "pdf", latex: "tex", original_text: "txt" }[format];
+  return downloadFile(`/api/uploads/${encodeURIComponent(uploadId)}/document/files/${format}?detail_level=${encodeURIComponent(detailLevel)}`, `study-document.${suffix}`);
+}
+
 export async function deleteStudyMaterialApi(materialId) {
   return await apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}`, {
     method: "DELETE"

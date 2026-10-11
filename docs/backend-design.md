@@ -20,6 +20,7 @@ The class library stores classes, uploaded course materials, extracted text, lec
 - SymPy for bounded calculator execution
 - Local private file storage under `backend/.local/private_uploads` by default
 - In-process FastAPI background tasks for hackathon upload processing and generation jobs
+- Tectonic for saved LaTeX/PDF study documents (local executable; no Docker)
 
 ## Configuration
 
@@ -28,6 +29,7 @@ The class library stores classes, uploaded course materials, extracted text, lec
 | `GEMINI_API_KEY` | Yes | Server-only credential for Live sessions and content processing |
 | `GEMINI_MODEL` | No | Live model, defaults to `gemini-3.8-live` |
 | `GEMINI_TEXT_MODEL` | No | Text extraction and generation model, defaults to `gemini-3.8-flash` |
+| `STUDY_PDF_EXECUTABLE`, `STUDY_PDF_TIMEOUT_SECONDS` | No | Tectonic executable (PATH or `backend/.local/bin/tectonic`) and bounded PDF compilation timeout, default 60 seconds |
 | `APP_ORIGINS` | Deployment-dependent | Allowed browser origins |
 | `DEMO_GATE_TOKEN` | Production | Optional private bearer token gate for session-ticket/tool endpoints; required in production |
 | `LIVE_SESSION_RATE_LIMIT`, `LIVE_SESSION_RATE_WINDOW_SECONDS` | No | Session-ticket issuance limits |
@@ -65,6 +67,9 @@ Class-library routes always scope reads and writes to the configured owner UUID.
 - `GET /api/classes/{class_id}/assessments`
 - `GET /api/assessments/{assessment_id}`
 - `GET|DELETE /api/study-materials/{material_id}`
+- `GET /api/study-materials/{material_id}/files/{format}` (`pdf` or `latex`)
+- `POST|GET /api/uploads/{upload_id}/document`
+- `GET /api/uploads/{upload_id}/document/files/{format}` (`pdf`, `latex`, or `original_text`)
 - `POST /api/study-materials/{material_id}/attempts`
 - `POST /api/study-materials/{material_id}/flags`
 
@@ -86,9 +91,13 @@ If `class_id` is supplied, the backend checks ownership in SQLite and builds cla
 
 The browser may select `mode: "check_steps"` when requesting a ticket. Omitted mode defaults to `conversation`. This selects a predefined backend coaching policy; it accepts no client instructions or additional permissions. The mode is bound to the one-use ticket and fixed for that connection. End the session before changing it.
 
-In coaching mode, the tutor follows the student's spoken steps and available screen frames, using ready class materials when supplied. At a speech pause it identifies a clear error, gives one short corrective hint, and requests a mark only when the affected step is visible. It asks for clarification when the speech, screen, or notes are ambiguous, avoids solving the remaining problem, and lets the student continue. It does not guarantee error detection or interruption during uninterrupted speech.
+In coaching mode, the tutor checks the shared screen automatically, including when the microphone is off and the student has not asked a question. A server task submits the latest stable snapshot for review through the same Live connection at most once every five seconds. It skips unchanged snapshots, stale or paused sharing, active student speech, and an unfinished model turn. After feedback, it waits ten seconds before another automatic review. A bounded set of image hashes suppresses duplicate reviews; images and hashes remain in active session memory only.
 
-Automatic speech detection uses a 900 ms silence window in this mode to allow short thinking pauses. Student speech can still interrupt tutor output; the existing `interrupted` event clears browser playback. Coaching adds no recordings, stored transcripts, extra model connections, or new tools. Normal conversation retains its existing speech detection configuration. See [Live speech detection configuration](https://ai.google.dev/gemini-api/docs/live-api/capabilities#automatic-vad-configuration).
+The fixed review instruction permits a brief spoken hint only for a clear mistake in a completed, readable step. Correct, incomplete, or ambiguous work should produce silence. The tutor avoids repeating an earlier warning or solving the remaining problem. Check my steps enables the Live provider's proactive-audio configuration so it can abstain from responding. The Live SDK client uses the documented `v1beta` endpoint; the separate content-generation client retains its existing configuration. No Flash evaluator or additional model connection is used for screen checks.
+
+Student questions take priority over automatic checks. Student speech can interrupt playback, and automatic reviews wait for a pause rather than speaking over uninterrupted speech. If a reviewed image changes or sharing stops before feedback finishes, the backend suppresses remaining automatic feedback and rejects its visual marks. Review annotations reference the exact reviewed frame. An unfinished review blocks further checks until completion; all review tasks and memory are cleared on disconnect or Reset memory. Error detection and silence remain model judgments, not guarantees.
+
+Automatic speech detection uses a 900 ms silence window in this mode to allow short thinking pauses. Provider voice-activity events and a bounded PCM energy check prevent automatic reviews during speech; microphone silence alone does not block screen checks. The existing `interrupted` event clears browser playback. Coaching adds no browser protocol events, recordings, stored transcripts, extra model connections, or new tools. Normal conversation retains its existing speech detection configuration. See [Live speech detection and proactive audio](https://ai.google.dev/gemini-api/docs/live-api/capabilities).
 
 ### Class Tutor integration
 
@@ -147,6 +156,26 @@ Background jobs are in-process for the hackathon build. On startup, the single b
 
 ## Quiz Generation Integration for the Frontend Agent
 
+### Saved study-guide documents
+
+Every newly generated study guide saves structured JSON, a LaTeX `.tex` file, and a compiled PDF. SQLite's `study_material_files` table stores file bytes privately under the material ID. Content and files commit together before the guide becomes `ready`. PDFs include a title, reference ID, contents, numbered sections, key terms, and source references with page/slide/timestamp locators. Ready guide detail includes `download_urls.pdf` and `download_urls.latex`, pointing to `/api/study-materials/{id}/files/pdf` and `/files/latex`. Downloads check app policy, ownership, kind, and readiness, and return attachments with private/no-store headers. Existing guides export from stored content on first download without another Gemini request. Deletion cascades to files.
+
+Run `backend/.venv/bin/python backend/scripts/install-study-pdf.py` once. It installs pinned Tectonic under ignored `backend/.local/`, checks its release checksum, and warms packages/fonts with synthetic content. Compilation then uses cached resources offline, server-owned templates, escaped text, allow-listed math, `--untrusted`, a timeout, serialized compilation, and bounded output. Malformed equations fall back to literal notation without discarding valid guide content. Arbitrary model-generated TeX programs are never executed. Tectonic is an external runtime dependency, separate from Python requirements. See [Tectonic installation](https://tectonic-typesetting.github.io/en-US/install.html).
+
+### Upload companion documents
+
+Every successfully extracted upload (including pasted notes, scans/images, documents, syllabi, slides, lecture transcripts, and imported tests) automatically starts a **balanced** companion. Upload readiness is independent; a companion failure cannot block other study generation or overwrite original files/text, transcripts, assessment results, or syllabi. Companion PDFs have separate explanation sections and a **full original extracted-text appendix**, with a verbatim UTF-8 source-text download as well. Extraction may miss visual details; the original file remains authoritative and available.
+
+`upload_documents` caches `concise`, `balanced`, and `detailed` versions independently. Every 40,000-character source chunk is analyzed; later pages are never silently truncated. Prompts require source facts, quantities, dates, notation, and uncertainty to be preserved, and every section must cite the actual upload ID. Validated JSON, PDF, LaTeX, and a full source snapshot persist in SQLite. Job IDs and source revisions prevent stale jobs from replacing later edits or retries. Source text/kind/title changes invalidate companions; upload/class deletion cascades them. Startup marks interrupted companion jobs failed and preserves completed documents.
+
+| Endpoint | Contract |
+| --- | --- |
+| `GET /api/uploads/{id}/document?detail_level=balanced` | Ownership checked. Returns `upload_id`, `detail_level`, `status`, `progress`, `content`, `failure_code`, `download_urls`. Status: `not_created`, `generating`, `ready`, `failed`. Ready content: `format: upload_document`, selected `detail_level`, and `sections` with heading/body/key_terms/sources. |
+| `POST /api/uploads/{id}/document` | JSON `{ "detail_level": "concise" }`, balanced default, HTTP 202. Creates missing/retries failed versions; reuses ready/generating ones. Requires ready source, available services, allowed origin, and generation rate limit. Poll GET sequentially. |
+| `GET /api/uploads/{id}/document/files/{format}?detail_level=balanced` | Downloads saved `pdf`, `latex`, or `original_text`; returns 409 until ready. Checks app policy and ownership. |
+
+Upload detail additionally includes balanced `document` state. The Library preview refreshes detail, shows separate Study document / Original file / Original text views, and offers detail selection, downloads, and retry. Existing uploads create companions on first open. Changing levels or closing stops client polling while the server saves requested versions. Generation and tutor grounding continue using original extracted sources.
+
 ### SQLite access and existing browser data
 
 Class-library APIs require a logged-in account: the browser sends the HttpOnly `jot_session` cookie automatically on same-origin requests, and a missing or ended session returns `401 authentication_required`. Browser mutations must carry an allowed `Origin`; a normal same-origin browser `fetch` supplies it. The backend derives the owner from the session and never accepts a client-supplied owner.
@@ -162,6 +191,8 @@ Before requesting generation, the frontend must reconcile its browser-only recor
 3. Send multipart `file` with optional `kind` and `title`, or multipart `text`, `kind`, and `title` for pasted notes. File kinds are `notes`, `document`, `syllabus`, `slides`, `lecture_audio`, and `lecture_video`; text uploads accept only `notes`, `document`, or `syllabus`. Do not set a JSON `Content-Type` on multipart requests.
 4. Persist the returned upload UUID mapping immediately and reuse it on retries. Poll `GET /api/uploads/{upload_id}` until every selected upload is `ready`; `failed` requires an error and the existing retry action. Browser-only upload metadata does not establish backend readiness.
 5. Generate using those backend IDs. During migration, prefer an explicit `uploads` scope containing the uploads currently selected in the UI, so removed local sources do not reappear through an older backend copy. An `all` scope includes only uploads already ready on the backend and silently excludes processing or failed uploads.
+
+The Study tab now replaces the coarse scope dropdown with a checklist of actual uploaded filenames, kinds, and statuses. Students can select one file or any combination, or use Select all, Clear, Notes only, and Syllabus only shortcuts. The client passes explicit local IDs as `selectedUploadIds` to `prepareStudySources()`; only selected originals are synchronized and polled, then their deduplicated backend UUIDs become `scope.upload_ids`. Empty or stale selections never widen to the whole class. An unselected failed upload cannot block generation. No new HTTP endpoint or request field is needed: the existing `uploads` scope already validates class membership and readiness and restricts both generation context and citations to the selected uploads. Saved material cards retain the selected source filenames.
 
 ### Generation request and completion
 
@@ -215,7 +246,7 @@ Short-answer scoring always accepts the canonical answer as well as the generate
 | `invalid_request` / `invalid_options` | Correct field names, option ranges, and format-specific options. |
 | `content_processing_unavailable` / `database_unavailable` | Show the service error and offer retry; retain existing local source files. |
 
-Removing the generation token gate alone is insufficient for existing browser-only classes: their class IDs and upload IDs must be reconciled first. The implemented generation path performs that reconciliation, respects the whole-class/notes/syllabus source selector, persists pending generation IDs, and polls sequentially. Navigation stops client polling while the server job remains available through its saved ID. The Library preview, retry, and delete actions resolve mapped upload IDs; retry polling persists processing status. Generation and scoring failures show an error and retain recoverable state instead of inventing questions or scores.
+Removing the generation token gate alone is insufficient for existing browser-only classes: their class IDs and upload IDs must be reconciled first. The implemented generation path performs that reconciliation, respects the individual upload checklist and selection shortcuts, persists pending generation IDs, and polls sequentially. Navigation stops client polling while the server job remains available through its saved ID. The Library preview, retry, and delete actions resolve mapped upload IDs; retry polling persists processing status. Generation and scoring failures show an error and retain recoverable state instead of inventing questions or scores.
 
 Existing local drafts remain labeled as local drafts; generate a new material from the real sources to replace them. Remote quizzes are rendered by the quiz player and scored through the attempts endpoint. The application callback updates a material by its backend ID, so its transition from `generating` to `ready` does not create duplicate saved entries.
 

@@ -137,6 +137,10 @@ async def recover_interrupted_jobs(database: SQLiteDatabase) -> None:
     async with database.acquire() as connection:
         async with connection.transaction():
             await connection.execute(
+                "UPDATE upload_documents SET status = 'failed', failure_code = 'generation_interrupted', "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE status = 'generating'"
+            )
+            await connection.execute(
                 "UPDATE uploaded_assessments SET processing_status = 'failed', "
                 "failure_code = 'processing_interrupted', "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "

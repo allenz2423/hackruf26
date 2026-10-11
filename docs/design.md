@@ -63,7 +63,7 @@ Students can also upload their own course materials (notes, documents, syllabi, 
 - Use marks sparingly; each one should clarify a spoken explanation.
 - When the student explicitly asks for a mark on a clearly visible target, place it rather than only describing it.
 - If a location cannot be identified confidently, describe it (“the second line under the graph”) or ask the student instead of inventing a precise mark.
-- Optional **Check my steps** mode follows a student's spoken solution and gives a short corrective hint at a pause when a clear mistake is identified. Use the available class notes and screen, ask when uncertain, and let the student continue without giving away the full solution. Feedback can miss errors; interruption during uninterrupted speech is not guaranteed.
+- Optional **Check my steps** mode checks the shared screen automatically and speaks a short corrective hint when it identifies a clear mistake, without requiring a question or microphone input. It also follows spoken walkthroughs, waiting for a pause before feedback. Use available class notes, allow time for a correction, and stay quiet for correct, incomplete, or unclear work during automatic checks. Feedback can miss errors; interruption during uninterrupted speech is not guaranteed.
 
 ### Session controls
 
@@ -101,7 +101,9 @@ The app keeps the original file and the extracted text or transcript. The studen
 - Say when the notes don't cover something rather than presenting outside knowledge as if it came from the notes.
 - Keep classes separate: a Math session doesn't use Biology notes.
 
-**Generated study materials.** Materials are generated only from selected source material in the current class, such as notes or uploaded tests (or a chosen subset):
+**Upload study documents.** Keep the full original uploaded file and extracted text intact. Each processed upload also gets a separate study explanation, with concise, balanced, and detailed versions. Students can switch between the original file, original text, and explanation, and download a saved PDF or LaTeX document. Companion PDFs include the full extracted source text in a separate appendix. AI explanations preserve source facts and identify uncertainty; the original file remains available for checking visual details and extraction errors.
+
+**Generated study materials.** Materials are generated only from selected source material in the current class, such as notes or uploaded tests (or a chosen subset). Study guides persist as both structured content and downloadable LaTeX/PDF files for future reference:
 
 | Type | Contents | Options |
 | --- | --- | --- |

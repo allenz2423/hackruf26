@@ -31,6 +31,18 @@ FastAPI owns the Gemini API key, model configuration, Live sessions, and model t
 
 The API listens on port 8000. A Vite development server can proxy `/api` to it. If `frontend/dist` exists, FastAPI serves it from the same origin. Original course files are stored privately under `backend/.local/private_uploads` by default; use persistent private storage for both that directory and the SQLite database file when deploying this single-instance implementation. Back up both together. SQLite is configured for one backend process; move to a shared database before running multiple workers or instances.
 
+## Saved PDF documents
+
+Install the pinned local LaTeX engine and cache its template dependencies once:
+
+```bash
+backend/.venv/bin/python backend/scripts/install-study-pdf.py
+```
+
+The installer checks release checksums and places Tectonic under ignored `backend/.local/bin/`. Setup needs internet access; normal compilation uses cached packages offline. Alternatively install [Tectonic](https://tectonic-typesetting.github.io/en-US/install.html) yourself and set `STUDY_PDF_EXECUTABLE`. This runtime dependency is separate from Python requirements. `STUDY_PDF_TIMEOUT_SECONDS` defaults to 60.
+
+Study guides save PDF and LaTeX files. Every processed upload also gets a balanced study companion, with concise/detailed variants available on request. Companion PDFs include full extracted source text in a separate appendix; originals remain untouched. SQLite stores document/file bytes and deletes them with their parent records. Back up SQLite alongside private originals.
+
 ## Regression checks
 
 From the repository root, run the isolated calculator/Lean argument, quiz-scoring, and processing-lifecycle tests:
@@ -80,6 +92,9 @@ In production, also configure a strong `DEMO_GATE_TOKEN` to protect session-tick
 - `GET /api/classes/{class_id}/assessments`
 - `GET /api/assessments/{assessment_id}`
 - `GET|DELETE /api/study-materials/{material_id}`
+- `GET /api/study-materials/{material_id}/files/{format}` (`pdf`, `latex`)
+- `GET|POST /api/uploads/{upload_id}/document` (concise, balanced, detailed)
+- `GET /api/uploads/{upload_id}/document/files/{format}` (`pdf`, `latex`, `original_text`)
 - `POST /api/study-materials/{material_id}/attempts`
 - `POST /api/study-materials/{material_id}/flags`
 

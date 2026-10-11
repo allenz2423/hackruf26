@@ -102,12 +102,21 @@ The local SQLite workspace calls class/upload APIs without an access-token prere
 - **Saved materials list:** every generated item with type, scope, date, and last score. The student can open, retake, regenerate, or delete it.
 - **Quiz / practice test player:** one question at a time or full-page mode, multiple-choice, true/false, and short/free-response inputs, an optional timer for practice tests, and Submit. The results page shows the score, correct answers, explanations, and source links (page/slide number or lecture timestamp that opens the upload detail view). Each missed question has **Ask the tutor**, which opens the Tutor tab with that question as context.
 - **Study guide view:** rendered headings, key terms, formulas (use KaTeX or MathJax for math), and source links; printable.
+- **Saved guide files:** remote guides offer Download PDF and Download LaTeX. Files remain saved with the guide; older guides export from stored content on first download. Practice tests display their generated instructions above the assessment form.
 - **Flashcards view:** flip card with keyboard support (Space to flip, arrows to move), “Got it” / “Study again” sorting, and shuffle.
 - **AI-generated label and Flag:** every generated item is labeled as AI-generated, and each question or card has a Flag as wrong action.
 
+### Upload document preview
+
+Each processed upload automatically receives a balanced study companion. The preview shows separate **Study document**, **Original file**, and **Original text** views. Original files and complete extracted text remain intact. Study document offers **Concise**, **Balanced**, and **Detailed** explanations, cached independently, plus PDF, LaTeX, and verbatim source-text downloads. PDFs separate the explanation from a full original extracted-text appendix.
+
+Refresh upload detail for current state and a fresh signed original URL. Poll `GET /api/uploads/{id}/document?detail_level=...` sequentially; create missing/retry failed versions with `POST /api/uploads/{id}/document` and `{detail_level}`. Show progress/errors and Retry document independently from extraction status. Closing or switching levels aborts client polling without cancelling the server job. Existing uploads create companions on first open. Original previews use signed backend URLs if IndexedDB lacks a copy. See the backend design for the full contract.
+
 ### SQLite study generation integration
 
-Class-library calls use same-origin HTTP without requiring a bearer token in local SQLite mode. Before generation, `course-sync.js` maps browser-only class and upload records to backend UUIDs, retrieves original files from IndexedDB (or uses pasted source text), submits the selected sources, and waits for their backend processing status to be `ready`. Local IDs remain stable for routing and file previews; backend UUIDs are persisted as `backendId` fields. The source selector currently supports whole class, notes only, and syllabus only.
+Class-library calls use same-origin HTTP without requiring a bearer token in local SQLite mode. The Study tab refreshes backend uploads without replacing their browser IDs or local files. A source checklist shows each filename, kind, and processing status, with Select all, Clear, Notes only, and Syllabus only shortcuts. All uploads are initially selected; students can select any individual upload or combination. A live count summarizes the selection, and generation is disabled when nothing is selected. Choices survive returning from a saved quiz or flashcard player and are locked while generation runs.
+
+Before generation, `course-sync.js` accepts the explicit browser IDs as `selectedUploadIds`, validates that they still belong to the class, maps only those records to backend UUIDs, retrieves their original files from IndexedDB (or uses pasted source text), and waits only for those uploads to be `ready`. Empty or stale explicit selections fail without falling back to the whole class. Unselected uploads are neither submitted nor polled. Local IDs remain stable for routing and file previews; backend UUIDs are persisted as `backendId` fields. Saved generated materials show their selected source filenames.
 
 Study generation submits an explicit upload scope, keeps the returned pending material ID, and polls status sequentially. Pending and failed items remain visible for recovery; generation errors do not create template quizzes. Navigation stops client polling without claiming to cancel the server job. Old browser-only templates remain labeled as local drafts.
 

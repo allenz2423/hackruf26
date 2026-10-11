@@ -76,7 +76,18 @@ function fileKind(upload, file) {
   return null; // Let the backend infer an unknown file kind from its filename.
 }
 
-function selectedUploads(klass, scope) {
+export function selectStudyUploads(klass, { scope = "all", selectedUploadIds } = {}) {
+  if (selectedUploadIds !== undefined) {
+    if (!Array.isArray(selectedUploadIds) || !selectedUploadIds.length) {
+      throw new Error("Select at least one uploaded material.");
+    }
+    const ids = new Set(selectedUploadIds);
+    const uploads = klass.uploads.filter((upload) => ids.has(upload.id));
+    if (uploads.length !== ids.size) {
+      throw new Error("A selected material is no longer in this class. Choose your sources again.");
+    }
+    return uploads;
+  }
   if (scope === "notes") {
     return klass.uploads.filter((upload) => String(upload.kind).toLowerCase() === "notes");
   }
@@ -110,8 +121,8 @@ async function prepareBackendClass(klass, { signal } = {}) {
 }
 
 /** Reconcile browser-only sources with SQLite before requesting generation. */
-export async function prepareStudySources(klass, { scope = "all", signal, onProgress } = {}) {
-  const uploads = selectedUploads(klass, scope);
+export async function prepareStudySources(klass, { scope = "all", selectedUploadIds, signal, onProgress } = {}) {
+  const uploads = selectStudyUploads(klass, { scope, selectedUploadIds });
   if (!uploads.length) {
     throw new Error("Add course material matching the selected scope in the Library tab first.");
   }
@@ -156,7 +167,7 @@ export async function prepareStudySources(klass, { scope = "all", signal, onProg
     }
     uploadIds.push(detail.id);
   }
-  return { classId, uploadIds };
+  return { classId, uploadIds: [...new Set(uploadIds)] };
 }
 
 /** Prepare the class UUID and actual notes before opening its Live connection. */

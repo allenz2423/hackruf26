@@ -983,6 +983,75 @@ main {
 
 /* Study */
 
+.generate-fields {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.study-source-picker {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.study-source-picker legend {
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.source-picker-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-block: var(--space-2);
+}
+
+.study-source-list {
+  display: grid;
+  max-height: 280px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.study-source-option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-height: 52px;
+  padding: var(--space-3);
+  cursor: pointer;
+}
+
+.study-source-option + .study-source-option {
+  border-top: 1px solid var(--line);
+}
+
+.study-source-option:has(input:checked) {
+  background: var(--primary-soft);
+}
+
+.study-source-option input {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin-top: 3px;
+}
+
+.study-source-info {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+  overflow-wrap: anywhere;
+  font-size: 0.875rem;
+}
+
+.study-source-picker:disabled .study-source-option {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .study-grid {
   display: grid;
   grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
@@ -1843,6 +1912,10 @@ main {
   overflow: auto;
   padding: var(--space-4);
   overscroll-behavior: contain;
+}
+
+.preview-content [hidden] {
+  display: none !important;
 }
 
 .preview-footer {
