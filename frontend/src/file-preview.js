@@ -3,7 +3,7 @@ import { getUploadedFile } from "./file-store.js";
 import { escapeHtml, formatBytes, toast } from "./ui.js";
 import { getBackendUploadId } from "./course-sync.js";
 import { getUploadDetailApi, getUploadDocumentApi, createUploadDocumentApi, downloadUploadDocumentApi } from "./api.js";
-import { formatSourceCitation } from "./flashcards.js";
+import { formatSourceCitation } from "./source-citations.js";
 
 const MAX_TEXT_PREVIEW = 2 * 1024 * 1024;
 
@@ -64,7 +64,21 @@ export async function readWordDocument(file) {
   ).filter(Boolean).join("\n\n");
 }
 
-function renderFilePreview(dialog, file) {
+function locateOriginal(container, citation) {
+  const media = container.querySelector("audio, video");
+  if (media && Number.isFinite(citation?.timestamp_seconds) && citation.timestamp_seconds >= 0) {
+    const seek = () => { media.currentTime = Math.min(citation.timestamp_seconds, media.duration || citation.timestamp_seconds); };
+    if (media.readyState >= 1) seek();
+    else media.addEventListener("loadedmetadata", seek, { once: true });
+  }
+}
+
+export function citedPdfUrl(url, citation) {
+  return Number.isInteger(citation?.page) && citation.page > 0
+    ? `${url.split("#")[0]}#page=${citation.page}` : url;
+}
+
+function renderFilePreview(dialog, file, citation) {
   const content = dialog.querySelector("#preview-original") || dialog.querySelector("#preview-content");
   const footer = dialog.querySelector("#preview-footer");
   const extension = extensionOf(file.name);
@@ -73,7 +87,7 @@ function renderFilePreview(dialog, file) {
   footer.innerHTML = `<a class="btn btn-secondary" href="${url}" download="${escapeHtml(file.name)}">Download original</a>`;
 
   if (extension === "pdf") {
-    content.innerHTML = `<iframe class="document-frame" src="${url}" title="${escapeHtml(file.name)}"></iframe>`;
+    content.innerHTML = `<iframe class="document-frame" src="${escapeHtml(citedPdfUrl(url, citation))}" title="${escapeHtml(file.name)}"></iframe>`;
   } else if (["png", "jpg", "jpeg"].includes(extension)) {
     content.innerHTML = `<img class="image-preview" src="${url}" alt="Preview of ${escapeHtml(file.name)}" />`;
   } else if (["mp4", "webm", "mov"].includes(extension)) {
@@ -91,9 +105,10 @@ function renderFilePreview(dialog, file) {
     readPowerPoint(file).then((text) => setTextPreview(content, text || "No slide text was found in this presentation."))
       .catch(() => setTextPreview(content, "This PowerPoint file could not be read in the preview. Download the original file to open it."));
   }
+  locateOriginal(content, citation);
 }
 
-export async function openUploadPreview(upload) {
+export async function openUploadPreview(upload, { citation = null, initialView = "document" } = {}) {
   const dialog = makeDialog(upload);
   const content = dialog.querySelector("#preview-content");
   const backendId = getBackendUploadId(upload);
@@ -136,20 +151,23 @@ export async function openUploadPreview(upload) {
     dialog.addEventListener("close", () => controller?.abort(), { once: true });
     setTextPreview(textPanel, upload.content || "The original extracted text is not available yet.");
 
-    content.querySelectorAll("[data-preview-view]").forEach((button) => button.addEventListener("click", () => {
-      const view = button.dataset.previewView;
+    let documentLoaded = false;
+    function selectView(view) {
       documentPanel.hidden = view !== "document";
       original.hidden = view !== "original";
       textPanel.hidden = view !== "text";
       content.querySelectorAll("[data-preview-view]").forEach((item) => {
-        const active = item === button;
+        const active = item.dataset.previewView === view;
         item.setAttribute("aria-pressed", String(active));
         item.classList.toggle("btn-primary", active);
         item.classList.toggle("btn-secondary", !active);
       });
-    }));
+      if (view === "document" && !documentLoaded) void showDocument();
+    }
+    content.querySelectorAll("[data-preview-view]").forEach((button) => button.addEventListener("click", () => selectView(button.dataset.previewView)));
 
     async function showDocument() {
+      documentLoaded = true;
       controller?.abort();
       const currentController = new AbortController();
       controller = currentController;
@@ -223,13 +241,13 @@ export async function openUploadPreview(upload) {
       } catch (error) { toast(error.message, { tone: "error" }); }
       finally { downloading = false; buttons.forEach((item) => { item.disabled = false; }); }
     }));
-    void showDocument();
+    selectView(initialView);
     const file = upload.file || await getUploadedFile(upload.id).catch(() => null);
     if (!dialog.open) return;
-    if (file) renderFilePreview(dialog, file);
+    if (file) renderFilePreview(dialog, file, citation);
     else if (upload.fileUrl) {
       const extension = extensionOf(upload.originalFilename || upload.name);
-      const url = escapeHtml(upload.fileUrl);
+      const url = escapeHtml(extension === "pdf" ? citedPdfUrl(upload.fileUrl, citation) : upload.fileUrl);
       dialog.querySelector("#preview-footer").innerHTML = `<a class="btn btn-secondary" href="${url}" download>Download original</a>`;
       if (extension === "pdf") original.innerHTML = `<iframe class="document-frame" src="${url}" title="${escapeHtml(upload.name)}"></iframe>`;
       else if (["png", "jpg", "jpeg"].includes(extension)) original.innerHTML = `<img class="image-preview" src="${url}" alt="${escapeHtml(upload.name)}" />`;
@@ -237,11 +255,18 @@ export async function openUploadPreview(upload) {
       else if (["mp3", "m4a", "wav"].includes(extension)) original.innerHTML = `<audio class="audio-preview" src="${url}" controls></audio>`;
       else setTextPreview(original, upload.content || "Download the original file to open it.");
     } else setTextPreview(original, upload.content || "No original file is available yet.");
+    locateOriginal(original, citation);
+    if (citation) {
+      const label = document.createElement("p");
+      label.className = "field-hint";
+      label.textContent = `Source reference: ${formatSourceCitation(citation)}`;
+      original.prepend(label);
+    }
     return;
   }
 
   if (upload.file) {
-    renderFilePreview(dialog, upload.file);
+    renderFilePreview(dialog, upload.file, citation);
     return;
   }
 
@@ -258,7 +283,7 @@ export async function openUploadPreview(upload) {
       setTextPreview(content, "The file contents are no longer available in this browser. Remove this entry and upload the file again to preview it.");
       return;
     }
-    renderFilePreview(dialog, file);
+    renderFilePreview(dialog, file, citation);
   } catch {
     if (dialog.open) setTextPreview(content, "The saved file could not be opened. Try uploading it again.");
   }

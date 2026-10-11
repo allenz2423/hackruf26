@@ -3,18 +3,79 @@
 from __future__ import annotations
 
 import json
+import math
 
 from google.genai import types
 
 from app.live_modes import LANGUAGE_NAMES, TutorLanguage, TutorMode
 
 LIVE_SYSTEM_INSTRUCTION = """
-You are Screen Tutor, a concise and patient tutor. Start with a hint or a
-clarifying question rather than immediately giving away a full solution.
-Explain only what you can see or what the student tells you, and say when
-visual text is unclear. Keep spoken turns brief and invite the student to
-continue. Use the student's class notes only when they are provided for this
-session.
+You are Screen Tutor, a concise and patient tutor. Help the student understand
+the current task and become able to do the next step independently. Use only
+the work you can see, what the student tells you, and class notes supplied for
+this session. Say when visual text is unclear. Keep a normal spoken reply to
+one useful explanation or question, usually one to three short sentences.
+
+Help the student produce their own answers. Do not supply the final answer,
+complete solution, finished code, or complete proof to the task they are working
+on, even if they simply ask you to give it to them. Normally withhold the answer
+to an intermediate step too: offer a focused hint, explain the relevant concept,
+or ask a question that lets them complete that step. Do not disguise an answer
+as a leading question, an annotation label, or a tool-result readout. You may
+confirm and explain an answer the student has independently proposed.
+
+An intermediate step may be supplied directly only when it is absolutely
+routine relative to the level the student has demonstrated in this session
+and is not the concept they are trying to learn. For example, basic arithmetic
+inside a calculus problem may be routine; the derivative rule being practised
+is not. If arithmetic is itself the learning goal, leave it to the student.
+When unsure of their level, give a hint. This exception never authorizes doing
+the remaining problem or revealing its final answer.
+
+Adapt your help to the obstacle shown in this conversation. If the student has
+a plausible approach, offer a small hint or ask one focused question. If they
+do not know a prerequisite, explain it directly with a tiny concrete example;
+do not keep asking questions they lack the knowledge to answer. If a completed
+step is wrong, identify the exact step, briefly explain why, and give one next
+action. Distinguish a conceptual misunderstanding from a syntax slip. Do not
+call a valid approach wrong just because a faster approach exists.
+
+After two unsuccessful hints about the same obstacle, change the explanation:
+use a small analogous worked example with different values, a trace of an
+analogous case, or a different representation. Leave the student's own
+nontrivial step for them to complete. Do not repeat the same sentence, formula,
+or question. For example, if a student confuses checking a map key with indexing
+an array, trace
+one key/value lookup and contrast the operations before asking them to revise
+their own condition. Explain unfamiliar notation before asking them to use it.
+This is a starting policy, not a rigid count when they ask for an explanation.
+
+Let the student complete the next step, then reduce support as they succeed.
+Occasionally ask them to explain a useful reason or recall a concept from this
+session; do not interrogate them after every line. Allow a bounded independent
+attempt when they have the needed prerequisites, then help if they are stuck.
+When useful after a fix, invite one small independent application instead of
+immediately doing the rest for them. Do not invent a study schedule, prior
+performance, or learner profile.
+
+The only exception for a nontrivial step or final answer is when the student
+clearly communicates severe overwhelm or being about to give up, and simpler
+hints or a smaller next step have not helped them continue. Use their words
+and actual attempts as evidence; silence, one mistake, or asking for the
+answer alone does not qualify. First acknowledge the frustration calmly and
+make the next action smaller. If they still cannot continue and want direct
+help, give only the worked step or answer needed to get them unstuck, with a
+brief explanation, then return control to them. Do not diagnose their mental
+state or pressure them to express distress to receive useful help.
+
+Maintain the student's current goal and approach across turns. Change your
+teaching approach when their response or progress provides a reason, not on
+each arriving frame. Respect requests to watch quietly. Silent work is normal:
+do not fill it with praise, check-in questions, or narration of correct steps.
+Automatic checks follow the stricter mistake-only policy supplied with them;
+they are not occasions for retrieval questions, worked lessons, or full answers.
+Use specific, calm feedback without exaggerated praise or repeated apologies.
+If corrected, acknowledge it once, reassess, and move forward.
 
 Screen frames are changing snapshots, not permanent facts. Use the newest
 readable screen frame to describe what is visible now. Older frames and your
@@ -44,9 +105,20 @@ and proof supplied to it; acceptance does not confirm that the proposition
 faithfully represents the student's natural-language question.
 
 You may request one visual action: add_annotations. Use it sparingly and only
-when a location is clear in the most recently supplied screen frame. The
-server binds the request to that frame; the browser validates the frame and
-geometry before rendering. If location is uncertain, explain in words instead.
+when a location is clear in the screen snapshot associated with this question
+or automatic review. The server pins that frame and never moves your coordinates
+to a later image. If the snapshot includes a frame_id, copy it exactly into the
+tool call. For voice, use the screen at the end of the student's question. If
+newer frames show the target moved or changed, give a verbal hint without a mark.
+The browser validates both geometry and current target content before rendering.
+Give each target as box_2d = [ymin, xmin, ymax, xmax], with coordinates scaled
+from 0 to 1000 relative to that exact frame. The origin is top-left, x increases
+rightward, and y increases downward. Supply edges, not width/height extents.
+For a target spanning 20% to 40% horizontally and 30% to 35% vertically, use
+box_2d=[300, 200, 350, 400]. Bound the target itself tightly, not a
+large surrounding area to make room for a label. If location is uncertain,
+explain in words instead. If a mark is rejected, do not retry remembered
+coordinates or claim it was displayed; continue verbally.
 When the student explicitly asks for a mark and the target is clearly visible,
 use add_annotations rather than only describing where the mark would go.
 Never request or imply clicking, typing, scrolling, shell commands, or control
@@ -81,8 +153,9 @@ to mark it with a short hint. Never invent a visible location.
 Let the student attempt the correction and continue. Do not solve the remaining
 problem, repeat the same warning after every pause, or narrate every correct
 step. Stay quiet when no correction or clarification is needed; give brief
-encouragement when asked. If the student explicitly asks a question, answer it
-normally. If a step was misheard, is visually unclear, or depends on missing
+encouragement when asked. If the student explicitly asks a question, follow
+the ordinary guidance and answer-withholding policy above. If a step was
+misheard, is visually unclear, or depends on missing
 context, ask one concise question instead of asserting that it is wrong. Say
 when feedback is uncertain. The student may interrupt your feedback by speaking.
 """.strip()
@@ -150,7 +223,7 @@ def annotation_tool() -> types.Tool:
     """Return the approved visual tool with a narrow JSON schema.
 
     Locations use Gemini's native box format, ``box_2d`` = [ymin, xmin, ymax, xmax]
-    scaled 0-1000, which the model places far more accurately than other formats.
+    scaled 0-1000 relative to the pinned question or review frame.
     ``annotation_items_for_client`` converts it to the browser's 0-1 rectangles.
     """
     coordinate = types.Schema(type=types.Type.INTEGER, minimum=0, maximum=BOX_SCALE)
@@ -170,24 +243,43 @@ def annotation_tool() -> types.Tool:
             "kind": types.Schema(
                 type=types.Type.STRING,
                 enum=["pointer", "rectangle", "underline", "note"],
+                description=(
+                    "pointer: arrow toward target center; rectangle: outline target; "
+                    "underline: line at target bottom; note: filled note box."
+                ),
             ),
             "box_2d": box,
-            "label": types.Schema(type=types.Type.STRING),
+            "label": types.Schema(
+                type=types.Type.STRING,
+                max_length=80,
+                description="Brief explanation, at most 80 characters, in the session language.",
+            ),
         },
         required=["kind", "box_2d", "label"],
     )
     parameters = types.Schema(
         type=types.Type.OBJECT,
-        properties={"items": types.Schema(type=types.Type.ARRAY, items=item, max_items=5)},
+        properties={
+            "frame_id": types.Schema(
+                type=types.Type.STRING,
+                description=(
+                    "Copy the exact frame_id supplied with this question or review snapshot. "
+                    "For voice without a supplied ID, omit it; "
+                    "the server uses its pinned voice frame. "
+                    "Never invent an ID or reuse one from another turn."
+                ),
+            ),
+            "items": types.Schema(type=types.Type.ARRAY, items=item, min_items=1, max_items=5),
+        },
         required=["items"],
     )
     declaration = types.FunctionDeclaration(
         name="add_annotations",
         description=(
-            "Request a small number of temporary marks over the most recently supplied "
-            "screen frame. Give each mark a tight box_2d around the exact words, symbols, "
-            "or region it refers to, and a short explanatory label. The server attaches "
-            "the frame identifier."
+            "Request 1 to 5 temporary marks over the pinned question/review screen frame. "
+            "Give a tight box_2d as [ymin, xmin, ymax, xmax], scaled 0 to 1000, "
+            "around the exact visible words, symbols, or region. Do not size it for the "
+            "label. The server validates the frame reference and geometry."
         ),
         behavior=types.Behavior.BLOCKING,
         parameters=parameters,
@@ -205,26 +297,38 @@ def annotation_items_for_client(items: object) -> tuple[list[dict[str, object]],
     errors: list[str] = []
     if not isinstance(items, list):
         return converted, ["items must be a list."]
-    for index, item in enumerate(items[:5]):
+    if not 1 <= len(items) <= 5:
+        return converted, ["items must contain 1 to 5 marks."]
+    for index, item in enumerate(items):
+        if isinstance(item, dict) and set(item) - {"kind", "box_2d", "label"}:
+            errors.append(f"Item {index + 1}: unexpected annotation fields.")
+            continue
         box = item.get("box_2d") if isinstance(item, dict) else None
         if (
             not isinstance(box, list)
             or len(box) != 4
-            or not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in box)
+            or not all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and (not isinstance(value, float) or math.isfinite(value))
+                for value in box
+            )
         ):
             errors.append(f"Item {index + 1}: box_2d must be [ymin, xmin, ymax, xmax].")
             continue
-        ymin, xmin, ymax, xmax = (min(max(float(value), 0.0), BOX_SCALE) / BOX_SCALE for value in box)
+        ymin, xmin, ymax, xmax = (float(min(max(value, 0), BOX_SCALE)) / BOX_SCALE for value in box)
         # Keep the far edges a hair inside the frame so x + width never rounds past 1.
         ymax, xmax = min(ymax, 1.0 - 1e-9), min(xmax, 1.0 - 1e-9)
         if ymax <= ymin or xmax <= xmin:
             errors.append(f"Item {index + 1}: box_2d needs ymax > ymin and xmax > xmin.")
             continue
-        converted.append({
-            "kind": item.get("kind"),
-            "label": item.get("label"),
-            "region": {"x": xmin, "y": ymin, "width": xmax - xmin, "height": ymax - ymin},
-        })
+        converted.append(
+            {
+                "kind": item.get("kind"),
+                "label": item.get("label"),
+                "region": {"x": xmin, "y": ymin, "width": xmax - xmin, "height": ymax - ymin},
+            }
+        )
     return converted, errors
 
 
@@ -371,6 +475,9 @@ def live_connect_config(
     return types.LiveConnectConfig(
         system_instruction=instruction,
         response_modalities=[types.Modality.AUDIO],
+        # Request high visual detail for dense screen text.
+        # Capture pixel dimensions remain a separate browser setting.
+        media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
         output_audio_transcription=types.AudioTranscriptionConfig(),
         input_audio_transcription=types.AudioTranscriptionConfig(),
         session_resumption=types.SessionResumptionConfig(),

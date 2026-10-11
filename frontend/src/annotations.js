@@ -1,3 +1,5 @@
+import { targetContentChanged } from "./frame-content.js";
+
 const ALLOWED_SHAPES = new Set(["pointer", "rectangle", "underline", "note"]);
 const MAX_LABEL_LENGTH = 80;
 const MAX_MARKS = 8;
@@ -44,13 +46,15 @@ function validateAnnotation(item, frames) {
 }
 
 export class AnnotationController {
-  constructor({ layer, list, video, getFrames }) {
+  constructor({ layer, list, video, getFrames, getCurrentContent }) {
     this.layer = layer;
     this.list = list;
     this.video = video;
     this.getFrames = getFrames;
+    this.getCurrentContent = getCurrentContent;
     this.marks = [];
     this.expiryTimer = null;
+    this.contentTimer = null;
     this.onPreviewResize = () => this.renderOverlay();
     this.layer.setAttribute("preserveAspectRatio", "xMidYMid meet");
     this.video.addEventListener("loadedmetadata", this.onPreviewResize);
@@ -63,11 +67,13 @@ export class AnnotationController {
     const frames = this.getFrames();
     const accepted = [];
     const errors = [];
+    const content = this.getCurrentContent?.();
 
     if (!Array.isArray(items) || items.length > MAX_MARKS) {
       return { accepted, errors: ["Too many annotations were requested."] };
     }
 
+    this.pruneChangedMarks(content);
     this.marks = this.marks.filter((mark) => mark.createdAt > Date.now() - MARK_TTL_MS);
     for (const item of items) {
       const error = validateAnnotation(item, frames);
@@ -78,6 +84,8 @@ export class AnnotationController {
         || sourceDimensions(frames.get(item.frame_id)).height !== this.video.videoHeight
       ) {
         errors.push("The shared screen changed size. Request a mark on a new frame.");
+      } else if (this.getCurrentContent && !this.targetMatches(frames.get(item.frame_id), item.rect || item.region, content)) {
+        errors.push("The target changed since that frame. Continue with the verbal explanation or request a fresh mark.");
       } else if (this.marks.length + accepted.length >= MAX_MARKS) {
         errors.push("Clear existing marks or wait for them to expire before adding more.");
       } else {
@@ -86,6 +94,7 @@ export class AnnotationController {
           shape: item.shape || item.kind,
           rect: item.rect || item.region,
           frame: sourceDimensions(frames.get(item.frame_id)),
+          signature: frames.get(item.frame_id).signature,
           id: crypto.randomUUID(),
           createdAt: Date.now()
         });
@@ -95,6 +104,7 @@ export class AnnotationController {
     this.marks.push(...accepted);
     this.render();
     this.scheduleExpiry();
+    this.watchContent();
     return { accepted, errors };
   }
 
@@ -102,12 +112,15 @@ export class AnnotationController {
     this.marks = this.marks.filter((mark) => mark.id !== markId);
     this.render();
     this.scheduleExpiry();
+    this.watchContent();
   }
 
   clear() {
     this.marks = [];
     window.clearTimeout(this.expiryTimer);
     this.expiryTimer = null;
+    window.clearInterval(this.contentTimer);
+    this.contentTimer = null;
     this.render();
   }
 
@@ -126,11 +139,45 @@ export class AnnotationController {
     this.expiryTimer = window.setTimeout(() => this.expireOldMarks(), Math.max(0, expiresAt - Date.now()));
   }
 
+  targetMatches(frame, rect, content) {
+    const dimensions = frame.frame || sourceDimensions(frame);
+    return Boolean(content
+      && dimensions.width === content.sourceWidth
+      && dimensions.height === content.sourceHeight
+      && !targetContentChanged(frame.signature, content.signature, rect));
+  }
+
+  pruneChangedMarks(content) {
+    if (!this.getCurrentContent || !this.marks.length) return;
+    const previousCount = this.marks.length;
+    this.marks = this.marks.filter((mark) => this.targetMatches(mark, mark.rect, content));
+    if (this.marks.length !== previousCount) {
+      this.render();
+      this.scheduleExpiry();
+      this.watchContent();
+    }
+  }
+
+  onFrame(frameId) {
+    const frame = this.getFrames().get(frameId);
+    this.pruneChangedMarks(frame);
+  }
+
+  watchContent() {
+    if (!this.getCurrentContent || !this.marks.length) {
+      window.clearInterval(this.contentTimer);
+      this.contentTimer = null;
+    } else if (this.contentTimer === null) {
+      this.contentTimer = window.setInterval(() => this.pruneChangedMarks(this.getCurrentContent()), 250);
+    }
+  }
+
   expireOldMarks() {
     const cutoff = Date.now() - MARK_TTL_MS;
     this.marks = this.marks.filter((mark) => mark.createdAt > cutoff);
     this.render();
     this.scheduleExpiry();
+    this.watchContent();
   }
 
   render() {
@@ -155,21 +202,23 @@ export class AnnotationController {
     if (this.marks.length !== previousCount) {
       this.renderList();
       this.scheduleExpiry();
+      this.watchContent();
     }
 
     for (const mark of this.marks) {
       const group = document.createElementNS(SVG_NAMESPACE, "g");
-      const rect = document.createElementNS(SVG_NAMESPACE, "rect");
       const x = mark.rect.x * width;
       const y = mark.rect.y * height;
       const boxWidth = mark.rect.width * width;
       const boxHeight = mark.rect.height * height;
 
-      rect.setAttribute("x", String(x));
-      rect.setAttribute("y", String(y));
-      rect.setAttribute("width", String(boxWidth));
-      rect.setAttribute("height", String(boxHeight));
-      rect.setAttribute("class", `mark mark-${mark.shape}`);
+      const geometry = this.createGeometry(mark.shape, x, y, boxWidth, boxHeight, scale);
+      group.append(geometry);
+      this.layer.append(group);
+
+      // Thin text targets keep their explanation in the accessible list; a
+      // label laid over that text would obscure the very step being marked.
+      if (["pointer", "underline"].includes(mark.shape) || boxWidth * scale < 100 || boxHeight * scale < 32) continue;
 
       const labelBox = document.createElementNS(SVG_NAMESPACE, "foreignObject");
       const inset = Math.min(3 / scale, boxWidth / 4, boxHeight / 4);
@@ -187,10 +236,39 @@ export class AnnotationController {
       label.append(text);
       labelBox.append(label);
 
-      group.append(rect, labelBox);
-      this.layer.append(group);
+      group.append(labelBox);
       this.fitLabel(label, text, scale);
     }
+  }
+
+  createGeometry(shape, x, y, width, height, scale) {
+    let geometry;
+    if (shape === "underline") {
+      geometry = document.createElementNS(SVG_NAMESPACE, "line");
+      geometry.setAttribute("x1", String(x));
+      geometry.setAttribute("y1", String(y + height));
+      geometry.setAttribute("x2", String(x + width));
+      geometry.setAttribute("y2", String(y + height));
+    } else if (shape === "pointer") {
+      geometry = document.createElementNS(SVG_NAMESPACE, "path");
+      const tipX = x + width / 2;
+      const tipY = y + height / 2;
+      const angle = Math.atan2(height, width);
+      const head = Math.min(8 / scale, width / 3, height / 3);
+      const wing1X = tipX - head * Math.cos(angle - Math.PI / 6);
+      const wing1Y = tipY - head * Math.sin(angle - Math.PI / 6);
+      const wing2X = tipX - head * Math.cos(angle + Math.PI / 6);
+      const wing2Y = tipY - head * Math.sin(angle + Math.PI / 6);
+      geometry.setAttribute("d", `M ${x} ${y} L ${tipX} ${tipY} M ${wing1X} ${wing1Y} L ${tipX} ${tipY} L ${wing2X} ${wing2Y}`);
+    } else {
+      geometry = document.createElementNS(SVG_NAMESPACE, "rect");
+      geometry.setAttribute("x", String(x));
+      geometry.setAttribute("y", String(y));
+      geometry.setAttribute("width", String(width));
+      geometry.setAttribute("height", String(height));
+    }
+    geometry.setAttribute("class", `mark mark-${shape}`);
+    return geometry;
   }
 
   fitLabel(label, text, scale) {

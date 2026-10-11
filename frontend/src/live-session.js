@@ -204,11 +204,14 @@ export class LiveSessionController {
   }
 
   sendFrame(frame) {
-    if (!frame?.jpeg || !frame?.frame_id) return;
-    this.send({
+    // Drop this sample on congestion; the next sample contains the current screen.
+    if (!frame?.jpeg || !frame?.frame_id || this.socket?.bufferedAmount > MAX_BUFFERED_BYTES) return false;
+    const data = frame.jpeg.split(",")[1];
+    if ((this.socket?.bufferedAmount || 0) + data.length + 128 > MAX_BUFFERED_BYTES) return false;
+    return this.send({
       type: "frame",
       frame_id: frame.frame_id,
-      data: frame.jpeg.split(",")[1]
+      data
     });
   }
 

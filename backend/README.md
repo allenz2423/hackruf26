@@ -67,6 +67,10 @@ Request `mode: "check_steps"` to review screen work without a question or microp
 
 See the [proactive coaching design](../docs/proactive-coaching-design.md) for timing, known limits, verification evidence, and remaining frontend copy/source-lifecycle work.
 
+New Live sessions use `MEDIA_RESOLUTION_HIGH` for more visual detail when reading code and dense text. Browser capture caps the long dimension at 1920 with initial JPEG quality 0.85 and reduces quality/dimensions to fit the existing byte limit. See [visual detail](../docs/backend-design.md#higher-visual-detail-and-browser-capture). Restart the tutor session to apply new provider settings.
+
+The server instruction adapts between focused hints, direct prerequisite explanations, and small worked examples after unsuccessful hints. Automatic checks retain their mistake-only policy and three-second feedback cooldown. Annotation requests use a pinned question/review frame, explicit XYWH geometry, and browser validation against current target content; underlines, pointers, rectangles, and notes render distinctly. See the [implementation contract](../docs/backend-design.md#annotation-correction-and-adaptive-instruction-2026-10-11).
+
 ## Authentication and ownership
 
 Accounts live in SQLite (`users`, `user_sessions`). Passwords are stored as salted scrypt hashes. A login sets an HttpOnly, SameSite=Lax `jot_session` cookie; only a hash of the session token is stored. Every class-library row belongs to the logged-in account, and the backend never accepts an owner from the client.

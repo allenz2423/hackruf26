@@ -20,6 +20,7 @@ MAX_DIAGNOSTIC_CHARS = 4_000
 LEAN_HEARTBEAT_LIMIT = 300_000
 LEAN_PRELUDE = "import Mathlib.Tactic\n"
 LEAN_CPU_LIMIT_SECONDS = 15
+LEAN_READINESS_TIMEOUT_SECONDS = 60.0
 LEAN_FILE_LIMIT_BYTES = 2 * 1024 * 1024
 OUTPUT_LIMIT_MARKER = "\nLean diagnostics were truncated because the output limit was reached."
 
@@ -64,7 +65,10 @@ class LeanProofService:
             raise LeanRuntimeUnavailable
         status, _ = await self._run_source(
             f"{LEAN_PRELUDE}example : True := by trivial\n",
-            timeout_seconds=max(30.0, self._settings.lean_timeout_seconds),
+            # Cold Mathlib imports can exceed the ordinary proof deadline.
+            # Startup has its own bounded budget; submitted proofs retain the
+            # configured timeout below.
+            timeout_seconds=LEAN_READINESS_TIMEOUT_SECONDS,
         )
         if status != "verified":
             raise LeanRuntimeUnavailable

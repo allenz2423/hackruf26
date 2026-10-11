@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from datetime import date as calendar_date
-from datetime import datetime, timezone
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -76,7 +76,7 @@ class LiveSessionTicketResponse(BaseModel):
     def require_timezone_aware_expiration(cls, value: datetime) -> datetime:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("expires_at must include a timezone.")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
 
 class HealthResponse(BaseModel):
@@ -224,7 +224,7 @@ class ExamMaterialsScope(BaseModel):
 
 
 MaterialsScope = Annotated[
-    Union[AllMaterialsScope, UploadsMaterialsScope, TopicsMaterialsScope, ExamMaterialsScope],
+    AllMaterialsScope | UploadsMaterialsScope | TopicsMaterialsScope | ExamMaterialsScope,
     Field(discriminator="kind"),
 ]
 StudyMaterialKind = Literal["quiz", "practice_exam", "study_guide", "flashcards"]
@@ -276,6 +276,7 @@ class MaterialSummary(BaseModel):
     created_at: datetime
     generated_at: datetime | None = None
     latest_attempt: LatestAttempt | None = None
+    source_warnings: list[Literal["changed", "missing", "truncated"]] = Field(default_factory=list)
 
 
 class MaterialDetail(MaterialSummary):

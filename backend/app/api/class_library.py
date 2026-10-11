@@ -45,7 +45,8 @@ from app.api.schemas import (
 from app.api.upload_documents import create_default_document, document_detail
 from app.config import Settings
 from app.services.database import SQLiteConnection, SQLiteDatabase, json_value
-from app.services.gemini_content import GeminiContentService
+from app.services.gemini_content import MAX_NOTE_CONTEXT_CHARS, GeminiContentService
+from app.services.source_context import source_excerpts
 from app.services.storage import LocalPrivateStorage, UploadTooLarge
 from app.services.study_files import StudyFileFailure, compiler_path, create_guide_files
 
@@ -196,6 +197,13 @@ def _material_summary(row: dict[str, Any]) -> MaterialSummary:
         created_at=row["created_at"],
         generated_at=row["generated_at"],
         latest_attempt=latest,
+        source_warnings=[
+            warning for column, warning in (
+                ("sources_outdated", "changed"),
+                ("sources_missing", "missing"),
+                ("context_truncated", "truncated"),
+            ) if values.get(column)
+        ],
     )
 
 
@@ -363,7 +371,7 @@ async def create_upload(
     class_id: UUID,
     background_tasks: BackgroundTasks,
     request: Request,
-    file: UploadFile | None = File(default=None),
+    file: Annotated[UploadFile | None, File()] = None,
     text: str | None = Form(default=None),
     title: str | None = Form(default=None),
     kind: str | None = Form(default=None),
@@ -451,7 +459,7 @@ async def create_upload(
         if storage_key:
             private_storage(request).delete(storage_key)
         raise
-    background_tasks.add_task(_process_upload_job, request.app, row["id"])
+    background_tasks.add_task(_process_upload_job, request.app, row["id"], row["processing_revision"])
     return _upload_summary(row)
 
 
@@ -530,7 +538,7 @@ async def create_assessment(
                     "storage_key, file_size_bytes, status, processing_progress) "
                     "VALUES (?1, ?2, ?3, ?4, 'file', ?5, ?6, ?7, ?8, "
                     "'processing', 0) "
-                    "RETURNING id",
+                    "RETURNING id, processing_revision",
                     uuid4(),
                     class_id,
                     note_title,
@@ -551,7 +559,9 @@ async def create_assessment(
         storage.delete(storage_key)
         raise
 
-    background_tasks.add_task(_process_assessment_job, request.app, assessment["id"])
+    background_tasks.add_task(
+        _process_assessment_job, request.app, assessment["id"], False, note["processing_revision"]
+    )
     return AssessmentSummary(
         id=assessment["id"],
         class_id=assessment["class_id"],
@@ -741,7 +751,10 @@ async def patch_upload(
     if reprocess and getattr(request.app.state, "gemini_content_service", None) is None:
         raise ApiError(503, "content_processing_unavailable", "Course material processing is unavailable.")
     if reprocess:
-        fields.extend(["status = 'processing'", "processing_progress = 0", "failure_code = NULL", "processed_at = NULL"])
+        fields.extend([
+            "status = 'processing'", "processing_progress = 0", "failure_code = NULL",
+            "processed_at = NULL", "processing_revision = processing_revision + 1",
+        ])
     fields.append("updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')")
     query = (
         "UPDATE course_notes SET " + ", ".join(fields)
@@ -754,11 +767,6 @@ async def patch_upload(
             if row is None:
                 raise ApiError(404, "not_found", "The requested resource was not found.")
             if reprocess:
-                await connection.execute(
-                    "DELETE FROM study_materials WHERE id IN ("
-                    "SELECT material_id FROM study_material_sources WHERE note_id = ?1)",
-                    upload_id,
-                )
                 assessment_id = await _reset_assessment_for_processing(connection, upload_id)
     if reprocess:
         if assessment_id is not None:
@@ -767,6 +775,7 @@ async def patch_upload(
                 request.app,
                 assessment_id,
                 "extracted_text" in patch,
+                row["processing_revision"],
             )
         else:
             background_tasks.add_task(
@@ -774,6 +783,7 @@ async def patch_upload(
                 request.app,
                 upload_id,
                 "extracted_text" in patch,
+                row["processing_revision"],
             )
     return _upload_summary(row)
 
@@ -818,7 +828,7 @@ async def retry_upload(upload_id: UUID, request: Request, background_tasks: Back
                 raise ApiError(409, "upload_not_failed", "Only failed uploads can be retried.")
             row = await connection.fetchrow(
                 "UPDATE course_notes SET status = 'processing', processing_progress = 0, "
-                "failure_code = NULL, processed_at = NULL, "
+                "failure_code = NULL, processed_at = NULL, processing_revision = processing_revision + 1, "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
                 "WHERE id = ?1 RETURNING *",
                 upload_id,
@@ -829,13 +839,17 @@ async def retry_upload(upload_id: UUID, request: Request, background_tasks: Back
                 else None
             )
     if assessment_id is not None:
-        background_tasks.add_task(_process_assessment_job, request.app, assessment_id)
+        background_tasks.add_task(
+            _process_assessment_job, request.app, assessment_id, False, row["processing_revision"]
+        )
     else:
-        background_tasks.add_task(_process_upload_job, request.app, upload_id)
+        background_tasks.add_task(_process_upload_job, request.app, upload_id, row["processing_revision"])
     return _upload_summary(row)
 
 
-async def _process_upload_job(application: Any, upload_id: UUID) -> None:
+async def _process_upload_job(
+    application: Any, upload_id: UUID, expected_revision: int | None = None
+) -> None:
     """Extract or transcribe one upload, updating only the active processing attempt."""
     database: SQLiteDatabase | None = getattr(application.state, "database", None)
     content_service = getattr(application.state, "gemini_content_service", None)
@@ -845,10 +859,12 @@ async def _process_upload_job(application: Any, upload_id: UUID) -> None:
     row = None
     try:
         row = await database.fetchrow(
-            "UPDATE course_notes SET processing_progress = 10, "
+            "UPDATE course_notes SET processing_progress = 10, processing_revision = processing_revision + 1, "
             "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1 "
-            "AND status = 'processing' RETURNING id, kind, source_type, storage_key, mime_type, extracted_text, updated_at",
+            "AND status = 'processing' AND (?2 IS NULL OR processing_revision = ?2) "
+            "RETURNING id, kind, source_type, storage_key, mime_type, extracted_text, processing_revision",
             upload_id,
+            expected_revision,
         )
         if row is None:
             return
@@ -862,7 +878,7 @@ async def _process_upload_job(application: Any, upload_id: UUID) -> None:
             "transcript_segments = ?5, duration_seconds = ?6, syllabus_outline = ?7, "
             "status = 'ready', processing_progress = 100, failure_code = NULL, processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
             "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-            "WHERE id = ?1 AND status = 'processing' AND updated_at = ?8",
+            "WHERE id = ?1 AND status = 'processing' AND processing_revision = ?8",
             upload_id,
             result["extracted_text"],
             result["summary"],
@@ -870,7 +886,7 @@ async def _process_upload_job(application: Any, upload_id: UUID) -> None:
             json.dumps(result["transcript_segments"]),
             result["duration_seconds"],
             json.dumps(result["syllabus_outline"]) if result["syllabus_outline"] is not None else None,
-            row["updated_at"],
+            row["processing_revision"],
         )
         if completed != "UPDATE 0":
             await create_default_document(application, upload_id)
@@ -886,16 +902,17 @@ async def _process_upload_job(application: Any, upload_id: UUID) -> None:
             await database.execute(
                 "UPDATE course_notes SET status = 'failed', failure_code = 'processing_failed', "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-                "WHERE id = ?1 AND status = 'processing' AND updated_at = ?2",
+                "WHERE id = ?1 AND status = 'processing' AND processing_revision = ?2",
                 upload_id,
-                row["updated_at"],
+                row["processing_revision"],
             )
         except Exception:
             logger.error("upload_failure_state_update_failed upload_id=%s", upload_id)
 
 
 async def _process_assessment_job(
-    application: Any, assessment_id: UUID, use_extracted_text: bool = False
+    application: Any, assessment_id: UUID, use_extracted_text: bool = False,
+    expected_revision: int | None = None,
 ) -> None:
     """Extract and grade one imported test, keeping its upload and assessment states aligned."""
     database: SQLiteDatabase | None = getattr(application.state, "database", None)
@@ -906,12 +923,12 @@ async def _process_assessment_job(
     if database is None or content_service is None or storage is None:
         return
 
-    active_updated_at = None
+    active_revision = None
     note_id = None
     try:
         row = await database.fetchrow(
             "SELECT a.id AS assessment_id, a.class_id, a.note_id, n.kind, n.storage_key, "
-            "n.mime_type, n.extracted_text, n.updated_at AS note_updated_at "
+            "n.mime_type, n.extracted_text, n.processing_revision AS note_revision "
             "FROM uploaded_assessments a "
             "JOIN course_notes n ON n.id = a.note_id AND n.class_id = a.class_id "
             "WHERE a.id = ?1 AND a.processing_status = 'processing' AND n.status = 'processing'",
@@ -920,17 +937,19 @@ async def _process_assessment_job(
         if row is None:
             return
         note_id = row["note_id"]
-        active_updated_at = row["note_updated_at"]
+        active_revision = row["note_revision"]
+        if expected_revision is not None and active_revision != expected_revision:
+            return
         progress = await database.fetchrow(
-            "UPDATE course_notes SET processing_progress = 10, "
+            "UPDATE course_notes SET processing_progress = 10, processing_revision = processing_revision + 1, "
             "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-            "WHERE id = ?1 AND status = 'processing' AND updated_at = ?2 RETURNING updated_at",
+            "WHERE id = ?1 AND status = 'processing' AND processing_revision = ?2 RETURNING processing_revision",
             note_id,
-            active_updated_at,
+            active_revision,
         )
         if progress is None:
             return
-        active_updated_at = progress["updated_at"]
+        active_revision = progress["processing_revision"]
 
         if use_extracted_text and row["extracted_text"]:
             extracted = await asyncio.to_thread(
@@ -946,13 +965,13 @@ async def _process_assessment_job(
         progress = await database.fetchrow(
             "UPDATE course_notes SET processing_progress = 55, "
             "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-            "WHERE id = ?1 AND status = 'processing' AND updated_at = ?2 RETURNING updated_at",
+            "WHERE id = ?1 AND status = 'processing' AND processing_revision = ?2 RETURNING processing_revision",
             note_id,
-            active_updated_at,
+            active_revision,
         )
         if progress is None:
             return
-        active_updated_at = progress["updated_at"]
+        active_revision = progress["processing_revision"]
 
         class_note_rows = await database.fetch(
             "SELECT n.id, n.title, n.extracted_text, n.summary FROM course_notes n "
@@ -976,7 +995,7 @@ async def _process_assessment_job(
                     "duration_seconds = ?6, syllabus_outline = ?7, status = 'ready', "
                     "processing_progress = 100, failure_code = NULL, processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
                     "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-                    "WHERE id = ?1 AND status = 'processing' AND updated_at = ?8 RETURNING id",
+                    "WHERE id = ?1 AND status = 'processing' AND processing_revision = ?8 RETURNING id",
                     note_id,
                     extracted["extracted_text"],
                     extracted["summary"],
@@ -986,7 +1005,7 @@ async def _process_assessment_job(
                     json.dumps(extracted["syllabus_outline"])
                     if extracted["syllabus_outline"] is not None
                     else None,
-                    active_updated_at,
+                    active_revision,
                 )
                 if saved_note is None:
                     return
@@ -1026,9 +1045,9 @@ async def _process_assessment_job(
                         "failure_code = 'processing_failed', "
                         "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1 "
                         "AND status = 'processing' "
-                        "AND updated_at = ?2 RETURNING id",
+                        "AND processing_revision = ?2 RETURNING id",
                         note_id,
-                        active_updated_at,
+                        active_revision,
                     )
                     if failed_note is not None:
                         await connection.execute(
@@ -1043,7 +1062,10 @@ async def _process_assessment_job(
             logger.error("assessment_failure_state_update_failed assessment_id=%s", assessment_id)
 
 
-async def _reprocess_upload_job(application: Any, upload_id: UUID, use_extracted_text: bool) -> None:
+async def _reprocess_upload_job(
+    application: Any, upload_id: UUID, use_extracted_text: bool,
+    expected_revision: int | None = None,
+) -> None:
     """Rebuild summaries/outlines after a user edits the text or kind."""
     database: SQLiteDatabase | None = getattr(application.state, "database", None)
     content_service = getattr(application.state, "gemini_content_service", None)
@@ -1053,10 +1075,12 @@ async def _reprocess_upload_job(application: Any, upload_id: UUID, use_extracted
     row = None
     try:
         row = await database.fetchrow(
-            "UPDATE course_notes SET processing_progress = 10, "
+            "UPDATE course_notes SET processing_progress = 10, processing_revision = processing_revision + 1, "
             "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1 "
-            "AND status = 'processing' RETURNING id, kind, source_type, storage_key, mime_type, extracted_text, updated_at",
+            "AND status = 'processing' AND (?2 IS NULL OR processing_revision = ?2) "
+            "RETURNING id, kind, source_type, storage_key, mime_type, extracted_text, processing_revision",
             upload_id,
+            expected_revision,
         )
         if row is None:
             return
@@ -1074,7 +1098,7 @@ async def _reprocess_upload_job(application: Any, upload_id: UUID, use_extracted
             "transcript_segments = ?5, duration_seconds = ?6, syllabus_outline = ?7, "
             "status = 'ready', processing_progress = 100, failure_code = NULL, processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
             "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-            "WHERE id = ?1 AND status = 'processing' AND updated_at = ?8",
+            "WHERE id = ?1 AND status = 'processing' AND processing_revision = ?8",
             upload_id,
             result["extracted_text"],
             result["summary"],
@@ -1082,7 +1106,7 @@ async def _reprocess_upload_job(application: Any, upload_id: UUID, use_extracted
             json.dumps(result["transcript_segments"]),
             result["duration_seconds"],
             json.dumps(result["syllabus_outline"]) if result["syllabus_outline"] is not None else None,
-            row["updated_at"],
+            row["processing_revision"],
         )
         if completed != "UPDATE 0":
             await create_default_document(application, upload_id)
@@ -1098,9 +1122,9 @@ async def _reprocess_upload_job(application: Any, upload_id: UUID, use_extracted
             await database.execute(
                 "UPDATE course_notes SET status = 'failed', failure_code = 'processing_failed', "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-                "WHERE id = ?1 AND status = 'processing' AND updated_at = ?2",
+                "WHERE id = ?1 AND status = 'processing' AND processing_revision = ?2",
                 upload_id,
-                row["updated_at"],
+                row["processing_revision"],
             )
         except Exception:
             logger.error("upload_failure_state_update_failed upload_id=%s", upload_id)
@@ -1249,6 +1273,11 @@ async def _create_material_job(
             material_id,
         )
         sources = [dict(row) for row in source_rows]
+        await database.execute(
+            "UPDATE study_materials SET context_truncated = ?2 WHERE id = ?1",
+            material_id,
+            int(any(excerpt["truncated"] for excerpt in source_excerpts(sources, MAX_NOTE_CONTEXT_CHARS))),
+        )
         title, content = await asyncio.to_thread(
             service.generate_material,
             kind=material["kind"],

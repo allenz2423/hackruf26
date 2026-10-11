@@ -8,7 +8,7 @@ import { getUploadedFile } from "./file-store.js";
 
 const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "gif"];
 const MEDIA_EXTENSIONS = ["mp4", "webm", "mov", "mp3", "m4a", "wav"];
-const MAX_PAGE_DIMENSION = 1280;
+export const MAX_PAGE_DIMENSION = 1920;
 const MAX_PDF_PAGES = 300;
 const TEXT_PAGE = { width: 1000, height: 1294, margin: 64, font: 24, line: 36 };
 const SLIDE_PAGE = { width: 1280, height: 720, margin: 72, font: 30, line: 44 };

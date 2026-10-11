@@ -1,33 +1,13 @@
 import { mathHtml, typesetMath } from "./math.js";
 import { escapeHtml, toast } from "./ui.js";
 import { submitAttemptApi, flagMaterialItemApi } from "./api.js";
+import { sourceCitationHtml, bindSourceCitations, sourceWarningsHtml } from "./source-citations.js";
+import { quizTutorContext } from "./quiz-tutor-context.js";
 
 function formatTime(totalSeconds) {
   const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
   const seconds = (totalSeconds % 60).toString().padStart(2, "0");
   return `${minutes}:${seconds}`;
-}
-
-function formatSourceCitation(source) {
-  if (!source) return "";
-  if (typeof source === "string") return source;
-  if (typeof source !== "object") return String(source);
-  if (source.name || source.title) {
-    const title = source.name || source.title;
-    const loc = source.page ? ` (p. ${source.page})` : source.slide ? ` (slide ${source.slide})` : "";
-    return `${title}${loc}`;
-  }
-  const parts = [];
-  if (source.page) parts.push(`Page ${source.page}`);
-  if (source.slide) parts.push(`Slide ${source.slide}`);
-  if (source.timestamp_seconds != null) {
-    const mins = Math.floor(source.timestamp_seconds / 60);
-    const secs = Math.floor(source.timestamp_seconds % 60).toString().padStart(2, "0");
-    parts.push(`${mins}:${secs}`);
-  }
-  if (parts.length) return parts.join(", ");
-  if (source.upload_id) return "Source note";
-  return "Source reference";
 }
 
 function getSubmittedDisplay(question, submittedRaw) {
@@ -144,6 +124,9 @@ function renderQuestionInput(question, index) {
 export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } = {}) {
   let timerId = null;
   let submitted = false;
+  let expiredAnswers = null;
+  let disposed = false;
+  const deadline = material.timeLimitMinutes ? Date.now() + material.timeLimitMinutes * 60 * 1000 : null;
 
   function clearTimer() {
     if (timerId !== null) {
@@ -153,12 +136,30 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
   }
 
   function goBack() {
+    disposed = true;
     clearTimer();
-    window.removeEventListener("hashchange", clearTimer);
+    window.removeEventListener("hashchange", leave);
     onBack?.();
   }
 
-  window.addEventListener("hashchange", clearTimer, { once: true });
+  const leave = () => { disposed = true; clearTimer(); };
+  window.addEventListener("hashchange", leave, { once: true });
+
+  function startTimer() {
+    clearTimer();
+    if (deadline === null || disposed) return;
+    const countdown = root.querySelector("#assessment-countdown");
+    const updateCountdown = () => {
+      const secondsLeft = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      if (countdown) countdown.textContent = formatTime(secondsLeft);
+      if (secondsLeft <= 0) {
+        clearTimer();
+        void submit(root.querySelector("#assessment-form"), true);
+      }
+    };
+    timerId = window.setInterval(updateCountdown, 1000);
+    updateCountdown();
+  }
 
   function renderResults(attempt) {
     const totalCount = material.questions.length;
@@ -170,6 +171,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
 
     root.innerHTML = `
       <section class="assessment-view">
+        ${sourceWarningsHtml(material)}
         <button class="back-link assessment-back" type="button" data-back-to-study>&larr; Back to study materials</button>
         <header class="assessment-header">
           <div>
@@ -222,15 +224,12 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
                 ${explanation ? `<p class="review-explanation">${mathHtml(explanation)}</p>` : ""}
                 ${sources && sources.length ? `
                   <div class="source-chips" style="margin-top: 0.5rem;">
-                    ${sources.map((src) => {
-                      const txt = formatSourceCitation(src);
-                      return txt ? `<span>${escapeHtml(txt)}</span>` : "";
-                    }).join("")}
+                    ${sources.map(sourceCitationHtml).join("")}
                   </div>
                 ` : ""}
                 <div class="review-actions" style="margin-top: 0.75rem; display: flex; gap: 0.5rem; align-items: center;">
                   ${!isCorrect ? `
-                    <button class="btn btn-secondary btn-small" type="button" data-ask-tutor="${escapeHtml(question.prompt)}">
+                    <button class="btn btn-secondary btn-small" type="button" data-ask-tutor="${index}">
                       Ask tutor about this
                     </button>
                   ` : ""}
@@ -249,21 +248,26 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
       </section>
     `;
     void typesetMath(root);
+    bindSourceCitations(root, material);
 
     root.querySelectorAll("[data-back-to-study]").forEach((button) => {
       button.addEventListener("click", goBack);
     });
 
     root.querySelector("[data-retake]").addEventListener("click", () => {
+      disposed = true;
       clearTimer();
+      window.removeEventListener("hashchange", leave);
       renderQuizPlayer(root, material, { onBack, onAttemptCompleted });
     });
 
     root.querySelectorAll("[data-ask-tutor]").forEach((button) => {
       button.addEventListener("click", () => {
         clearTimer();
-        const prompt = button.dataset.askTutor;
-        sessionStorage.setItem("tutor_initial_question", prompt);
+        const question = material.questions[Number(button.dataset.askTutor)];
+        const questionId = question.id || `q-${Number(button.dataset.askTutor) + 1}`;
+        const context = quizTutorContext(question, attempt.answers?.[questionId], material.sourceUploadIds);
+        sessionStorage.setItem("tutor_initial_question", JSON.stringify(context));
         if (material.classId) {
           window.location.hash = `#/classes/${encodeURIComponent(material.classId)}/tutor`;
         } else {
@@ -293,7 +297,8 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
   }
 
   async function submit(form, expired = false) {
-    if (submitted) return;
+    if (submitted || disposed) return;
+    expired ||= deadline !== null && Date.now() >= deadline;
     submitted = true;
     clearTimer();
 
@@ -301,7 +306,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
     const answersMap = {};
     const localResults = material.questions.map((question, index) => {
       const questionKey = question.id || `q-${index + 1}`;
-      const raw = formData.get(`question-${index}`);
+      const raw = expiredAnswers ? expiredAnswers[questionKey] : formData.get(`question-${index}`);
       const submittedVal = raw !== null ? String(raw).trim() : "";
       answersMap[questionKey] = submittedVal;
 
@@ -334,6 +339,9 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
     let correctCount = localResults.filter((r) => r.isCorrect).length;
     let scorePercent = Math.round((correctCount / Math.max(1, material.questions.length)) * 100);
     let questionResults = null;
+    if (expired) expiredAnswers = { ...answersMap };
+    const inputs = [...form.querySelectorAll("input, textarea, select")];
+    inputs.forEach((input) => { input.disabled = true; });
 
     // Remote answer keys stay on the server until the attempt is submitted.
     if (material.isRemote) {
@@ -342,6 +350,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
       submitBtn.textContent = "Submitting…";
       try {
         const attemptRes = await submitAttemptApi(material.id, answersMap);
+        if (disposed) return;
         if (typeof attemptRes.score_percent !== "number" || !Array.isArray(attemptRes.question_results)) {
           throw new Error("The server did not return a quiz score. Try submitting again.");
         }
@@ -349,10 +358,20 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
         correctCount = attemptRes.correct_count;
         questionResults = attemptRes.question_results;
       } catch (err) {
+        if (disposed) return;
         submitted = false;
         submitBtn.disabled = false;
         submitBtn.textContent = "Submit for score";
         toast(`Could not score this quiz: ${err.message}`, { tone: "error" });
+        if (expired || (deadline !== null && Date.now() >= deadline)) {
+          expiredAnswers = { ...answersMap };
+          const countdown = root.querySelector("#assessment-countdown");
+          if (countdown) countdown.textContent = "00:00";
+          submitBtn.textContent = "Retry scoring";
+        } else {
+          inputs.forEach((input) => { input.disabled = false; });
+          startTimer();
+        }
         return;
       }
     }
@@ -374,6 +393,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
 
   root.innerHTML = `
     <section class="assessment-view">
+      ${sourceWarningsHtml(material)}
       <button class="back-link assessment-back" type="button" data-back-to-study>&larr; Back to study materials</button>
       <header class="assessment-header">
         <div>
@@ -417,18 +437,5 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
     submit(form);
   });
 
-  if (material.timeLimitMinutes) {
-    const deadline = Date.now() + material.timeLimitMinutes * 60 * 1000;
-    const countdown = root.querySelector("#assessment-countdown");
-    const updateCountdown = () => {
-      const secondsLeft = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
-      if (countdown) countdown.textContent = formatTime(secondsLeft);
-      if (secondsLeft <= 0) {
-        clearTimer();
-        submit(form, true);
-      }
-    };
-    timerId = window.setInterval(updateCountdown, 1000);
-    updateCountdown();
-  }
+  startTimer();
 }

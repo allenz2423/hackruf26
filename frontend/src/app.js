@@ -18,6 +18,7 @@ import {
 import { LiveSessionController } from "./live-session.js";
 import { getBackendClassId, prepareTutorSources } from "./course-sync.js";
 import { MaterialStage } from "./material-stage.js";
+import { readQuizTutorContext } from "./quiz-tutor-context.js";
 import { chooseMaterial, chooseTutorSources, loadTutorSources, saveTutorSources, sourcesSummary } from "./tutor-materials.js";
 import { icon } from "./icons.js";
 import { renderLibraryTab } from "./library.js";
@@ -753,11 +754,11 @@ function renderTutor(klass = null) {
   syncTutorControls();
 
   // Check if a question was queued from quiz player ("Ask tutor about this")
-  const queuedQuestion = sessionStorage.getItem("tutor_initial_question");
+  const queuedQuestion = readQuizTutorContext(sessionStorage.getItem("tutor_initial_question"));
   if (queuedQuestion) {
     const questionInput = document.querySelector("#question-input");
     if (questionInput) {
-      questionInput.value = queuedQuestion;
+      questionInput.value = queuedQuestion.text;
       sessionStorage.removeItem("tutor_initial_question");
     }
   }
@@ -773,6 +774,10 @@ function renderTutor(klass = null) {
   // A class upload shown on the stage in place of a shared screen.
   let material = null;
   let selectedSources = klass ? loadTutorSources(klass) : null;
+  if (klass && queuedQuestion?.uploadIds.length) {
+    const quizSources = klass.uploads.filter((upload) => queuedQuestion.uploadIds.includes(upload.backendId || upload.id)).map((upload) => upload.id);
+    if (quizSources.length) selectedSources = quizSources;
+  }
   const materialBar = document.querySelector("#material-bar");
 
   function currentClass() {
@@ -839,6 +844,7 @@ function renderTutor(klass = null) {
     onAudioInterrupted: () => {
       audioController?.stopPlayback();
       buddy?.interrupted();
+      annotations.clear();
     },
     onAnnotationRequest: (payload) => {
       const frameId = payload?.frame_id;
@@ -856,13 +862,17 @@ function renderTutor(klass = null) {
       emptyStage.hidden = false;
       setStatus({ session: "screen_paused", screen: "paused" });
     },
-    onFrame: (frame) => live.sendFrame(frame)
+    onFrame: (frame) => {
+      annotations.onFrame(frame.frame_id);
+      live.sendFrame(frame);
+    }
   });
   const annotations = new AnnotationController({
     layer: document.querySelector("#annotation-layer"),
     list: document.querySelector("#annotation-list"),
     video,
-    getFrames: () => capture.getFrames()
+    getFrames: () => capture.getFrames(),
+    getCurrentContent: () => capture.getCurrentContent()
   });
   audioController = new AudioController({
     onStatusChange: (mic, deviceLabel = "") => {

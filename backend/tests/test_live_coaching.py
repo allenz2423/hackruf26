@@ -67,14 +67,14 @@ class CoachingStateTests(unittest.TestCase):
         view.first_frame_at -= 5
         self.assertTrue(state.can_review(view, time.monotonic()))
 
-    def test_cursor_change_keeps_speech_but_invalidates_mark(self):
+    def test_cursor_change_keeps_speech_and_original_annotation_frame(self):
         view, state = frame(), LiveTurnState()
         state.start_review(view, time.monotonic())
         reviewed_id = state.review.frame_id
         data = jpeg(cursor=True)
         view.accept(str(uuid4()), data, *inspect_frame(data))
         self.assertFalse(state.review_is_stale(view))
-        self.assertFalse(state.annotation_is_current(view))
+        self.assertTrue(state.annotation_is_current(view))
         self.assertEqual(state.review.frame_id, reviewed_id)
 
     def test_major_viewport_change_and_source_pause_invalidate(self):
@@ -321,10 +321,12 @@ class CoachingTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_changed_frame_annotation_returns_error_without_rebinding(self):
         self.state.start_review(self.frames, time.monotonic())
         self.state.review.decision = "mistake"
-        data = jpeg(cursor=True)
+        data = jpeg(background="black")
         self.frames.accept(str(uuid4()), data, *inspect_frame(data))
         response = await self.service._handle_function_call(
-            types.FunctionCall(id="mark", name="add_annotations", args={"items": []}),
+            types.FunctionCall(id="mark", name="add_annotations", args={"items": [
+                {"kind": "rectangle", "label": "Review step", "box_2d": [100, 100, 400, 500]}
+            ]}),
             self.session,
             self.frames,
             {},
@@ -379,7 +381,9 @@ class CoachingTransportTests(unittest.IsolatedAsyncioTestCase):
         await self.emit(
             tool_call=types.LiveServerToolCall(
                 function_calls=[
-                    types.FunctionCall(id="mark", name="add_annotations", args={"items": []})
+                    types.FunctionCall(id="mark", name="add_annotations", args={"items": [
+                        {"kind": "rectangle", "label": "Review step", "box_2d": [100, 100, 400, 500]}
+                    ]})
                 ]
             )
         )

@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS course_notes (
     status                  TEXT NOT NULL DEFAULT 'processing'
         CHECK (status IN ('processing', 'ready', 'failed')),
     processing_progress     INTEGER NOT NULL DEFAULT 0 CHECK (processing_progress BETWEEN 0 AND 100),
+    processing_revision     INTEGER NOT NULL DEFAULT 0,
     failure_code            TEXT,
     created_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -70,6 +71,9 @@ CREATE TABLE IF NOT EXISTS study_materials (
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     generated_at    TEXT,
+    sources_outdated INTEGER NOT NULL DEFAULT 0 CHECK (sources_outdated IN (0, 1)),
+    sources_missing INTEGER NOT NULL DEFAULT 0 CHECK (sources_missing IN (0, 1)),
+    context_truncated INTEGER NOT NULL DEFAULT 0 CHECK (context_truncated IN (0, 1)),
     UNIQUE (id, class_id),
     CHECK (status <> 'ready' OR content IS NOT NULL),
     CHECK (status = 'failed' OR failure_code IS NULL)
@@ -205,14 +209,6 @@ CREATE INDEX IF NOT EXISTS uploaded_assessments_class_status_idx
     ON uploaded_assessments (class_id, processing_status);
 CREATE INDEX IF NOT EXISTS study_material_flags_reporter_created_idx
     ON study_material_flags (reporter_id, created_at DESC);
-
-CREATE TRIGGER IF NOT EXISTS course_notes_delete_derived_materials
-BEFORE DELETE ON course_notes
-FOR EACH ROW
-BEGIN
-    DELETE FROM study_materials
-    WHERE id IN (SELECT material_id FROM study_material_sources WHERE note_id = OLD.id);
-END;
 
 -- Accounts and cookie-backed login sessions. Class rows keep a plain TEXT
 -- owner_id so existing local data can be adopted by an account.

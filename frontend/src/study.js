@@ -84,6 +84,7 @@ function formatRemoteMaterial(detail, klassId, uiTypeFallback, uploads = []) {
     scope: scopeLabel,
     sources: sourceNames,
     sourceUploadIds: [...sourceIds],
+    sourceWarnings: detail.source_warnings || [],
     status: detail.status || "ready",
     count,
     createdAt: detail.created_at || new Date().toISOString(),

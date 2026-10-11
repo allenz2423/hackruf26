@@ -124,6 +124,14 @@ Remote quiz detail omits answer keys. Submit choice IDs, true/false values, and 
 
 ### Tutor tab
 
+Review integration fixes: PDFs/images opened on the tutor stage render at up to 1920 pixels on their longest edge, matching screen capture. Screen samples are dropped when WebSocket buffers are congested, including a projected-size check, so stale frames do not accumulate without bound.
+
+Quiz **Ask the tutor** queues the question, all choices, the student's attempted answer, and relevant backend upload IDs. The tutor pre-fills that context and initially selects matching uploads; the student still chooses when to share and send the question. Existing plain-text queued questions remain readable.
+
+Study sets display `source_warnings` for changed/deleted uploads and partial source coverage. Source citations in quizzes, study guides, and flashcards open the original upload preview. PDF references open at the cited page; lecture references seek to the cited timestamp; slide references retain their visible locator. Missing sources show a recoverable error and leave the saved study set usable. Opening a citation does not start companion generation unless the student selects Study document.
+
+Practice-test scoring failures preserve answers and resume the countdown against its original deadline. If time has expired, inputs stay locked and Retry scoring resubmits the frozen answers; retries never extend the deadline. Navigation cancels the countdown and ignores late submission responses.
+
 The screen-sharing workspace described above, with the class selected. The page tells the backend the class ID when starting the session so the tutor gets that class's materials. Tutor answers that rely on an upload show a source chip linking to it.
 
 - **Tutor materials.** The "Using <class> · All materials" pill opens a checklist of the class's uploads. The chosen IDs go to `POST /api/live-sessions` as `upload_ids`; choosing every upload sends none, so new uploads join automatically. The choice is kept per class in this browser (`tutor-materials.js`) and is locked while a session runs.
@@ -229,7 +237,7 @@ Keep the backend session in one controller so capture, audio, transcript, and an
 1. The student presses **Share screen**. In that click handler, call `navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })`. Let the browser choose the source; do not attempt to select one from JavaScript or reuse permission silently.
 2. Show the returned stream in a `<video>` element using `srcObject`. The local preview does not pass through the backend.
 3. Request a one-use ticket from `POST /api/live-sessions`, then open `WS /api/live` on the same origin using the ticket subprotocol. If ticket creation or connection fails, stop capture tracks and show a retry action.
-4. While screen sharing is active, sample the preview to JPEG no more than once per second, scaling its longest dimension to at most 1280 pixels without enlarging small sources. Send each frame over the backend WebSocket with a client-generated `frame_id` and keep a short in-memory map of frame IDs to JPEG dimensions, original source dimensions, and timestamps. Stop clears the frame map and the sampling canvas.
+4. While screen sharing is active, sample the preview to JPEG no more than once per second, scaling its longest dimension to at most 1920 pixels without enlarging small sources. Start at quality 0.85 and reduce quality or dimensions to fit the existing byte limit. Send each frame over the backend WebSocket with a client-generated `frame_id` and keep a short in-memory map of frame IDs to JPEG dimensions, original source dimensions, timestamps, and bounded grayscale comparison thumbnails. Stop clears the frame map and capture/comparison canvases.
 5. Send typed questions as text. When the student enables the microphone, request microphone permission separately and stream audio over the same WebSocket. Screen-only plus typed input remains available when microphone permission is denied.
 6. Play returned tutor audio and show transcript events as captions/conversation text. The backend translates provider events into a small, provider-neutral event protocol.
 7. When the student ends screen sharing, stop the tracks, close the backend session, clear frame buffers, and remove annotations. When only the microphone is paused, stop sending audio while keeping text/screen tutoring available.
@@ -252,7 +260,7 @@ When Check my steps is enabled, show a reminder to turn on the microphone, expla
 
 ## Annotation rendering
 
-`add_annotations` is the only provider-requested visual action. The backend attaches the `frame_id` of the latest frame it forwarded. Each item contains a shape, a short label, and a normalized rectangle. The frontend:
+`add_annotations` is the only provider-requested visual action. The backend attaches the exact frame reference pinned to the question or automatic review, rather than rebinding to a frame arriving during generation. Each item contains a shape, a short label, and a normalized rectangle. The student authorized the annotation integration fixes on 2026-10-11. The frontend:
 
 - Accepts only known shapes (`pointer`, `rectangle`, `underline`, `note`) and finite coordinates in the `0..1` range.
 - Rejects unknown frames, old frame IDs, out-of-bounds regions, long labels, and excessive mark counts.
@@ -261,6 +269,11 @@ When Check my steps is enabled, show a reminder to turn on the microphone, expla
 - Places each explanatory label inside its region, wraps long text, and reduces its font size to fit. Labels cannot spill outside the box. For regions too small for readable text, show an abbreviated label or omit it in the preview; the annotation list retains the complete explanation.
 - Renders marks as pointer-events-disabled UI elements; they must not intercept input to the video or conversation controls.
 - Gives each mark a dismiss button in an accessible list and expires marks automatically. If an annotation references a stale frame, return an error tool response and display the spoken explanation without a mark.
+- Captures at most 1920 pixels along the long dimension, without upscaling, at JPEG quality 0.85. Reduce quality or dimensions if the decoded JPEG would exceed 2,200,000 bytes; retain one sampled frame per second and the existing WebSocket formats.
+- Keeps an in-memory grayscale comparison thumbnail of at most 960 pixels along the long dimension with each of the eight frame references. Do not retain old JPEGs, write comparison data to storage, or send comparison data to the backend. Release it when capture ends or memory resets.
+- Compares the marked region, including a small surrounding margin, with the current preview at admission, on sampled frames, and every 250 ms while marks are present. Remove changed targets, including scroll/window movement and edits in that region. Unrelated changes outside the region and narrow cursor-like differences are ignored. Missing comparison data or changed source dimensions fail closed in the application. This heuristic cannot guarantee pixel-perfect placement or track moving targets.
+- Draws an underline at the bottom of its target bounds, a pointer arrow toward their center, a rectangle outline, and a distinct note box. Small text regions show their complete explanation in the annotation list rather than covering the text with a label. Preserve the centered SVG/video scaling.
+- Clears marks on a provider interruption as well as pause, End, source replacement, and memory reset.
 
 The example schema and coordinate convention live in [the product design](design.md#annotation-contract). The browser performs final frame and geometry validation because it owns the preview and frame map.
 
