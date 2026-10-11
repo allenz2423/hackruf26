@@ -12,7 +12,16 @@ const STORE_KEY = "screen-tutor-classes";
 const VERSION_KEY = "screen-tutor-sample-version";
 const SAMPLE_SEED_KEY = `${STORE_KEY}-algebra-examples-v1`;
 
-const CLASS_PALETTE = ["#2563eb", "#7c3aed", "#059669", "#d97706", "#dc2626", "#0891b2"];
+// Earlier builds saved saturated defaults; map them to the current ink palette.
+const LEGACY_CLASS_COLORS = {
+  "#2563eb": "#3f6577",
+  "#7c3aed": "#7a4a72",
+  "#059669": "#4f7340",
+  "#d97706": "#8a6414",
+  "#dc2626": "#b04a2f",
+  "#0891b2": "#26707a"
+};
+const CLASS_PALETTE = ["#3f6577", "#7a4a72", "#4f7340", "#8a6414", "#b04a2f", "#26707a"];
 
 function cloneData(value) {
   return JSON.parse(JSON.stringify(value));
@@ -24,6 +33,7 @@ function normalizeClass(klass) {
     focus: "",
     updatedAt: new Date().toISOString(),
     ...klass,
+    color: LEGACY_CLASS_COLORS[klass.color] || klass.color,
     uploads: Array.isArray(klass.uploads) ? klass.uploads : [],
     materials: Array.isArray(klass.materials) ? klass.materials : []
   };
@@ -58,7 +68,7 @@ function addAlgebraExamples(classes) {
     mathClass = {
       id: "math-151",
       name: "Math 151",
-      color: "#2563eb",
+      color: "#3f6577",
       icon: "M",
       uploads: [],
       materials: []
@@ -200,7 +210,7 @@ export async function createClass(name) {
     created = {
       id: makeId(trimmed),
       name: trimmed,
-      color: "#7c3aed",
+      color: "#7a4a72",
       icon: trimmed.charAt(0).toUpperCase() || "C",
       nextExam: "",
       focus: "New class workspace",

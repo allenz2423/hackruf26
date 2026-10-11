@@ -173,16 +173,12 @@ async function renderClasses() {
         <div>
           <h1>Your classes</h1>
           <p class="muted">Upload materials to a class, then study or get tutoring from them.</p>
+          <p class="desk-summary">${classes.length} ${classes.length === 1 ? "class" : "classes"} · ${totalUploads} ${totalUploads === 1 ? "upload" : "uploads"} · ${totalMaterials} study ${totalMaterials === 1 ? "set" : "sets"}</p>
         </div>
         <div class="page-actions">
           <button id="restore-sample-data" class="btn btn-secondary" type="button">${icon("sparkles", { size: 18 })} Restore sample data</button>
           <button id="new-class" class="btn btn-primary" type="button">${icon("plus", { size: 18 })} New class</button>
         </div>
-      </div>
-      <div class="metric-strip" aria-label="Workspace summary">
-        <div class="metric"><strong>${classes.length}</strong><span>Classes</span></div>
-        <div class="metric"><strong>${totalUploads}</strong><span>Uploads</span></div>
-        <div class="metric"><strong>${totalMaterials}</strong><span>Study sets</span></div>
       </div>
       <div class="class-grid" id="class-grid"></div>
     </section>
@@ -190,7 +186,7 @@ async function renderClasses() {
 
   const grid = document.querySelector("#class-grid");
   grid.innerHTML = classes.map((klass) => `
-    <article class="class-card" style="--class-color: ${escapeHtml(klass.color || "#2563eb")}">
+    <article class="class-card" style="--class-color: ${escapeHtml(klass.color || "#3f6577")}">
       <a href="#/classes/${encodeURIComponent(klass.id)}/library" class="class-card-main">
         <span class="class-icon" aria-hidden="true">${escapeHtml(klass.icon || "C")}</span>
         <span class="class-name">${escapeHtml(klass.name)}</span>
@@ -290,7 +286,7 @@ async function renderClassTab({ id, tab }) {
     <section>
       <a class="back-link" href="#/classes">${icon("arrowLeft", { size: 16 })} All classes</a>
       <div class="class-header">
-        <div class="class-title" style="--class-color: ${escapeHtml(klass.color || "#2563eb")}">
+        <div class="class-title" style="--class-color: ${escapeHtml(klass.color || "#3f6577")}">
           <span class="class-icon" aria-hidden="true">${escapeHtml(klass.icon || "C")}</span>
           <div>
             <h1>${escapeHtml(klass.name)}</h1>

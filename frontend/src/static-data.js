@@ -6,7 +6,7 @@ export const starterClasses = [
   {
     id: "math-151",
     name: "Math 151",
-    color: "#2563eb",
+    color: "#3f6577",
     icon: "M",
     nextExam: "Midterm 1 on Oct 18",
     focus: "Derivatives, limits, and curve sketching",
@@ -121,7 +121,7 @@ export const starterClasses = [
   {
     id: "biology",
     name: "Biology",
-    color: "#059669",
+    color: "#4f7340",
     icon: "B",
     nextExam: "Quiz Friday",
     focus: "Cell membranes and enzyme kinetics",
@@ -179,7 +179,7 @@ export const starterClasses = [
   {
     id: "history-202",
     name: "History 202",
-    color: "#7c3aed",
+    color: "#7a4a72",
     icon: "H",
     nextExam: "Essay outline due Oct 14",
     focus: "Primary source analysis",
