@@ -3321,9 +3321,11 @@ p {
 }
 
 .mark-label {
-  fill: #1c2e37;
-  stroke: #f6d94a;
-  stroke-width: 1.1;
+  color: #1c2e37;
+}
+
+.mark-label-text {
+  background: #f6d94a;
 }
 
 /* Press feedback */
