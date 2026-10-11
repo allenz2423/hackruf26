@@ -9,12 +9,15 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.live_modes import TutorMode
+
 
 class LiveSessionRequest(BaseModel):
-    """Only a server-authorized class context may be selected by the caller."""
+    """Select authorized class context and a predefined server-owned tutor mode."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     class_id: UUID | None = None
+    mode: TutorMode = TutorMode.CONVERSATION
 
 
 class CalculatorRequest(BaseModel):

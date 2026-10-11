@@ -50,7 +50,7 @@ Class-library routes always scope reads and writes to the configured owner UUID.
 ## HTTP API
 
 - `GET /healthz`
-- `POST /api/live-sessions` with `{}` or optional `{"class_id":"<uuid>"}`; returns a one-use connection ticket and expiry
+- `POST /api/live-sessions` with `{}` or optional `class_id` (UUID) and `mode` (`conversation` or `check_steps`); returns a one-use connection ticket and expiry
 - `WS /api/live` using the ticket as a WebSocket subprotocol
 - `POST /api/tools/calculate`
 - `POST /api/tools/verify-lean`
@@ -82,13 +82,31 @@ The SDK's `session.receive()` iterator ends after each completed model turn. The
 
 If `class_id` is supplied, the backend checks ownership in SQLite and builds class context from ready uploads. The client cannot choose the provider, model, system instructions, modalities, or tool declarations. Tickets contain no provider credential and do not grant direct model access.
 
+### Check my steps mode
+
+The browser may select `mode: "check_steps"` when requesting a ticket. Omitted mode defaults to `conversation`. This selects a predefined backend coaching policy; it accepts no client instructions or additional permissions. The mode is bound to the one-use ticket and fixed for that connection. End the session before changing it.
+
+In coaching mode, the tutor follows the student's spoken steps and available screen frames, using ready class materials when supplied. At a speech pause it identifies a clear error, gives one short corrective hint, and requests a mark only when the affected step is visible. It asks for clarification when the speech, screen, or notes are ambiguous, avoids solving the remaining problem, and lets the student continue. It does not guarantee error detection or interruption during uninterrupted speech.
+
+Automatic speech detection uses a 900 ms silence window in this mode to allow short thinking pauses. Student speech can still interrupt tutor output; the existing `interrupted` event clears browser playback. Coaching adds no recordings, stored transcripts, extra model connections, or new tools. Normal conversation retains its existing speech detection configuration. See [Live speech detection configuration](https://ai.google.dev/gemini-api/docs/live-api/capabilities#automatic-vad-configuration).
+
 ### Class Tutor integration
 
-The class Tutor sends the backend class UUID from the persisted `backendId` mapping, resolved by `getBackendClassId(klass)`, to `POST /api/live-sessions`. Its browser route slug is not a backend ID. Before opening Live, `prepareTutorClass()` reconciles the class and actual source files through the existing class/upload APIs and waits for processing to finish. Empty classes are created without requiring an upload. Navigation or End cancels client preparation and prevents a late connection. Quick Tutor sends `{}` and works without a class. The backend retains UUID validation and ownership checks.
+The class Tutor sends the backend class UUID from the persisted `backendId` mapping, resolved by `getBackendClassId(klass)`, to `POST /api/live-sessions`. Its browser route slug is not a backend ID. Before opening Live, `prepareTutorClass()` reconciles the class and actual source files through the existing class/upload APIs and waits for processing to finish. Empty classes are created without requiring an upload. Navigation or End cancels client preparation and prevents a late connection. Quick Tutor omits `class_id` and works without a class. Both paths send the selected predefined mode. The backend retains UUID validation and ownership checks.
+
+### Changing screen content and corrections
+
+Screen frames are changing snapshots, not permanent facts. The backend instructions require the newest readable frame and the student's latest correction to take precedence over older visual observations and assistant claims. Erased, replaced, or corrected work must not remain a current error. Class reference material supplies methods and definitions; it is not evidence that an old equation still appears on screen.
+
+The Live configuration explicitly includes all incoming video between spoken turns, including screen changes made during silence. For a typed question, the backend includes its latest JPEG snapshot with the question in one ordered content update when the frame is at most ten seconds old. Only one bounded JPEG is retained in active session memory; it is replaced on the next frame and cleared on screen pause or disconnect. No images, corrections, or conversations are saved or logged.
+
+The browser sends `screen_paused` whenever sharing stops while Live remains connected. The backend invalidates the current frame and adds a fixed server-owned context notice; on the next frame it signals that a new current screen is available. Annotation requests are rejected without a frame or when its age exceeds ten seconds.
+
+**Reset tutor memory** closes the existing gateway connection and requests a new one-use ticket for the same predefined mode and class. The new provider connection receives current class context but no old frames, turns, transcript, or resumption handle. Screen capture remains under the student's existing permission; a new frame is sampled after readiness. The browser clears its transcript and marks, stops queued speech, and turns off the microphone until the student enables it again. Normal ticket rate limits and failure cleanup still apply. Prompting improves grounding but cannot guarantee that a model will never make another error; reset provides an explicit way to discard the previous conversation.
 
 ### WebSocket events
 
-The browser may send only `text`, `audio`, `audio_end`, `frame`, and `annotation_result` events. Event payloads are size-limited and validated; frame payloads must be JPEG and are rate-limited. The backend emits `ready`, `assistant`, `annotation_request`, and sanitized `error` events. WebSocket media stays in active session memory only.
+The browser may send only `text`, `audio`, `audio_end`, `frame`, `screen_paused` (no additional fields), and `annotation_result` events. Event payloads are size-limited and validated; frame payloads must be JPEG and are rate-limited. The backend emits `ready`, `assistant`, `annotation_request`, and sanitized `error` events. WebSocket media stays in active session memory only.
 
 The frontend caps the longest JPEG frame dimension at 1280 pixels to stay within the backend's 2,200,000-byte decoded frame limit, including detailed 4K displays. Original source dimensions stay in the browser's frame map for annotation alignment and source-resize validation. The browser rejects annotation references older than ten seconds and caps active marks at eight across requests. The HTTP and WebSocket formats remain unchanged.
 

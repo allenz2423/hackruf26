@@ -43,6 +43,7 @@ const state = {
   screen: "not sharing",
   mic: "off",
   micDevice: "",
+  tutorMode: "conversation",
   messages: []
 };
 
@@ -77,9 +78,25 @@ function syncTutorControls() {
 
   const sharing = state.screen === "sharing" || state.screen === "selecting";
   const inSession = !["idle", "ended", "error"].includes(state.session);
-  share.disabled = sharing;
+  share.disabled = sharing || ["connecting", "reconnecting"].includes(state.session);
   document.querySelector("#pause-screen").disabled = !sharing;
   document.querySelector("#end-session").disabled = !inSession;
+  const resetMemory = document.querySelector("#reset-tutor-memory");
+  if (resetMemory) {
+    resetMemory.disabled = state.connection !== "connected" || !["active", "screen_paused"].includes(state.session);
+  }
+  const coachingToggle = document.querySelector("#check-steps");
+  if (coachingToggle) {
+    const coaching = state.tutorMode === "check_steps";
+    const modeLocked = inSession || ["connecting", "connected"].includes(state.connection);
+    coachingToggle.checked = coaching;
+    coachingToggle.disabled = modeLocked;
+    document.querySelector("#coaching-description").textContent = coaching
+      ? `Explain one step at a time and pause for a short corrective hint. Feedback can miss mistakes.${modeLocked ? " End the session to change modes." : ""}`
+      : modeLocked
+        ? "Conversation mode is active. End the session to enable Check my steps."
+        : "Enable before sharing for corrective hints at pauses as you explain your solution.";
+  }
   const micToggle = document.querySelector("#mic-toggle");
   if (micToggle) {
     const micActive = ["on", "muted", "requesting"].includes(state.mic);
@@ -96,10 +113,14 @@ function syncTutorControls() {
     micFeedback.dataset.mic = state.mic;
     const descriptions = {
       requesting: "Allow microphone access in your browser, or click the mic again to cancel.",
-      on: "Listening. Speak your question, then pause for the tutor to reply.",
+      on: state.tutorMode === "check_steps"
+        ? "Listening to your steps. Pause for feedback; speaking again interrupts the tutor."
+        : "Listening. Speak your question, then pause for the tutor to reply.",
       muted: "Your microphone is temporarily muted or unavailable. Check your device.",
       off: state.connection === "connected"
-        ? "Microphone off. Turn it on to ask a question aloud."
+        ? state.tutorMode === "check_steps"
+          ? "Microphone off. Turn it on to walk through your solution."
+          : "Microphone off. Turn it on to ask a question aloud."
         : "Share your screen to connect, then turn on the microphone."
     };
     document.querySelector("#mic-description").textContent = descriptions[state.mic] || descriptions.off;
@@ -569,7 +590,18 @@ function renderTutor(klass = null) {
       </div>
       <aside class="panel conversation-panel" aria-label="Tutor conversation">
         <div class="conversation-head">
-          <h2>Conversation</h2>
+          <div class="conversation-title-row">
+            <h2>Conversation</h2>
+            <button id="reset-tutor-memory" class="btn btn-ghost" type="button" disabled aria-label="Reset tutor memory" aria-describedby="reset-memory-description">${icon("refresh", { size: 16 })} Reset memory</button>
+          </div>
+          <p id="reset-memory-description" class="tutor-memory-hint">Clear the conversation and marks if the tutor refers to old work. Your screen stays shared; the microphone turns off.</p>
+          <div class="coaching-controls">
+            <label class="check-steps-control" for="check-steps">
+              <input id="check-steps" type="checkbox" aria-describedby="coaching-description" />
+              <span>Check my steps</span>
+            </label>
+            <p id="coaching-description" role="status" aria-live="polite"></p>
+          </div>
         </div>
         <ol id="conversation-list" class="conversation-list" data-empty-prompt="${escapeHtml(klass ? `Ask about your shared screen or ${klass.name}'s course materials.` : "Share your screen or ask a general question to get started.")}" aria-live="polite"></ol>
         <div id="mic-feedback" class="mic-feedback" data-mic="off">
@@ -653,6 +685,7 @@ function renderTutor(klass = null) {
     video,
     onEnded: () => {
       if (disposed) return;
+      live.pauseScreen();
       annotations.clear();
       emptyStage.hidden = false;
       setStatus({ session: "screen_paused", screen: "paused" });
@@ -700,7 +733,7 @@ function renderTutor(klass = null) {
     annotations.destroy();
     Object.assign(state, {
       session: "idle", connection: "offline", screen: "not sharing",
-      mic: "off", micDevice: "", messages: []
+      mic: "off", micDevice: "", tutorMode: "conversation", messages: []
     });
     disposeTutor = null;
   };
@@ -722,7 +755,7 @@ function renderTutor(klass = null) {
           if (disposed || requestId !== sessionRequestId) return;
           classPreparation = null;
         }
-        await live.connect();
+        await live.connect({ mode: state.tutorMode });
       }
       if (disposed || requestId !== sessionRequestId) return;
       setStatus({ session: "active" });
@@ -736,6 +769,7 @@ function renderTutor(klass = null) {
 
   document.querySelector("#pause-screen").addEventListener("click", () => {
     capture.stop();
+    live.pauseScreen();
     annotations.clear();
     emptyStage.hidden = false;
     setStatus({ session: "screen_paused", screen: "paused" });
@@ -747,6 +781,42 @@ function renderTutor(klass = null) {
   });
 
   document.querySelector("#clear-marks").addEventListener("click", () => annotations.clear());
+  document.querySelector("#reset-tutor-memory").addEventListener("click", async () => {
+    if (state.connection !== "connected" || !["active", "screen_paused"].includes(state.session)) return;
+    const requestId = ++sessionRequestId;
+    // A fresh ticket creates a new provider conversation. No old messages or
+    // frames are replayed, and no new capture permission is requested.
+    audioController.disable();
+    live.close();
+    annotations.clear();
+    capture.clearFrames();
+    state.messages = [];
+    document.querySelector("#conversation-list").replaceChildren();
+    setStatus({ session: "connecting", connection: "connecting", mic: "off", micDevice: "" });
+    try {
+      await audioController.preparePlayback();
+      if (disposed || requestId !== sessionRequestId) return;
+      await live.connect({ mode: state.tutorMode });
+      if (disposed || requestId !== sessionRequestId) return;
+      if (capture.stream) {
+        capture.sampleFrame();
+        setStatus({ session: "active", screen: "sharing" });
+      } else {
+        live.pauseScreen();
+        setStatus({ session: "screen_paused", screen: "paused" });
+      }
+      toast("Tutor memory reset. Turn on the microphone when you're ready to continue.");
+    } catch (error) {
+      if (disposed || requestId !== sessionRequestId) return;
+      stopSession();
+      setStatus({ session: "error", screen: "not sharing", connection: "offline" });
+      toast(`Could not reset the tutor: ${error.message}`, { tone: "error" });
+    }
+  });
+  document.querySelector("#check-steps").addEventListener("change", (event) => {
+    if (event.currentTarget.disabled) return;
+    setStatus({ tutorMode: event.currentTarget.checked ? "check_steps" : "conversation" });
+  });
   document.querySelector("#mic-toggle")?.addEventListener("click", async () => {
     try {
       if (state.connection !== "connected" && !audioController.enabled && !audioController.requesting) return;

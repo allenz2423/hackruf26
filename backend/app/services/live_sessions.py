@@ -22,6 +22,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from app.api.schemas import CalculatorRequest, LeanProofRequest
 from app.config import Settings
+from app.live_modes import TutorMode
 from app.security.rate_limit import InMemoryRateLimiter
 from app.services.calculator import CalculatorInputError, evaluate_expression
 from app.services.lean_proofs import (
@@ -30,13 +31,20 @@ from app.services.lean_proofs import (
     LeanProofService,
     LeanRuntimeUnavailable,
 )
-from app.services.live_config import live_connect_config
+from app.services.live_config import (
+    CURRENT_SCREEN_CONTEXT,
+    NO_CURRENT_SCREEN_CONTEXT,
+    SCREEN_PAUSED_CONTEXT,
+    SCREEN_RESUMED_CONTEXT,
+    live_connect_config,
+)
 
 logger = logging.getLogger("screen_tutor.live")
 TICKET_TTL_SECONDS = 45
 MAX_CLIENT_MESSAGE_BYTES = 3_200_000
 MAX_FRAME_BYTES = 2_200_000
 FRAME_INTERVAL_SECONDS = 1.0
+MAX_FRAME_AGE_SECONDS = 10.0
 ANNOTATION_REPLY_TIMEOUT_SECONDS = 15
 
 
@@ -44,6 +52,7 @@ ANNOTATION_REPLY_TIMEOUT_SECONDS = 15
 class LiveSessionTicket:
     class_context: str | None
     expires_at: datetime
+    mode: TutorMode = TutorMode.CONVERSATION
 
 
 class LiveSessionTicketStore:
@@ -53,13 +62,15 @@ class LiveSessionTicketStore:
         self._tickets: dict[str, LiveSessionTicket] = {}
         self._lock = asyncio.Lock()
 
-    async def issue(self, class_context: str | None) -> tuple[str, datetime]:
+    async def issue(
+        self, class_context: str | None, *, mode: TutorMode = TutorMode.CONVERSATION
+    ) -> tuple[str, datetime]:
         now = datetime.now(UTC)
         expires_at = now + timedelta(seconds=TICKET_TTL_SECONDS)
         ticket = secrets.token_urlsafe(32)
         async with self._lock:
             self._remove_expired(now)
-            self._tickets[ticket] = LiveSessionTicket(class_context, expires_at)
+            self._tickets[ticket] = LiveSessionTicket(class_context, expires_at, mode)
         return ticket, expires_at
 
     async def consume(self, ticket: str) -> LiveSessionTicket | None:
@@ -95,6 +106,10 @@ class _AudioEndEvent(_ClientEvent):
     type: Literal["audio_end"]
 
 
+class _ScreenPausedEvent(_ClientEvent):
+    type: Literal["screen_paused"]
+
+
 class _FrameEvent(_ClientEvent):
     type: Literal["frame"]
     frame_id: UUID
@@ -110,7 +125,7 @@ class _AnnotationResultEvent(_ClientEvent):
 
 
 _EVENT_ADAPTER = TypeAdapter(
-    _TextEvent | _AudioEvent | _AudioEndEvent | _FrameEvent | _AnnotationResultEvent
+    _TextEvent | _AudioEvent | _AudioEndEvent | _ScreenPausedEvent | _FrameEvent | _AnnotationResultEvent
 )
 
 
@@ -118,6 +133,19 @@ _EVENT_ADAPTER = TypeAdapter(
 class _FrameState:
     latest_frame_id: str | None = None
     last_frame_at: float = 0.0
+    latest_image: bytes | None = None
+    paused: bool = False
+
+    def is_current(self) -> bool:
+        return bool(
+            self.latest_frame_id
+            and not self.paused
+            and time.monotonic() - self.last_frame_at <= MAX_FRAME_AGE_SECONDS
+        )
+
+    def clear(self) -> None:
+        self.latest_frame_id = None
+        self.latest_image = None
 
 
 class GeminiLiveSessionService:
@@ -138,7 +166,13 @@ class GeminiLiveSessionService:
         self._lean_limiter = lean_limiter
         self._lean_service = lean_service
 
-    async def run(self, websocket: WebSocket, class_context: str | None) -> None:
+    async def run(
+        self,
+        websocket: WebSocket,
+        class_context: str | None,
+        *,
+        mode: TutorMode = TutorMode.CONVERSATION,
+    ) -> None:
         request_id = secrets.token_hex(12)
         send_lock = asyncio.Lock()
         upstream_send_lock = asyncio.Lock()
@@ -153,6 +187,7 @@ class GeminiLiveSessionService:
         try:
             config = live_connect_config(
                 class_context,
+                mode=mode,
                 include_lean_tool=self._settings.lean_tool_enabled,
             )
             async with self._client.aio.live.connect(
@@ -229,6 +264,7 @@ class GeminiLiveSessionService:
             except Exception:
                 pass
         finally:
+            frames.clear()
             for future in pending_annotations.values():
                 if not future.done():
                     future.cancel()
@@ -273,15 +309,29 @@ class GeminiLiveSessionService:
 
             if isinstance(event, _TextEvent):
                 async with upstream_send_lock:
+                    # Keep the latest image and the student's correction in one
+                    # ordered update, without replaying any older screen frames.
+                    parts = [types.Part(text=NO_CURRENT_SCREEN_CONTEXT)]
+                    if frames.is_current() and frames.latest_image is not None:
+                        parts = [
+                            types.Part(text=CURRENT_SCREEN_CONTEXT),
+                            types.Part(
+                                inline_data=types.Blob(
+                                    data=frames.latest_image, mime_type="image/jpeg"
+                                )
+                            ),
+                        ]
+                    parts.append(types.Part(text=event.text))
                     await session.send_client_content(
                         turns=[
                             types.Content(
                                 role="user",
-                                parts=[types.Part(text=event.text)],
+                                parts=parts,
                             )
                         ],
                         turn_complete=True,
                     )
+                    del parts
             elif isinstance(event, _AudioEvent):
                 try:
                     data = _decode_base64(event.data, max_bytes=24_000)
@@ -302,6 +352,20 @@ class GeminiLiveSessionService:
             elif isinstance(event, _AudioEndEvent):
                 async with upstream_send_lock:
                     await session.send_realtime_input(audio_stream_end=True)
+            elif isinstance(event, _ScreenPausedEvent):
+                frames.clear()
+                if frames.paused:
+                    continue
+                frames.paused = True
+                async with upstream_send_lock:
+                    await session.send_client_content(
+                        turns=[
+                            types.Content(
+                                role="user", parts=[types.Part(text=SCREEN_PAUSED_CONTEXT)]
+                            )
+                        ],
+                        turn_complete=False,
+                    )
             elif isinstance(event, _FrameEvent):
                 now = time.monotonic()
                 if now - frames.last_frame_at < FRAME_INTERVAL_SECONDS:
@@ -329,11 +393,23 @@ class GeminiLiveSessionService:
                     await websocket.close(code=1003)
                     return
                 async with upstream_send_lock:
+                    if frames.paused:
+                        await session.send_client_content(
+                            turns=[
+                                types.Content(
+                                    role="user", parts=[types.Part(text=SCREEN_RESUMED_CONTEXT)]
+                                )
+                            ],
+                            turn_complete=False,
+                        )
                     await session.send_realtime_input(
                         video=types.Blob(data=data, mime_type="image/jpeg")
                     )
-                frames.latest_frame_id = str(event.frame_id)
-                frames.last_frame_at = now
+                    frames.latest_frame_id = str(event.frame_id)
+                    frames.latest_image = data
+                    frames.last_frame_at = time.monotonic()
+                    frames.paused = False
+                    del data
             elif isinstance(event, _AnnotationResultEvent):
                 future = pending_annotations.get(event.call_id)
                 if future is not None and not future.done():
@@ -431,9 +507,12 @@ class GeminiLiveSessionService:
 
         if name == "add_annotations":
             frame_id = frames.latest_frame_id
-            if not frame_id:
+            if not frames.is_current():
                 result = {
-                    "error": {"code": "no_frame", "message": "No recent screen frame is available."}
+                    "error": {
+                        "code": "no_frame",
+                        "message": "No current screen frame is available. Do not mark remembered work.",
+                    }
                 }
             elif not call_id:
                 result = {
