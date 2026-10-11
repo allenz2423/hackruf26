@@ -1,27 +1,27 @@
-/* Screen Tutor design tokens: quiet study workspace with teal actions. */
+/* Jot design tokens: quiet study workspace with slate-blue actions. */
 :root {
   color-scheme: light dark;
 
-  --bg: #f7f8f7;
+  --bg: #f4f7f8;
   --surface: #ffffff;
-  --surface-muted: #eff2f1;
-  --text: #202725;
-  --muted: #58645f;
-  --line: #e0e5e3;
-  --line-strong: #c8d1cd;
-  --primary: #0d766e;
-  --primary-hover: #0a625c;
+  --surface-muted: #e9eff1;
+  --text: #263a41;
+  --muted: #50585b;
+  --line: #d9e2e5;
+  --line-strong: #b5c3c8;
+  --primary: #456c7a;
+  --primary-hover: #263a41;
   --on-primary: #ffffff;
-  --primary-soft: #e3f2ee;
-  --accent: #b84d27;
+  --primary-soft: #e1eff5;
+  --accent: #527e8d;
   --success: #087b59;
   --success-soft: #eaf5ef;
   --warning: #92530c;
   --warning-soft: #fff3df;
   --danger: #dc2626;
   --danger-soft: #fef2f2;
-  --stage: #101a18;
-  --ring: rgba(13, 118, 110, 0.42);
+  --stage: #1b2a30;
+  --ring: rgba(69, 108, 122, 0.45);
   --shadow-sm: 0 1px 2px rgba(24, 37, 34, 0.05);
   --shadow-md: 0 10px 24px rgba(24, 37, 34, 0.09);
 
@@ -46,26 +46,26 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #15191a;
-    --surface: #1e2324;
-    --surface-muted: #282e30;
-    --text: #edf1f0;
-    --muted: #b6c0bd;
-    --line: #353e40;
-    --line-strong: #4b5859;
-    --primary: #63c4b4;
-    --primary-hover: #80d4c5;
-    --on-primary: #10231f;
-    --primary-soft: #1c3a34;
-    --accent: #f19a73;
+    --bg: #1a272c;
+    --surface: #263a41;
+    --surface-muted: #2f454d;
+    --text: #eef4f6;
+    --muted: #b3c0c5;
+    --line: #3b535c;
+    --line-strong: #50585b;
+    --primary: #7fc3da;
+    --primary-hover: #a0d4e5;
+    --on-primary: #13262d;
+    --primary-soft: #2a4650;
+    --accent: #7fc3da;
     --success: #69d0a4;
     --success-soft: #19372d;
     --warning: #f3bf69;
     --warning-soft: #3a2f1b;
     --danger: #ff8989;
     --danger-soft: #3b2222;
-    --stage: #090f0e;
-    --ring: rgba(99, 196, 180, 0.55);
+    --stage: #10191d;
+    --ring: rgba(127, 195, 218, 0.55);
     --shadow-sm: none;
     --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.35);
   }
@@ -269,13 +269,17 @@ ol {
 }
 
 .brand-mark {
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-sm);
-  background: var(--primary);
-  color: var(--on-primary);
+  display: block;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+}
+
+.brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .primary-nav {
@@ -1502,7 +1506,7 @@ main {
   width: 64px;
   height: 64px;
   border-radius: 50%;
-  background: rgba(99, 196, 180, 0.16);
+  background: rgba(127, 195, 218, 0.16);
   color: #7dd6c7;
 }
 
