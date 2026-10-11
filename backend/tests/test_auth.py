@@ -193,6 +193,53 @@ class AccountBoundaryTests(unittest.TestCase):
         self.assertEqual(grace.get("/api/classes").json()["items"], [])
         self.assertEqual(grace.patch(f"/api/classes/{class_id}", json={"name": "Mine now"}).status_code, 404)
 
+    def test_class_color_and_icon_follow_the_account(self) -> None:
+        self.signup(self.client)
+        created = self.client.post("/api/classes", json={"name": "History", "color": "berry"})
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual((created.json()["color"], created.json()["icon"]), ("berry", None))
+        class_id = created.json()["id"]
+
+        # Changing only the look keeps the name; changing only the name keeps the look.
+        styled = self.client.patch(f"/api/classes/{class_id}", json={"icon": "landmark"})
+        self.assertEqual(styled.status_code, 200)
+        self.assertEqual((styled.json()["name"], styled.json()["color"], styled.json()["icon"]), ("History", "berry", "landmark"))
+        renamed = self.client.patch(f"/api/classes/{class_id}", json={"name": "World History"})
+        self.assertEqual((renamed.json()["color"], renamed.json()["icon"]), ("berry", "landmark"))
+
+        elsewhere = self.other_client()
+        elsewhere.post("/api/auth/login", json={"identifier": "Ada_L", "password": "tutor-pass-1"})
+        [listed] = elsewhere.get("/api/classes").json()["items"]
+        self.assertEqual((listed["name"], listed["color"], listed["icon"]), ("World History", "berry", "landmark"))
+
+        # null resets to the default look.
+        reset = self.client.patch(f"/api/classes/{class_id}", json={"icon": None})
+        self.assertIsNone(reset.json()["icon"])
+
+    def test_class_look_only_accepts_the_fixed_choices(self) -> None:
+        self.signup(self.client)
+        class_id = self.client.post("/api/classes", json={"name": "Physics"}).json()["id"]
+        for bad in (
+            {"color": "#ff00ff"},
+            {"color": "red; background: url(x)"},
+            {"icon": "<svg onload=alert(1)>"},
+            {"icon": "rocket"},
+            {"name": None},
+            {"name": "   "},
+            {},
+        ):
+            with self.subTest(patch=bad):
+                self.assertEqual(self.client.patch(f"/api/classes/{class_id}", json=bad).status_code, 400)
+        self.assertEqual(self.client.post("/api/classes", json={"name": "Art", "color": "hotpink"}).status_code, 400)
+        [physics] = self.client.get("/api/classes").json()["items"]
+        self.assertEqual((physics["name"], physics["color"], physics["icon"]), ("Physics", None, None))
+
+    def test_the_class_look_choices_match_the_ones_the_browser_offers(self) -> None:
+        schema = self.client.app.openapi()["components"]["schemas"]["ClassPatch"]["properties"]
+        enums = {field: next(option["enum"] for option in schema[field]["anyOf"] if "enum" in option) for field in ("color", "icon")}
+        self.assertEqual(len(enums["color"]), 9)
+        self.assertEqual(len(enums["icon"]), 16)
+
     def test_class_tutor_needs_an_account_but_quick_tutor_does_not(self) -> None:
         guest = self.other_client()
         quick = guest.post("/api/live-sessions", json={})

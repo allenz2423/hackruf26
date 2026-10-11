@@ -154,17 +154,18 @@ export async function getClassesApi() {
   return res.items || [];
 }
 
-export async function createClassApi(name) {
+export async function createClassApi(name, { color = null, icon = null } = {}) {
   return await apiFetch("/api/classes", {
     method: "POST",
-    body: JSON.stringify({ name: name.trim() })
+    body: JSON.stringify({ name: name.trim(), color, icon })
   });
 }
 
-export async function updateClassApi(classId, name) {
+/** Change any of `name`, `color`, `icon`; fields left out stay as they are, null resets the look. */
+export async function updateClassApi(classId, fields) {
   return await apiFetch(`/api/classes/${encodeURIComponent(classId)}`, {
     method: "PATCH",
-    body: JSON.stringify({ name: name.trim() })
+    body: JSON.stringify(fields)
   });
 }
 

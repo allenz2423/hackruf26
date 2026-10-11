@@ -16,7 +16,8 @@ export class LiveSessionController {
     onAnnotationRequest,
     onAudioData,
     onAudioInterrupted,
-    onStatusChange
+    onStatusChange,
+    onTutorText
   } = {}) {
     this.classId = classId;
     this.onMessage = onMessage || (() => {});
@@ -24,6 +25,7 @@ export class LiveSessionController {
     this.onAudioData = onAudioData || (() => {});
     this.onAudioInterrupted = onAudioInterrupted || (() => {});
     this.onStatusChange = onStatusChange || (() => {});
+    this.onTutorText = onTutorText || (() => {});
     this.socket = null;
     this.outputText = "";
     this.failed = false;
@@ -125,7 +127,10 @@ export class LiveSessionController {
         this.outputText = "";
         this.onAudioInterrupted();
       }
-      if (typeof message.text === "string") this.outputText += message.text;
+      if (typeof message.text === "string" && message.text) {
+        this.outputText += message.text;
+        this.onTutorText(this.outputText);
+      }
       for (const chunk of message.audio || []) {
         this.onAudioData(chunk.data, chunk.mime_type);
       }

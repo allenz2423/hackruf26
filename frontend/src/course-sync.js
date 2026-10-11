@@ -7,6 +7,7 @@ import {
   uploadTextApi
 } from "./api.js";
 import { getBackendClassId, getClassById, updateClass } from "./classes.js";
+import { colorId } from "./class-style.js";
 import { getUploadedFile } from "./file-store.js";
 
 const POLL_INTERVAL_MS = 3000;
@@ -111,7 +112,7 @@ async function prepareBackendClass(klass, { signal } = {}) {
   }
   if (!classId) {
     throwIfAborted(signal);
-    const remoteClass = await createClassApi(klass.name);
+    const remoteClass = await createClassApi(klass.name, { color: colorId(klass.color), icon: klass.glyph || null });
     classId = remoteClass.id;
     klass.backendId = classId;
     await updateClass(klass.id, { backendId: classId });

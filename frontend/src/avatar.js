@@ -149,10 +149,82 @@ const ACCESSORIES = {
     </g>`
 };
 
+// Doodled stick arms and legs, drawn in ink (the page's text color via
+// currentColor, so they read in both themes), like a stick figure sketched in a
+// notebook margin. Arms have a shoulder and an elbow; legs pivot at the hip. CSS
+// moves them.
+const STICK = 'stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round" fill="none"';
+
+function armsMarkup() {
+  const arm = (side, x) => `
+      <g class="jot-arm jot-arm-${side}">
+        <path d="M${x} 66 V80" ${STICK}/>
+        <g class="jot-forearm">
+          <path d="M${x} 80 V92" ${STICK}/>
+          <circle cx="${x}" cy="94.5" r="3.6" fill="currentColor"/>
+        </g>
+      </g>`;
+  return arm("left", 19) + arm("right", 101);
+}
+
+function legsMarkup() {
+  const leg = (side, x, toe) => `
+      <g class="jot-leg jot-leg-${side}">
+        <path d="M${x} 98 V117 h${toe}" ${STICK}/>
+      </g>`;
+  return leg("left", 46, -7) + leg("right", 74, 7);
+}
+
+// Extra faces for moments in the conversation. Each has its own eyes and mouth; the
+// talking mouth still takes over while the tutor is speaking.
+function expressionsMarkup(f) {
+  const stroke = `fill="none" stroke="${f}" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round"`;
+  const happyEyes = `
+        <path d="M38.5 68.5 Q44 61.5 49.5 68.5" ${stroke}/>
+        <path d="M70.5 65.5 Q76 58.5 81.5 65.5" ${stroke}/>`;
+  return `
+      <g class="jot-expr jot-expr-proud">
+        <g class="jot-expr-eyes">${happyEyes}</g>
+        <g class="jot-expr-mouth"><path d="M49 80 Q60 89 72 78" ${stroke}/></g>
+      </g>
+      <g class="jot-expr jot-expr-celebrate">
+        <g class="jot-expr-eyes">${happyEyes}</g>
+        <g class="jot-expr-mouth"><path d="M45 77 Q60 100 75 77 Z" fill="${f}" stroke="${f}" stroke-width="3" stroke-linejoin="round"/></g>
+      </g>
+      <g class="jot-expr jot-expr-confused">
+        <g class="jot-expr-eyes">
+          <ellipse cx="44" cy="67" rx="4.4" ry="6.4" fill="${f}"/>
+          <circle cx="76" cy="65" r="3.6" fill="${f}"/>
+          <path d="M37 54.5 L51 52.5" ${stroke}/>
+          <path d="M70 53 L83 58.5" ${stroke}/>
+        </g>
+        <g class="jot-expr-mouth"><path d="M49 84 Q54.5 79 60 84 Q65.5 89 71 84" ${stroke}/></g>
+      </g>
+      <g class="jot-expr jot-expr-concerned">
+        <g class="jot-expr-eyes">
+          <ellipse cx="44" cy="68" rx="4.2" ry="5.8" fill="${f}"/>
+          <ellipse cx="76" cy="65" rx="4.2" ry="5.8" fill="${f}"/>
+          <path d="M37 59 L50 55" ${stroke}/>
+          <path d="M70 52 L83 56" ${stroke}/>
+        </g>
+        <g class="jot-expr-mouth"><path d="M52 85 Q60 80 68 85" ${stroke}/></g>
+      </g>`;
+}
+
+// Little extras that float around the character for some expressions.
+function propsMarkup() {
+  const sparkle = (x, y, s) => `<path d="M${x} ${y - s} L${x + s * 0.3} ${y - s * 0.3} L${x + s} ${y} L${x + s * 0.3} ${y + s * 0.3} L${x} ${y + s} L${x - s * 0.3} ${y + s * 0.3} L${x - s} ${y} L${x - s * 0.3} ${y - s * 0.3} Z" fill="#f6d94a" stroke="#fffdf7" stroke-width="1.5" paint-order="stroke"/>`;
+  return `
+    <g class="jot-prop jot-prop-sparkles">${sparkle(4, 30, 10)}${sparkle(124, 64, 8)}${sparkle(96, -2, 6)}</g>
+    <text class="jot-prop jot-prop-question" x="104" y="20" text-anchor="middle">?</text>
+    <path class="jot-prop jot-prop-sweat" d="M101 34 Q95 44 101 47 Q107 44 101 34 Z" fill="#86c9e0" stroke="#fffdf7" stroke-width="1.5" paint-order="stroke"/>`;
+}
+
 // The whole character is drawn upright, then tilted as one piece, like the mascot.
 // With `animated`, the parts get class names the live tutor's CSS can move: the
-// figure breathes and bounces, the eyes blink, and a separate talking mouth takes
-// over from the resting one while the tutor speaks.
+// figure breathes and bounces, the eyes blink, a separate talking mouth takes over
+// while the tutor speaks, and arms, expressions, and props appear. The animated
+// version has a little more room around it for raised arms.
 export function avatarSvg(avatar, { size = 96, label = "", animated = false } = {}) {
   const choice = normalizeAvatar(avatar);
   const color = AVATAR_COLORS.find((item) => item.id === choice.color);
@@ -162,17 +234,26 @@ export function avatarSvg(avatar, { size = 96, label = "", animated = false } = 
   const features = animated
     ? `<g class="jot-eyes">${face.eyes}</g>
       <g class="jot-mouth">${face.mouth}</g>
+      ${expressionsMarkup(color.face)}
       <ellipse class="jot-talk" cx="60" cy="84" rx="7" ry="7.5" fill="${color.face}"/>`
     : face.eyes + face.mouth;
 
   const character = `<g transform="rotate(-8 60 64)">
+      ${animated ? legsMarkup() : ""}
       <rect x="18" y="26" width="84" height="76" rx="28" fill="${color.body}"/>
       <ellipse cx="38" cy="46" rx="9" ry="5.5" fill="rgba(255,255,255,.38)" transform="rotate(-38 38 46)"/>
       ${features}
       ${ACCESSORIES[choice.accessory]()}
+      ${animated ? armsMarkup() : ""}
     </g>`;
 
-  return `<svg class="avatar${animated ? " avatar-animated" : ""}" viewBox="0 0 120 120" width="${size}" height="${size}" ${a11y} focusable="false">
-    ${animated ? `<g class="jot-figure">${character}</g>` : character}
+  if (!animated) {
+    return `<svg class="avatar" viewBox="0 0 120 120" width="${size}" height="${size}" ${a11y} focusable="false">
+    ${character}
+  </svg>`;
+  }
+  return `<svg class="avatar avatar-animated" viewBox="-16 -16 152 152" width="${size}" height="${size}" ${a11y} focusable="false">
+    <g class="jot-figure">${character}</g>
+    ${propsMarkup()}
   </svg>`;
 }

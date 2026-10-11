@@ -101,6 +101,8 @@ async def _class_summary(database: SQLiteDatabase, row: dict[str, Any]) -> Class
     return ClassSummary(
         id=row["id"],
         name=row["name"],
+        color=row["color"],
+        icon=row["icon"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         upload_count=counts["upload_count"],
@@ -273,7 +275,7 @@ async def _rate_limit(request: Request, key: str, user_id: UUID) -> None:
 async def list_classes(request: Request) -> dict[str, list[ClassSummary]]:
     user_id, database, _ = await _authorize(request)
     rows = await database.fetch(
-        "SELECT c.id, c.name, c.created_at, c.updated_at, "
+        "SELECT c.id, c.name, c.color, c.icon, c.created_at, c.updated_at, "
         "(SELECT count(*) FROM course_notes n WHERE n.class_id = c.id) AS upload_count, "
         "(SELECT count(*) FROM study_materials m WHERE m.class_id = c.id) AS material_count "
         "FROM course_classes c WHERE c.owner_id = ?1 ORDER BY c.updated_at DESC, c.id",
@@ -289,28 +291,42 @@ async def create_class(payload: ClassCreate, request: Request) -> ClassSummary:
     if not name or len(name) > settings.max_class_name_length:
         raise ApiError(400, "invalid_class_name", "Enter a class name within the allowed length.")
     row = await database.fetchrow(
-        "INSERT INTO course_classes (id, owner_id, name) VALUES (?1, ?2, ?3) "
-        "RETURNING id, name, created_at, updated_at",
+        "INSERT INTO course_classes (id, owner_id, name, color, icon) VALUES (?1, ?2, ?3, ?4, ?5) "
+        "RETURNING id, name, color, icon, created_at, updated_at",
         uuid4(),
         user_id,
         name,
+        payload.color,
+        payload.icon,
     )
     return await _class_summary(database, row)
 
 
 @router.patch("/api/classes/{class_id}")
-async def rename_class(class_id: UUID, payload: ClassPatch, request: Request) -> ClassSummary:
+async def update_class(class_id: UUID, payload: ClassPatch, request: Request) -> ClassSummary:
     user_id, database, settings = await _authorize(request)
-    name = payload.name.strip()
-    if not name or len(name) > settings.max_class_name_length:
-        raise ApiError(400, "invalid_class_name", "Enter a class name within the allowed length.")
+    changes: dict[str, Any] = {}
+    if "name" in payload.model_fields_set:
+        name = (payload.name or "").strip()
+        if not name or len(name) > settings.max_class_name_length:
+            raise ApiError(400, "invalid_class_name", "Enter a class name within the allowed length.")
+        changes["name"] = name
+    # Sending null for color or icon resets it to the default look.
+    for column in ("color", "icon"):
+        if column in payload.model_fields_set:
+            changes[column] = getattr(payload, column)
+    if not changes:
+        raise ApiError(400, "invalid_request", "Nothing to update.")
+
+    # Column names come from the fixed list above, never from the request.
+    assignments = ", ".join(f"{column} = ?{index}" for index, column in enumerate(changes, start=3))
     row = await database.fetchrow(
-        "UPDATE course_classes SET name = ?3, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+        f"UPDATE course_classes SET {assignments}, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
         "WHERE id = ?1 AND owner_id = ?2 "
-        "RETURNING id, name, created_at, updated_at",
+        "RETURNING id, name, color, icon, created_at, updated_at",
         class_id,
         user_id,
-        name,
+        *changes.values(),
     )
     if row is None:
         raise ApiError(404, "not_found", "The requested resource was not found.")

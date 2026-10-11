@@ -75,19 +75,36 @@ class HealthResponse(BaseModel):
     status: str = "ok"
 
 
+# The class card colors and icons the browser's "Edit class" offers.
+# Keep in step with frontend/src/class-style.js. A null icon means "show the class initial".
+ClassColor = Literal["slate", "teal", "moss", "ochre", "rust", "berry", "plum", "indigo", "graphite"]
+ClassIcon = Literal[
+    "sigma", "calculator", "flask", "atom", "dna", "leaf", "globe", "landmark",
+    "scale", "languages", "book", "code", "chart", "music", "palette", "lightbulb",
+]
+
+
 class ClassCreate(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     name: str = Field(min_length=1, max_length=200)
+    color: ClassColor | None = None
+    icon: ClassIcon | None = None
 
 
 class ClassPatch(BaseModel):
+    """Change a class's name, color, and/or icon. Only fields that are sent are changed."""
+
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    name: str = Field(min_length=1, max_length=200)
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    color: ClassColor | None = None
+    icon: ClassIcon | None = None
 
 
 class ClassSummary(BaseModel):
     id: UUID
     name: str
+    color: ClassColor | None = None
+    icon: ClassIcon | None = None
     created_at: datetime
     updated_at: datetime
     upload_count: int = 0

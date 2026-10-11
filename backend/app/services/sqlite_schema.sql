@@ -5,6 +5,9 @@ CREATE TABLE IF NOT EXISTS course_classes (
     id          TEXT PRIMARY KEY,
     owner_id    TEXT NOT NULL,
     name        TEXT NOT NULL CHECK (trim(name) <> ''),
+    -- Card look picked in the browser: ids from fixed lists, NULL for the default.
+    color       TEXT,
+    icon        TEXT,
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

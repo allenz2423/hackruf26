@@ -6,6 +6,7 @@ import {
   updateClassApi,
   deleteClassApi
 } from "./api.js";
+import { CLASS_COLORS, colorHex, colorId } from "./class-style.js";
 
 const STORE_KEY = "screen-tutor-classes";
 const VERSION_KEY = "screen-tutor-sample-version";
@@ -21,7 +22,9 @@ const LEGACY_CLASS_COLORS = {
   "#dc2626": "#b04a2f",
   "#0891b2": "#26707a"
 };
-const CLASS_PALETTE = ["#3f6577", "#7a4a72", "#4f7340", "#8a6414", "#b04a2f", "#26707a"];
+const CLASS_PALETTE = CLASS_COLORS.map((item) => item.hex);
+// Subtitles earlier builds filled in for every class; they carry no information.
+const PLACEHOLDER_FOCUS = new Set(["New class workspace", "Class workspace", "Study workspace"]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function getBackendClassId(klass) {
@@ -40,6 +43,7 @@ function normalizeClass(klass) {
     updatedAt: new Date().toISOString(),
     ...klass,
     color: LEGACY_CLASS_COLORS[klass.color] || klass.color,
+    focus: PLACEHOLDER_FOCUS.has(klass.focus) ? "" : klass.focus || "",
     uploads: Array.isArray(klass.uploads) ? klass.uploads : [],
     materials: Array.isArray(klass.materials) ? klass.materials : []
   };
@@ -180,6 +184,7 @@ export async function syncClassesFromApi() {
     const currentByBackendId = new Map(current.filter((c) => c.backendId).map((c) => [c.backendId, c]));
     const currentByName = new Map(current.map((c) => [c.name.trim().toLowerCase(), c]));
     const matchedLocalIds = new Set();
+    const unsavedLooks = [];
 
     const mergedRemote = remoteClasses.map((rc, idx) => {
       let local = currentByBackendId.get(rc.id) || currentById.get(rc.id);
@@ -189,15 +194,24 @@ export async function syncClassesFromApi() {
       }
       local ||= {};
       if (local.id) matchedLocalIds.add(local.id);
+
+      // The account's saved look wins. Classes styled before the backend stored it keep
+      // this browser's look, which is then saved so other devices see the same card.
+      const savedColor = colorHex(rc.color);
+      const color = savedColor || local.color || CLASS_PALETTE[idx % CLASS_PALETTE.length];
+      const glyph = savedColor ? rc.icon || "" : local.glyph || "";
+      if (!savedColor && colorId(color)) unsavedLooks.push([rc.id, { color: colorId(color), icon: glyph || null }]);
+
       return {
         ...local,
         id: local.id || rc.id,
         backendId: rc.id,
         name: rc.name,
-        color: local.color || CLASS_PALETTE[idx % CLASS_PALETTE.length],
+        color,
+        glyph,
         icon: rc.name.trim().charAt(0).toUpperCase() || "C",
         nextExam: local.nextExam || "",
-        focus: local.focus || "Class workspace",
+        focus: local.focus || "",
         uploads: local.uploads || [],
         materials: local.materials || [],
         uploadCount: rc.upload_count ?? (local.uploads?.length || 0),
@@ -213,6 +227,8 @@ export async function syncClassesFromApi() {
 
     const combined = [...mergedRemote, ...preservedLocal];
     saveClasses(combined);
+    // Best effort: a failure just means the next sync tries again.
+    Promise.allSettled(unsavedLooks.map(([remoteId, look]) => updateClassApi(remoteId, look)));
     return combined;
   } catch (err) {
     console.warn("Could not sync classes from API:", err);
@@ -226,17 +242,19 @@ export async function createClass(name) {
   const existing = classes.find((c) => c.name.trim().toLowerCase() === trimmed.toLowerCase());
   if (existing) return existing;
   let created = null;
+  const color = CLASS_PALETTE[Math.floor(Math.random() * CLASS_PALETTE.length)];
 
   try {
-    const remote = await createClassApi(trimmed);
+    const remote = await createClassApi(trimmed, { color: colorId(color) });
     created = {
       id: remote.id,
       backendId: remote.id,
       name: remote.name,
-      color: CLASS_PALETTE[Math.floor(Math.random() * CLASS_PALETTE.length)],
+      color: colorHex(remote.color) || color,
+      glyph: remote.icon || "",
       icon: remote.name.charAt(0).toUpperCase() || "C",
       nextExam: "",
-      focus: "New class workspace",
+      focus: "",
       uploads: [],
       materials: [],
       updatedAt: remote.updated_at || new Date().toISOString()
@@ -249,10 +267,11 @@ export async function createClass(name) {
     created = {
       id: makeId(trimmed),
       name: trimmed,
-      color: "#7a4a72",
+      color,
+      glyph: "",
       icon: trimmed.charAt(0).toUpperCase() || "C",
       nextExam: "",
-      focus: "New class workspace",
+      focus: "",
       uploads: [],
       materials: [],
       updatedAt: new Date().toISOString()
@@ -269,7 +288,13 @@ export async function updateClass(classId, patch) {
   const index = classes.findIndex((item) => item.id === classId);
   if (index === -1) return null;
   const remoteId = getBackendClassId(classes[index]);
-  if (remoteId && patch.name) await updateClassApi(remoteId, patch.name);
+  if (remoteId) {
+    const fields = {};
+    if ("name" in patch) fields.name = patch.name.trim();
+    if ("color" in patch) fields.color = colorId(patch.color);
+    if ("glyph" in patch) fields.icon = patch.glyph || null;
+    if (Object.keys(fields).length) await updateClassApi(remoteId, fields);
+  }
 
   classes[index] = { ...classes[index], ...patch, updatedAt: new Date().toISOString() };
   saveClasses(classes);

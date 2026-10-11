@@ -30,6 +30,7 @@ import { initTheme, themeToggleMarkup } from "./theme.js";
 import { renderGuestStudy } from "./guest-study.js";
 import { clearUploadedFiles, deleteUploadedFile, deleteUploadedFiles } from "./file-store.js";
 import { escapeHtml, openDialog, toast } from "./ui.js";
+import { classBadge, classColor, classInitial, openClassEditor } from "./class-style.js";
 import {
   getCurrentUser,
   signIn,
@@ -129,6 +130,13 @@ function syncTutorControls() {
       : micActive ? "Turn microphone off" : "Turn microphone on";
     micToggle.setAttribute("aria-label", action);
     micToggle.title = action;
+    // A plain mic while it listens; a mic with a red slash while it does not.
+    const micIcon = ["on", "requesting"].includes(state.mic) ? "mic" : "micOff";
+    if (micToggle.dataset.icon !== micIcon) {
+      micToggle.innerHTML = icon(micIcon, { size: 20 });
+      micToggle.dataset.icon = micIcon;
+    }
+    micToggle.dataset.mic = state.mic;
   }
   const micFeedback = document.querySelector("#mic-feedback");
   if (micFeedback) {
@@ -238,9 +246,18 @@ function wireAccountMenu() {
   if (!menu) return;
 
   accountMenuAbort = new AbortController();
-  const { signal } = accountMenuAbort;
-  const trigger = menu.querySelector(".account-trigger");
-  const list = menu.querySelector(".account-menu-list");
+  wireMenu(menu, {
+    signal: accountMenuAbort.signal,
+    onSelect: (target) => {
+      if (target.matches("[data-logout]")) logOut();
+    }
+  });
+}
+
+/** Keyboard and outside-click behavior for a `[aria-haspopup=menu]` trigger and its `[role=menu]` list. */
+function wireMenu(menu, { signal, onSelect } = {}) {
+  const trigger = menu.querySelector('[aria-haspopup="menu"]');
+  const list = menu.querySelector('[role="menu"]');
   const items = () => [...list.querySelectorAll('[role="menuitem"]')];
 
   const open = (focusFirst) => {
@@ -285,7 +302,7 @@ function wireAccountMenu() {
     const target = event.target.closest("a, button");
     if (!target) return;
     close();
-    if (target.matches("[data-logout]")) logOut();
+    onSelect?.(target);
   });
 
   document.addEventListener("click", (event) => {
@@ -373,6 +390,8 @@ async function renderGuestWorkspace() {
   renderGuestStudy(document.querySelector("#guest-study-mount"));
 }
 
+let classMenuAbort = null;
+
 async function renderClasses() {
   if (!currentUser) {
     window.location.hash = "#/study";
@@ -409,29 +428,47 @@ async function renderClasses() {
         <span>Create your first class, then add notes, a syllabus, or lectures to study from.</span>
         <button class="btn btn-primary" type="button" data-new-class>${icon("plus", { size: 18 })} Create your first class</button>
       </div>`;
-  } else grid.innerHTML = classes.map((klass) => `
-    <article class="class-card" style="--class-color: ${escapeHtml(klass.color || "#3f6577")}">
+  } else grid.innerHTML = classes.map((klass, index) => {
+    const uploads = klass.uploads?.length || 0;
+    const materials = klass.materials?.length || 0;
+    return `
+    <article class="class-card" style="--class-color: ${escapeHtml(classColor(klass))}">
       <a href="#/classes/${encodeURIComponent(klass.id)}/library" class="class-card-main">
-        <span class="class-icon" aria-hidden="true">${escapeHtml(klass.icon || "C")}</span>
-        <span class="class-name">${escapeHtml(klass.name)}</span>
-        <span class="class-focus">${escapeHtml(klass.focus || "Study workspace")}</span>
-        <span class="class-meta">
-          <span>${klass.uploads?.length || 0} ${(klass.uploads?.length || 0) === 1 ? "upload" : "uploads"}</span>
-          <span>${klass.materials?.length || 0} study ${(klass.materials?.length || 0) === 1 ? "set" : "sets"}</span>
+        <span class="class-cover" aria-hidden="true">
+          <span class="class-icon">${classBadge(klass, { size: 26 })}</span>
         </span>
-        ${klass.nextExam ? `<span class="class-next">${icon("syllabus", { size: 15 })}${escapeHtml(klass.nextExam)}</span>` : ""}
+        <span class="class-body">
+          <span class="class-name">${escapeHtml(klass.name)}</span>
+          ${klass.focus ? `<span class="class-focus">${escapeHtml(klass.focus)}</span>` : ""}
+          <span class="class-meta">
+            ${uploads || materials ? `
+              <span>${uploads} ${uploads === 1 ? "upload" : "uploads"}</span>
+              <span>${materials} study ${materials === 1 ? "set" : "sets"}</span>`
+              : `<span>No materials yet</span>`}
+          </span>
+          ${klass.nextExam ? `<span class="class-next">${icon("syllabus", { size: 15 })}${escapeHtml(klass.nextExam)}</span>` : ""}
+        </span>
       </a>
-      <div class="card-actions">
-        <button class="btn btn-ghost" type="button" data-rename="${escapeHtml(klass.id)}">${icon("pencil", { size: 16 })} Rename</button>
-        <button class="btn btn-danger-ghost" type="button" data-delete="${escapeHtml(klass.id)}">${icon("trash", { size: 16 })} Delete</button>
+      <div class="class-menu" data-class-menu>
+        <button class="class-menu-trigger" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="class-menu-${index}" aria-label="Options for ${escapeHtml(klass.name)}">
+          ${icon("more", { size: 20 })}
+        </button>
+        <div class="class-menu-list" id="class-menu-${index}" role="menu" aria-label="${escapeHtml(klass.name)} options" hidden>
+          <button role="menuitem" type="button" data-edit="${escapeHtml(klass.id)}">${icon("pencil", { size: 16 })} Edit class</button>
+          <button role="menuitem" type="button" data-delete="${escapeHtml(klass.id)}">${icon("trash", { size: 16 })} Delete</button>
+        </div>
       </div>
-    </article>
-  `).join("") + `
+    </article>`;
+  }).join("") + `
     <button class="new-class-card" type="button" data-new-class>
       ${icon("plus", { size: 28 })}
       Add a class
     </button>
   `;
+
+  classMenuAbort?.abort();
+  classMenuAbort = new AbortController();
+  grid.querySelectorAll("[data-class-menu]").forEach((menu) => wireMenu(menu, { signal: classMenuAbort.signal }));
 
   async function addClass() {
     const name = await openDialog({ title: "New class", input: { label: "Class name" }, confirmLabel: "Create class" });
@@ -459,18 +496,20 @@ async function renderClasses() {
       return;
     }
 
-    const renameId = event.target.closest("[data-rename]")?.dataset.rename;
+    const editId = event.target.closest("[data-edit]")?.dataset.edit;
     const deleteId = event.target.closest("[data-delete]")?.dataset.delete;
 
-    if (renameId) {
-      const klass = getClassById(renameId);
-      const name = await openDialog({ title: "Rename class", input: { label: "Class name", value: klass.name } });
-      if (name) {
+    if (editId) {
+      const klass = getClassById(editId);
+      const next = await openClassEditor(klass);
+      if (next) {
+        const patch = { color: next.color, glyph: next.glyph };
+        if (next.name !== klass.name) Object.assign(patch, { name: next.name, icon: classInitial(next.name) });
         try {
-          await updateClass(renameId, { name, icon: name.charAt(0).toUpperCase() });
+          await updateClass(editId, patch);
           renderClasses();
         } catch (error) {
-          toast(`Could not rename this class: ${error.message}`, { tone: "error" });
+          toast(`Could not update this class: ${error.message}`, { tone: "error" });
         }
       }
     }
@@ -518,8 +557,8 @@ async function renderClassTab({ id, tab }) {
     <section>
       <a class="back-link" href="#/classes">${icon("arrowLeft", { size: 16 })} All classes</a>
       <div class="class-header">
-        <div class="class-title" style="--class-color: ${escapeHtml(klass.color || "#3f6577")}">
-          <span class="class-icon" aria-hidden="true">${escapeHtml(klass.icon || "C")}</span>
+        <div class="class-title" style="--class-color: ${escapeHtml(classColor(klass))}">
+          <span class="class-icon" aria-hidden="true">${classBadge(klass)}</span>
           <div>
             <h1>${escapeHtml(klass.name)}</h1>
             <p class="muted">${escapeHtml(klass.focus || "Class study workspace")}</p>
@@ -656,7 +695,7 @@ function renderTutor(klass = null) {
         <form id="composer" class="composer">
           <label class="visually-hidden" for="question-input">Ask the tutor a question</label>
           <input id="question-input" name="question" autocomplete="off" placeholder="Ask a question…" />
-          <button type="button" id="mic-toggle" class="btn btn-secondary btn-icon" aria-pressed="false" aria-label="Turn microphone on" aria-describedby="mic-description" title="Turn microphone on">${icon("mic", { size: 20 })}</button>
+          <button type="button" id="mic-toggle" class="btn btn-secondary btn-icon" aria-pressed="false" aria-label="Turn microphone on" aria-describedby="mic-description" title="Turn microphone on" data-mic="off" data-icon="micOff">${icon("micOff", { size: 20 })}</button>
           <button type="submit" class="btn btn-primary btn-icon" aria-label="Send" title="Send question">${icon("send", { size: 20 })}</button>
         </form>
       </aside>
@@ -701,7 +740,10 @@ function renderTutor(klass = null) {
     classId: klass ? getBackendClassId(klass) : null,
     onMessage: (message) => {
       appendMessage(message.role, message.text);
-      if (message.role === "tutor") buddy?.turnComplete();
+      if (message.role === "tutor") {
+        buddy?.turnComplete();
+        buddy?.react(message.text);
+      }
     },
     onStatusChange: (connection, errorMessage) => {
       if (disposed) return;
@@ -720,6 +762,7 @@ function renderTutor(klass = null) {
         }
       }
     },
+    onTutorText: (textSoFar) => buddy?.hear(textSoFar),
     onAudioData: (data, mimeType) => {
       audioController?.playPcm(data, mimeType);
       buddy?.audioArrived();

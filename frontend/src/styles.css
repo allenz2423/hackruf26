@@ -512,22 +512,40 @@ main {
 }
 
 .class-card-main {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  align-items: center;
-  gap: var(--space-2) var(--space-3);
-  padding: var(--space-5);
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  color: inherit;
+  text-decoration: none;
 }
 
 .class-card-main::after {
-  /* Make the whole card body clickable while keeping actions separate. */
+  /* Make the whole card clickable; the options menu sits above this layer. */
   content: "";
   position: absolute;
-  inset: 0 0 56px;
+  inset: 0;
+}
+
+/* Colored header band; the badge hangs half over its bottom edge. */
+.class-cover {
+  display: flex;
+  align-items: flex-end;
+  height: 84px;
+  padding-inline: var(--space-5);
+  border-radius: calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px) 0 0;
+  background:
+    repeating-linear-gradient(to bottom, transparent 0 17px, color-mix(in srgb, var(--class-color, var(--primary)) 16%, transparent) 17px 18px),
+    color-mix(in srgb, var(--class-color, var(--primary)) 14%, var(--surface));
+}
+
+.class-body {
+  display: grid;
+  align-content: start;
+  gap: var(--space-1);
+  padding: calc(28px + var(--space-3)) var(--space-5) var(--space-5);
 }
 
 .class-icon {
-  grid-row: span 2;
   display: grid;
   place-items: center;
   width: 48px;
@@ -576,20 +594,135 @@ main {
   font-weight: 600;
 }
 
-.card-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-3) var(--space-2);
-  border-top: 1px solid var(--line);
+.class-menu {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  z-index: 2;
 }
 
-.card-actions .btn {
-  position: relative;
-  z-index: 1;
-  min-height: 40px;
+.class-menu-trigger {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: color-mix(in srgb, var(--class-color, var(--primary)) 70%, var(--text));
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease);
+}
+
+.class-menu-trigger:hover,
+.class-menu-trigger[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--surface) 75%, transparent);
+}
+
+.class-menu-trigger:focus-visible {
+  outline: 3px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.class-menu-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  display: grid;
+  min-width: 180px;
+  padding: var(--space-1);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+}
+
+.class-menu-list[hidden] {
+  display: none;
+}
+
+.class-menu-list button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 44px;
   padding: 0 var(--space-3);
-  font-size: 0.875rem;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.class-menu-list button:hover,
+.class-menu-list button:focus-visible {
+  background: var(--surface-muted);
+}
+
+.class-menu-list [data-delete] {
+  color: var(--danger);
+}
+
+/* Edit class dialog */
+
+.class-editor-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.class-glyphs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+  gap: var(--space-1);
+}
+
+.class-glyph {
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: 44px;
+  cursor: pointer;
+}
+
+.class-glyph input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.class-glyph-art {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 34%;
+  color: var(--muted);
+  font-family: var(--font-display);
+  font-size: 1.0625rem;
+  font-weight: 800;
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.class-glyph:hover .class-glyph-art {
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+.class-glyph input:checked + .class-glyph-art {
+  background: var(--class-color, var(--primary));
+  color: #fffdf7;
+}
+
+.class-glyph input:focus-visible + .class-glyph-art {
+  outline: 3px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .new-class-card {
@@ -3156,10 +3289,6 @@ p {
   background: var(--class-color, var(--primary));
 }
 
-.class-card-main {
-  padding-top: var(--space-5);
-}
-
 .class-icon {
   position: relative;
   width: 46px;
@@ -3188,6 +3317,14 @@ p {
   transform: rotate(-35deg);
 }
 
+.class-cover .class-icon {
+  width: 56px;
+  height: 56px;
+  font-size: 1.5rem;
+  translate: 0 50%;
+  box-shadow: 0 0 0 4px var(--surface);
+}
+
 .class-card:hover .class-icon {
   transform: rotate(5deg) scale(1.05);
 }
@@ -3196,10 +3333,6 @@ p {
   width: 42px;
   height: 42px;
   font-size: 1.125rem;
-}
-
-.card-actions {
-  border-top-color: var(--edge);
 }
 
 .new-class-card {
@@ -3904,44 +4037,114 @@ p {
 .jot-buddy {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-md);
-  background: var(--surface-muted);
+  gap: var(--space-2);
+  min-height: 136px;
   --mouth: 0.14;
   --bounce: 0;
 }
 
 .jot-buddy-art {
   flex: none;
-  width: 72px;
-  height: 72px;
+  width: 136px;
+  height: 136px;
 }
 
 .jot-buddy-art .avatar {
   width: 100%;
   height: 100%;
   overflow: visible;
+  color: var(--text);
 }
 
-.jot-buddy-text {
-  display: grid;
+
+/* Speech bubble: live captions while talking, short words while listening or
+   thinking, nothing at rest. It fades in place, so the layout never shifts. */
+.jot-bubble {
+  position: relative;
+  flex: 1;
   min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--edge);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9375rem;
+  line-height: 1.4;
+  opacity: 0;
+  transform: translateX(-6px) scale(0.97);
+  transform-origin: left center;
+  transition: opacity 220ms var(--ease-out), transform 220ms var(--ease-out);
+  pointer-events: none;
 }
 
-.jot-buddy-name {
+.jot-bubble::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: -7px;
+  width: 12px;
+  height: 12px;
+  border-bottom: 1px solid var(--edge);
+  border-left: 1px solid var(--edge);
+  background: var(--surface);
+  transform: translateY(-50%) rotate(45deg);
+}
+
+.jot-bubble-text {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.jot-buddy[data-state="speaking"] .jot-bubble,
+.jot-buddy[data-state="listening"] .jot-bubble,
+.jot-buddy[data-state="thinking"] .jot-bubble,
+.jot-buddy[data-state="error"] .jot-bubble {
+  opacity: 1;
+  transform: none;
+}
+
+.jot-buddy[data-state="listening"] .jot-bubble-text,
+.jot-buddy[data-state="thinking"] .jot-bubble-text {
+  display: inline;
   color: var(--muted);
-  font-size: 0.8125rem;
   font-weight: 600;
 }
 
-.jot-buddy-status {
-  font-weight: 700;
+.jot-bubble-dots {
+  display: none;
+  gap: 3px;
+  margin-left: 4px;
+  vertical-align: middle;
 }
+
+.jot-bubble-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--muted);
+  animation: jot-dot 1.2s ease-in-out infinite;
+}
+
+.jot-bubble-dots i:nth-child(2) { animation-delay: 0.15s; }
+.jot-bubble-dots i:nth-child(3) { animation-delay: 0.3s; }
+
+.jot-buddy[data-state="listening"] .jot-bubble-dots,
+.jot-buddy[data-state="thinking"] .jot-bubble-dots {
+  display: inline-flex;
+}
+
+@keyframes jot-dot {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+  30% { transform: translateY(-3px); opacity: 1; }
+}
+
+/* --- Moving parts ----------------------------------------------------------- */
 
 .avatar-animated .jot-figure {
   transform-box: view-box;
-  transform-origin: 50% 85%;
+  transform-origin: 60px 104px;
   animation: jot-breathe 3.8s ease-in-out infinite;
 }
 
@@ -3957,106 +4160,226 @@ p {
   transform-origin: center;
 }
 
+.avatar-animated .jot-expr,
+.avatar-animated .jot-prop {
+  opacity: 0;
+  transition: opacity 180ms var(--ease);
+}
+
+.avatar-animated .jot-prop-question {
+  fill: var(--text);
+  font-family: var(--font-display);
+  font-size: 30px;
+  font-weight: 800;
+}
+
+/* Arms pivot at the shoulder; forearms pivot at the elbow. Resting pose. */
+.avatar-animated .jot-arm,
+.avatar-animated .jot-forearm {
+  transform-box: view-box;
+  transition: transform 340ms var(--ease-out);
+}
+
+.avatar-animated .jot-arm-left { transform-origin: 19px 66px; transform: rotate(14deg); }
+.avatar-animated .jot-arm-left .jot-forearm { transform-origin: 19px 80px; transform: rotate(-10deg); }
+.avatar-animated .jot-arm-right { transform-origin: 101px 66px; transform: rotate(-14deg); }
+.avatar-animated .jot-arm-right .jot-forearm { transform-origin: 101px 80px; transform: rotate(10deg); }
+
+/* Legs pivot at the hip. */
+.avatar-animated .jot-leg {
+  transform-box: view-box;
+  transition: transform 340ms var(--ease-out);
+}
+.avatar-animated .jot-leg-left { transform-origin: 46px 100px; transform: rotate(4deg); }
+.avatar-animated .jot-leg-right { transform-origin: 74px 100px; transform: rotate(-4deg); }
+
 @keyframes jot-breathe {
-  0%,
-  100% {
-    transform: translateY(0) scale(1);
-  }
-  50% {
-    transform: translateY(-1.5px) scale(1.025, 0.985);
-  }
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-1.5px) scale(1.025, 0.985); }
 }
 
 @keyframes jot-blink {
-  0%,
-  92%,
-  100% {
-    transform: scaleY(1);
-  }
-  95.5% {
-    transform: scaleY(0.1);
-  }
+  0%, 92%, 100% { transform: scaleY(1); }
+  95.5% { transform: scaleY(0.1); }
 }
 
-/* Leaning in while you speak, eyes wide. */
-.jot-buddy[data-state="listening"] .jot-figure {
-  animation: jot-listen 1.8s ease-in-out infinite;
-}
+/* --- States -------------------------------------------------------------------- */
 
-.jot-buddy[data-state="listening"] .jot-eyes {
-  animation: none;
-  transform: scale(1.14);
-}
+/* Listening: leaning in with a hand cupped to the ear. */
+.jot-buddy[data-state="listening"] .jot-figure { animation: jot-listen 1.8s ease-in-out infinite; }
+.jot-buddy[data-state="listening"] .jot-eyes { animation: none; transform: scale(1.14); }
+.jot-buddy[data-state="listening"] .jot-arm-right { transform: rotate(-155deg); }
+.jot-buddy[data-state="listening"] .jot-arm-right .jot-forearm { transform: rotate(-28deg); }
 
 @keyframes jot-listen {
-  0%,
-  100% {
-    transform: translateX(2px) rotate(4deg);
-  }
-  50% {
-    transform: translateX(3px) rotate(5.5deg) scale(1.02);
-  }
+  0%, 100% { transform: translateX(2px) rotate(4deg); }
+  50% { transform: translateX(3px) rotate(5.5deg) scale(1.02); }
 }
 
-/* A slow wobble, eyes up and to the side, while it works out an answer. */
-.jot-buddy[data-state="thinking"] .jot-figure {
-  animation: jot-think 1.5s ease-in-out infinite;
-}
-
-.jot-buddy[data-state="thinking"] .jot-eyes {
-  animation: none;
-  transform: translate(3px, -3px);
-}
+/* Thinking: a slow wobble, eyes up and aside, chin resting on a hand. */
+.jot-buddy[data-state="thinking"] .jot-figure { animation: jot-think 1.5s ease-in-out infinite; }
+.jot-buddy[data-state="thinking"] .jot-eyes { animation: none; transform: translate(3px, -3px); }
+.jot-buddy[data-state="thinking"] .jot-arm-left { transform: rotate(-55deg); }
+.jot-buddy[data-state="thinking"] .jot-arm-left .jot-forearm { transform: rotate(5deg); }
 
 @keyframes jot-think {
-  0%,
-  100% {
-    transform: rotate(-3.5deg);
-  }
-  50% {
-    transform: rotate(3.5deg) translateY(-1px);
-  }
+  0%, 100% { transform: rotate(-3.5deg); }
+  50% { transform: rotate(3.5deg) translateY(-1px); }
 }
 
-/* Talking: the mouth follows the loudness of the real voice, the body bounces with it. */
+/* Talking: the mouth follows the voice, the body bounces, the hands gesture. */
 .jot-buddy[data-state="speaking"] .jot-figure {
   animation: none;
   transform: translateY(calc(var(--bounce) * -3px)) scale(calc(1 + var(--bounce) * 0.03));
 }
+.jot-buddy[data-state="speaking"] .jot-mouth,
+.jot-buddy[data-state="speaking"] .jot-expr-mouth { opacity: 0; }
+.jot-buddy[data-state="speaking"] .jot-talk { opacity: 1; transform: scaleY(var(--mouth)); }
+.jot-buddy[data-state="speaking"] .jot-arm-left { animation: jot-gesture-left 1.7s ease-in-out infinite; }
+.jot-buddy[data-state="speaking"] .jot-arm-left .jot-forearm { animation: jot-gesture-left-fore 1.7s ease-in-out infinite; }
+.jot-buddy[data-state="speaking"] .jot-arm-right { animation: jot-gesture-right 2.3s ease-in-out infinite; }
 
-.jot-buddy[data-state="speaking"] .jot-mouth {
-  opacity: 0;
+@keyframes jot-gesture-left {
+  0%, 100% { transform: rotate(26deg); }
+  50% { transform: rotate(44deg); }
 }
-
-.jot-buddy[data-state="speaking"] .jot-talk {
-  opacity: 1;
-  transform: scaleY(var(--mouth));
+@keyframes jot-gesture-left-fore {
+  0%, 100% { transform: rotate(-45deg); }
+  50% { transform: rotate(-72deg); }
+}
+@keyframes jot-gesture-right {
+  0%, 100% { transform: rotate(-18deg); }
+  50% { transform: rotate(-34deg); }
 }
 
 /* Disconnected or waiting: calmer and a touch dimmer. */
 .jot-buddy[data-state="offline"] .avatar,
-.jot-buddy[data-state="error"] .avatar {
-  opacity: 0.75;
+.jot-buddy[data-state="error"] .avatar { opacity: 0.75; }
+.jot-buddy[data-state="offline"] .jot-figure { animation-duration: 6s; }
+
+/* --- Expressions (set from what the tutor says) ------------------------------- */
+
+.jot-buddy[data-expression="proud"] .jot-eyes,
+.jot-buddy[data-expression="proud"] .jot-mouth,
+.jot-buddy[data-expression="celebrate"] .jot-eyes,
+.jot-buddy[data-expression="celebrate"] .jot-mouth,
+.jot-buddy[data-expression="confused"] .jot-eyes,
+.jot-buddy[data-expression="confused"] .jot-mouth,
+.jot-buddy[data-expression="concerned"] .jot-eyes,
+.jot-buddy[data-expression="concerned"] .jot-mouth { opacity: 0; }
+
+.jot-buddy[data-expression="proud"] .jot-expr-proud,
+.jot-buddy[data-expression="celebrate"] .jot-expr-celebrate,
+.jot-buddy[data-expression="confused"] .jot-expr-confused,
+.jot-buddy[data-expression="concerned"] .jot-expr-concerned { opacity: 1; }
+
+/* Proud: chin up, hands on hips, sparkles. */
+.jot-buddy[data-expression="proud"] .jot-figure { animation: none; transform: rotate(-3deg) scale(1.04); }
+.jot-buddy[data-expression="proud"] .jot-arm-left { animation: none; transform: rotate(35deg); }
+.jot-buddy[data-expression="proud"] .jot-arm-left .jot-forearm { animation: none; transform: rotate(-77deg); }
+.jot-buddy[data-expression="proud"] .jot-arm-right { animation: none; transform: rotate(-35deg); }
+.jot-buddy[data-expression="proud"] .jot-arm-right .jot-forearm { animation: none; transform: rotate(77deg); }
+.jot-buddy[data-expression="proud"] .jot-prop-sparkles { opacity: 1; animation: jot-twinkle 1.2s ease-in-out infinite; }
+
+/* Celebrating: both arms up, a hop, sparkles. */
+.jot-buddy[data-expression="celebrate"] .jot-figure { animation: jot-hop 0.9s ease-in-out infinite; }
+.jot-buddy[data-expression="celebrate"] .jot-arm-left { animation: none; transform: rotate(150deg); }
+.jot-buddy[data-expression="celebrate"] .jot-arm-left .jot-forearm { animation: none; transform: rotate(15deg); }
+.jot-buddy[data-expression="celebrate"] .jot-arm-right { animation: none; transform: rotate(-150deg); }
+.jot-buddy[data-expression="celebrate"] .jot-arm-right .jot-forearm { animation: none; transform: rotate(-15deg); }
+.jot-buddy[data-expression="celebrate"] .jot-prop-sparkles { opacity: 1; animation: jot-twinkle 0.9s ease-in-out infinite; }
+
+/* Confused: head tilt, scratching the head, a question mark. */
+.jot-buddy[data-expression="confused"] .jot-figure { animation: none; transform: rotate(-7deg); }
+.jot-buddy[data-expression="confused"] .jot-arm-right { animation: none; transform: rotate(-175deg); }
+.jot-buddy[data-expression="confused"] .jot-arm-right .jot-forearm { animation: jot-scratch 0.5s ease-in-out infinite alternate; }
+.jot-buddy[data-expression="confused"] .jot-prop-question { opacity: 1; animation: jot-bob 1.6s ease-in-out infinite; }
+
+/* Concerned ("oops"): worried brows, hands together, a bead of sweat. */
+.jot-buddy[data-expression="concerned"] .jot-figure { animation: none; transform: translateY(1px) scale(0.98); }
+.jot-buddy[data-expression="concerned"] .jot-arm-left { animation: none; transform: rotate(-35deg); }
+.jot-buddy[data-expression="concerned"] .jot-arm-left .jot-forearm { animation: none; transform: rotate(-18deg); }
+.jot-buddy[data-expression="concerned"] .jot-arm-right { animation: none; transform: rotate(35deg); }
+.jot-buddy[data-expression="concerned"] .jot-arm-right .jot-forearm { animation: none; transform: rotate(18deg); }
+.jot-buddy[data-expression="concerned"] .jot-prop-sweat { opacity: 1; animation: jot-drip 1.8s ease-in infinite; }
+
+/* Legs: a wide proud stance, a kick when celebrating, knees in when worried. */
+.jot-buddy[data-expression="proud"] .jot-leg-left { transform: rotate(14deg); }
+.jot-buddy[data-expression="proud"] .jot-leg-right { transform: rotate(-14deg); }
+.jot-buddy[data-expression="celebrate"] .jot-leg-left { animation: jot-kick-left 0.9s ease-in-out infinite; }
+.jot-buddy[data-expression="celebrate"] .jot-leg-right { animation: jot-kick-right 0.9s ease-in-out infinite; }
+.jot-buddy[data-expression="concerned"] .jot-leg-left { transform: rotate(-8deg); }
+.jot-buddy[data-expression="concerned"] .jot-leg-right { transform: rotate(8deg); }
+.jot-buddy[data-expression="confused"] .jot-leg-right { transform: rotate(-16deg); }
+
+@keyframes jot-kick-left {
+  0%, 100% { transform: rotate(4deg); }
+  50% { transform: rotate(26deg); }
+}
+@keyframes jot-kick-right {
+  0%, 100% { transform: rotate(-4deg); }
+  50% { transform: rotate(-26deg); }
 }
 
-.jot-buddy[data-state="offline"] .jot-figure {
-  animation-duration: 6s;
+/* Waving hello when a session connects. */
+.jot-buddy[data-expression="wave"] .jot-arm-right { animation: none; transform: rotate(-140deg); }
+.jot-buddy[data-expression="wave"] .jot-arm-right .jot-forearm { animation: jot-wave 0.42s ease-in-out infinite alternate; }
+
+@keyframes jot-twinkle {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(0.8); opacity: 0.6; }
+}
+@keyframes jot-hop {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px) scale(1.03, 0.98); }
+}
+@keyframes jot-scratch {
+  from { transform: rotate(-30deg); }
+  to { transform: rotate(-12deg); }
+}
+@keyframes jot-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+@keyframes jot-drip {
+  0% { transform: translateY(-2px); opacity: 0; }
+  20% { opacity: 1; }
+  100% { transform: translateY(6px); opacity: 0; }
+}
+@keyframes jot-wave {
+  from { transform: rotate(-12deg); }
+  to { transform: rotate(32deg); }
 }
 
-/* No wobbling, bouncing, or blinking for people who asked for less motion. The
-   mouth still opens and closes, because that is information, not decoration. */
+.avatar-animated .jot-prop-sparkles,
+.avatar-animated .jot-prop-question,
+.avatar-animated .jot-prop-sweat {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+/* No wobbling, waving, or bouncing for people who asked for less motion. Poses and
+   faces still change (they are still pictures), and the mouth still opens and
+   closes, because that is information, not decoration. */
 @media (prefers-reduced-motion: reduce) {
-  .avatar-animated .jot-figure,
-  .avatar-animated .jot-eyes {
+  .jot-buddy .avatar-animated *,
+  .jot-buddy .avatar-animated .jot-figure {
     animation: none !important;
+    transition: none !important;
   }
 
   .jot-buddy[data-state="speaking"] .jot-figure {
     transform: none;
   }
 
-  .jot-buddy[data-state="listening"] .jot-figure {
-    transform: rotate(4deg);
+  .jot-bubble {
+    transition: none;
+    transform: none;
+  }
+
+  .jot-bubble-dots i {
+    animation: none;
+    opacity: 0.8;
   }
 }
 
@@ -4114,4 +4437,43 @@ p {
 #language-description {
   color: var(--muted);
   font-size: 0.8125rem;
+}
+
+/* Microphone button states */
+
+.icon .icon-slash-gap {
+  stroke: var(--surface);
+  stroke-width: 5;
+}
+
+.icon .icon-slash {
+  stroke: var(--danger);
+  stroke-width: 2.4;
+}
+
+#mic-toggle[data-mic="on"] {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--on-primary);
+}
+
+#mic-toggle[data-mic="on"]:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+#mic-toggle[data-mic="requesting"] {
+  border-color: var(--primary);
+  animation: mic-asking 1.1s ease-in-out infinite;
+}
+
+@keyframes mic-asking {
+  0%, 100% { box-shadow: 0 0 0 0 var(--ring); }
+  50% { box-shadow: 0 0 0 5px var(--ring); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #mic-toggle[data-mic="requesting"] {
+    animation: none;
+    box-shadow: 0 0 0 3px var(--ring);
+  }
 }

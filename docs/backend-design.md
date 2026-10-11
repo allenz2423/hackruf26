@@ -57,8 +57,8 @@ Class-library routes always scope reads and writes to the configured owner UUID.
 - `WS /api/live` using the ticket as a WebSocket subprotocol
 - `POST /api/tools/calculate`
 - `POST /api/tools/verify-lean`
-- `GET|POST /api/classes`
-- `PATCH|DELETE /api/classes/{class_id}`
+- `GET|POST /api/classes` (create takes `name` and optional `color`/`icon`)
+- `PATCH|DELETE /api/classes/{class_id}` (PATCH changes any of `name`, `color`, `icon`; omitted fields stay, `null` resets the look to the default)
 - `POST|GET /api/classes/{class_id}/uploads`
 - `GET|PATCH|DELETE /api/uploads/{upload_id}`
 - `POST /api/uploads/{upload_id}/retry`
@@ -148,7 +148,7 @@ The native Lean runner imports the fixed `Mathlib.Tactic` prelude for readiness 
 
 The schema in `backend/app/services/sqlite_schema.sql` defines:
 
-- `course_classes`
+- `course_classes` (includes the card look: `color` and `icon`, ids from the fixed `ClassColor`/`ClassIcon` lists in `schemas.py`, or NULL for the default)
 - `course_notes`
 - `study_materials`
 - `study_material_sources`

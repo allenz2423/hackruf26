@@ -1,4 +1,5 @@
 import { avatarSvg } from "./avatar.js";
+import { renderMathInto } from "./math.js";
 
 // Your Jot, alive in the tutor panel. It watches what the live session is doing and
 // shows it: resting, listening to you, thinking, or talking. While the tutor speaks
@@ -15,6 +16,60 @@ const STATUS_TEXT = {
   speaking: "Talking...",
   error: "Lost the connection"
 };
+
+// What the tutor says decides the face. Checked in order, so "Not quite, but great
+// effort" reads as concerned rather than proud. English phrases only for now.
+const EXPRESSION_PATTERNS = [
+  ["concerned", /\b(not quite|not exactly|not correct|not right|incorrect|almost|so close|close,? but|careful|mistake|oops|small error|slight error|double-check|recheck|re-check|that's not|that isn't|isn't quite|try again|take another look|look again)\b/i],
+  ["celebrate", /\b(correct|exactly|perfect|you got it|you've got it|you have it|got it right|that's it|that is it|that's right|that is right|you're right|you are right|right on|spot on|nailed it|precisely|absolutely right|bingo|bravo)\b/i],
+  ["proud", /\b(great job|good job|well done|nice work|great work|good work|nicely done|excellent|awesome|amazing|fantastic|wonderful|brilliant|impressive|proud of you|great thinking|good thinking|nice thinking|great (observation|insight|catch|question|point|reasoning|start)|good (observation|catch|question|point|reasoning|start)|nice (catch|observation|reasoning)|keep it up|great progress|good progress)\b/i],
+  ["confused", /\b(i'?m not sure|not sure what|could you (clarify|explain|tell me more)|what do you mean|can you (show|share|clarify|rephrase)|unclear|i can'?t (see|read|tell))\b/i]
+];
+
+// Short praise usually opens the reply: "Yes!", "Great!", "Nice!", "Right!".
+const OPENING_PATTERNS = [
+  ["celebrate", /^\W*(yes|yep|yeah|yup|exactly|correct|right[!.])/i],
+  ["proud", /^\W*(great|nice|good|awesome|excellent|fantastic|wonderful|brilliant|amazing)\b\W/i]
+];
+
+export function expressionFor(text) {
+  const value = String(text || "");
+  for (const [expression, pattern] of EXPRESSION_PATTERNS) {
+    if (pattern.test(value)) return expression;
+  }
+  for (const [expression, pattern] of OPENING_PATTERNS) {
+    if (pattern.test(value)) return expression;
+  }
+  return null;
+}
+
+// While the tutor's words are still arriving, look only at how the reply opens:
+// that is where praise and "not quite" live, and reacting then puts the face on
+// screen as the tutor says it rather than after a long explanation.
+const OPENING_CHARS = 160;
+
+const EXPRESSION_MS = 4200;
+const WAVE_MS = 2600;
+const BUBBLE_TEXT = {
+  listening: "Listening",
+  thinking: "Thinking",
+  error: "Lost the connection"
+};
+
+// The last sentence or so of what the tutor is saying, short enough for the bubble.
+const CAPTION_CHARS = 140;
+export function captionFor(text) {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  if (clean.length <= CAPTION_CHARS) return clean;
+  const sentences = clean.split(/(?<=[.!?])\s+/);
+  let caption = sentences.pop() || "";
+  while (sentences.length && caption.length < 40) caption = `${sentences.pop()} ${caption}`;
+  if (caption.length > CAPTION_CHARS) {
+    const tail = caption.slice(-CAPTION_CHARS);
+    caption = tail.slice(tail.indexOf(" ") + 1);
+  }
+  return caption === clean ? caption : `…${caption}`;
+}
 
 const LISTEN_HOLD_MS = 600;
 const LISTEN_THRESHOLD = 0.1;
@@ -36,15 +91,23 @@ export class JotBuddy {
     this.frame = 0;
     this.silentSince = null;
     this.timers = new Set();
+    this.expressionTimer = 0;
+    this.reactedThisTurn = false;
     this.disposed = false;
 
     root.classList.add("jot-buddy");
+    // The bubble is decoration for sighted users: what the tutor says also goes to the
+    // conversation list, which screen readers follow, and the state is in a hidden status.
     root.innerHTML = `
-      <div class="jot-buddy-art">${avatarSvg(avatar, { size: 72, animated: true })}</div>
-      <div class="jot-buddy-text">
-        <span class="jot-buddy-name">Your Jot</span>
-        <span class="jot-buddy-status"></span>
-      </div>`;
+      <div class="jot-buddy-art">${avatarSvg(avatar, { size: 136, animated: true })}</div>
+      <div class="jot-bubble" aria-hidden="true">
+        <span class="jot-bubble-text"></span>
+        <span class="jot-bubble-dots"><i></i><i></i><i></i></span>
+      </div>
+      <span class="jot-buddy-status visually-hidden"></span>`;
+    this.bubbleText = root.querySelector(".jot-bubble-text");
+    this.turnText = "";
+    this.shownCaption = "";
     this.statusEl = root.querySelector(".jot-buddy-status");
     this.render();
   }
@@ -65,7 +128,15 @@ export class JotBuddy {
     if (this.root.dataset.state !== state) {
       this.root.dataset.state = state;
       this.statusEl.textContent = STATUS_TEXT[state] || STATUS_TEXT.offline;
+      if (state !== "speaking" && BUBBLE_TEXT[state]) this.setBubble(BUBBLE_TEXT[state]);
     }
+    if (state === "speaking") this.setBubble(captionFor(this.turnText));
+  }
+
+  setBubble(text) {
+    if (text === this.shownCaption) return;
+    this.shownCaption = text;
+    renderMathInto(this.bubbleText, text);
   }
 
   later(callback, delay) {
@@ -79,7 +150,10 @@ export class JotBuddy {
 
   // "connecting", "connected", "closed", "error", or "offline" from the live session.
   setConnection(status) {
+    const wasConnected = this.connection === "connected";
     this.connection = ["connecting", "connected", "error"].includes(status) ? status : "offline";
+    if (this.connection === "connected" && !wasConnected) this.showExpression("wave", WAVE_MS);
+    if (this.connection !== "connected") this.clearExpression();
     if (this.connection !== "connected") {
       this.thinking = false;
       this.listeningUntil = 0;
@@ -127,7 +201,45 @@ export class JotBuddy {
   // The student talked over the tutor, or the session reset.
   interrupted() {
     this.thinking = false;
+    this.turnText = "";
+    this.reactedThisTurn = false;
     this.stopSpeaking();
+  }
+
+  // React to a finished tutor message: proud, celebrating, confused, or concerned.
+  react(text) {
+    if (!this.reactedThisTurn) {
+      const expression = expressionFor(text);
+      if (expression) this.showExpression(expression, EXPRESSION_MS);
+    }
+    this.reactedThisTurn = false;
+  }
+
+  // The tutor's words so far in the current turn, as they stream in.
+  hear(textSoFar) {
+    this.turnText = String(textSoFar || "");
+    if (this.speaking) this.render();
+    if (this.reactedThisTurn) return;
+    const expression = expressionFor(String(textSoFar || "").slice(0, OPENING_CHARS));
+    // "Can you clarify?" can come at the end, so confusion waits for the whole turn.
+    if (!expression || expression === "confused") return;
+    this.reactedThisTurn = true;
+    this.showExpression(expression, EXPRESSION_MS);
+  }
+
+  showExpression(expression, duration) {
+    if (this.disposed) return;
+    if (this.expressionTimer) clearTimeout(this.expressionTimer);
+    this.timers.delete(this.expressionTimer);
+    this.root.dataset.expression = expression;
+    this.expressionTimer = this.later(() => this.clearExpression(), duration);
+  }
+
+  clearExpression() {
+    if (this.expressionTimer) clearTimeout(this.expressionTimer);
+    this.timers.delete(this.expressionTimer);
+    this.expressionTimer = 0;
+    delete this.root.dataset.expression;
   }
 
   // The tutor finished a turn without (more) voice, so there is nothing left to wait for.
