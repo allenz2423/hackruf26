@@ -10,7 +10,8 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
-    "jszip": "^3.10.2"
+    "jszip": "^3.10.2",
+    "katex": "^0.16.11"
   },
   "devDependencies": {
     "vite": "^6.0.0"

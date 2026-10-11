@@ -34,14 +34,14 @@ export class LiveSessionController {
     this.connectionId = 0;
   }
 
-  async connect({ mode = "conversation" } = {}) {
+  async connect({ mode = "conversation", language = "auto" } = {}) {
     this.rejectPending(new Error("A new tutoring session was started."));
     this.detachSocket();
     const connectionId = ++this.connectionId;
     this.failed = false;
     this.intentionalClose = false;
     this.onStatusChange("connecting");
-    const { ticket } = await requestLiveSession(this.classId, mode);
+    const { ticket } = await requestLiveSession(this.classId, mode, language);
     if (connectionId !== this.connectionId) throw new Error("The tutoring session was ended.");
     const socket = new WebSocket(websocketUrl(), [SESSION_PROTOCOL, `ticket.${ticket}`]);
     this.socket = socket;

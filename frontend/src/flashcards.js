@@ -1,4 +1,5 @@
 import { icon } from "./icons.js";
+import { mathHtml, typesetMath } from "./math.js";
 import { escapeHtml } from "./ui.js";
 
 /**
@@ -255,7 +256,7 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
             <div class="flashcard-review-pile-list" style="width: min(520px, 100%); margin: 0.5rem 0 1rem; text-align: left;">
               <h4 style="font-size: 0.9375rem; margin-bottom: 0.5rem; color: var(--muted);">Cards to review again:</h4>
               <ul class="preview-list" style="margin: 0;">
-                ${cardsToReview.map((c) => `<li><strong>${escapeHtml(c.front)}</strong></li>`).join("")}
+                ${cardsToReview.map((c) => `<li><strong>${mathHtml(c.front)}</strong></li>`).join("")}
               </ul>
             </div>
           ` : `
@@ -276,6 +277,7 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
         </div>
       </section>
     `;
+    void typesetMath(root);
 
     root.querySelectorAll("[data-back]").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -300,6 +302,7 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
         </div>
       </section>
     `;
+    void typesetMath(root);
 
     root.querySelectorAll("[data-back]").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -369,7 +372,7 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
             </div>
 
             <div class="flashcard-content">
-              <strong>${escapeHtml(isFlipped ? card.back : card.front)}</strong>
+              <strong>${mathHtml(isFlipped ? card.back : card.front)}</strong>
             </div>
 
             ${card.sources?.length ? `
@@ -415,6 +418,7 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
         </footer>
       </section>
     `;
+    void typesetMath(root);
 
     root.querySelectorAll("[data-back]").forEach((btn) => {
       btn.addEventListener("click", () => {

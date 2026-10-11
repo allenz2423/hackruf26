@@ -132,8 +132,8 @@ export async function checkBackendHealth() {
 }
 
 // One-use same-origin session ticket
-export async function requestLiveSession(classId = null, mode = "conversation") {
-  const body = { mode, ...(classId ? { class_id: classId } : {}) };
+export async function requestLiveSession(classId = null, mode = "conversation", language = "auto") {
+  const body = { mode, ...(classId ? { class_id: classId } : {}), ...(language && language !== "auto" ? { language } : {}) };
   return await apiFetch("/api/live-sessions", {
     method: "POST",
     body: JSON.stringify(body)

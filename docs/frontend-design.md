@@ -152,6 +152,710 @@ Log in accepts a username or an email. Anything cached for an account (classes, 
 
 The Account page has a character builder: pick one of 9 body colors, 5 faces (happy, wink, sleepy, surprised, big grin), and an accessory (none, round glasses, graduation cap, headphones, party hat, crown). A live preview updates as you choose; *Surprise me* picks at random and *Save my Jot* stores it on the account (`PATCH /api/auth/me` with `avatar`). The saved Jot appears in the header account menu. `avatar.js` draws it from three ids as SVG (a tilted note-block like the mascot, with a paper-colored sticker outline on accessories so they read on any color and in both themes); the ids must match the server's allowed lists. Every choice is a radio button with a text name, and the preview caption is a polite live region.
 
+## Your Jot in the live tutor
+
+The person's own Jot (their saved avatar, or the default) sits at the top of the tutor conversation panel and reacts to the live session. `jot-buddy.js` decides one state at a time, in this priority: **error**, **speaking**, **thinking**, **listening**, then **ready**, **connecting**, or **offline**, and shows a short status line for it.
+
+| State | When | Animation |
+| --- | --- | --- |
+| offline / connecting | No session yet, or starting | Slow breathing, a little dimmed |
+| ready | Connected and idle | Breathing and an occasional blink |
+| listening | Microphone on and the student's voice is above a small threshold | Leans in, eyes wide |
+| thinking | From sending a typed question until the tutor starts answering (15 s timeout) | Slow wobble, eyes looking up and aside |
+| speaking | While queued tutor audio is playing | The mouth opens and closes with the loudness of the real voice, and the body bounces with it |
+| error | The session dropped | Dimmed |
+
+Loudness comes from `AudioController`, which routes tutor speech through an `AnalyserNode` on the way to the speakers (`getOutputLevel()` is 0 to 1, `isSpeaking()` is true while queued audio is playing). Barge-in (`interrupted`) stops the talking at once. CSS in `styles.css` does all the moving, using `--mouth` and `--bounce` custom properties that the controller updates only while speaking. With `prefers-reduced-motion: reduce`, breathing, blinking, leaning, wobbling, and bouncing stop, but the mouth still opens and closes because that carries information. The animation parts exist only when `avatarSvg(..., { animated: true })` is used; every other place draws the plain static Jot.
+
+## Math in AI text
+
+The tutor and generated study material sometimes write LaTeX (for example "the $r\theta$-plane"). `math.js` formats it at runtime wherever AI text is shown: tutor chat bubbles, quiz and practice-test questions, choices and explanations, flashcards, and study guides.
+
+- **Delimiters:** `$...# Frontend Design
+
+**Project:** Screen Tutor  
+**Status:** Design draft  
+**Client:** HTML, CSS, and JavaScript
+
+## Purpose and scope
+
+The frontend is a browser tutor workspace. A student shares a display, window, or browser tab; asks a question by voice or text; and sees the tutor's reply beside a live preview of the shared content. The tutor can place temporary marks over that preview.
+
+The frontend also has a **class library**: students create classes (Math, Biology, and so on), upload course materials into each one (notes, documents, syllabi, lecture slides, and video/audio lectures), and generate quizzes, practice tests, study guides, and flashcards from those materials. A tutoring session started inside a class uses that class's materials. See [Class library and study pages](#class-library-and-study-pages).
+
+The annotations live inside the Screen Tutor page. A normal web page cannot draw over the student's other desktop applications. The frontend does not click, type, or otherwise control the shared application.
+
+## Proposed client stack
+
+- Semantic HTML for the page and controls.
+- CSS for the responsive two-column workspace, preview overlays, and status indicators.
+- Vanilla JavaScript ES modules for capture, audio, conversation UI, annotations, and backend session events.
+- Vite for local development and static asset bundling; no UI framework.
+- A provider-neutral WebSocket client for the backend. The frontend contains no provider SDK, model identifier, model instructions, tool declarations, or provider credentials.
+- Browser APIs: `getDisplayMedia()` for screen capture, `getUserMedia()` and Web Audio for microphone capture/playback, Canvas for frame sampling, and an SVG/canvas layer for marks.
+- File input, drag-and-drop, and `fetch`/`XMLHttpRequest` upload progress for course materials; `<video>`/`<audio>` for playing uploaded lectures.
+- Simple hash-based routing (`#/classes`, `#/classes/:id/library`, …) so the library, study, and tutor pages stay in one static app.
+
+The browser must be served from HTTPS in deployed environments. Screen capture must start from a user gesture and uses the browser's own source picker. Support should be verified on the selected desktop browsers before promising cross-browser compatibility.
+
+## Workspace layout
+
+```text
+┌───────────────────────────────────────────────────────────────────┐
+│ Screen Tutor     Screen: Sharing / Paused     Mic     End session │
+├───────────────────────────────────────┬───────────────────────────┤
+│                                       │ Tutor conversation        │
+│   Shared screen preview               │                           │
+│   + annotation layer                  │ Tutor transcript          │
+│                                       │ Student questions         │
+│   Pause / choose another source       │                           │
+│                                       ├───────────────────────────┤
+│                                       │ Ask a question…   Send 🎙 │
+└───────────────────────────────────────┴───────────────────────────┘
+```
+
+On narrow viewports, stack the preview and conversation vertically. Keep the preview and active annotations visible together. Do not make color the only way to distinguish sharing, microphone, connection, or error states.
+
+### Main UI elements
+
+- **Header:** connection status, screen-sharing status, microphone status, and End session.
+- **Screen stage:** video preview, annotation layer, source/re-share controls, and an explicit pause action.
+- **Conversation:** user questions, tutor text transcript, connection/retry notices, and a Clear conversation control.
+- **Composer:** text question input, Send, and microphone toggle.
+- **Annotation controls:** dismiss one mark and Clear marks. Marks expire automatically after a short interval.
+- **Class selector:** shows which class's materials the tutor is using, or “No class” for a general session.
+- **Check my steps:** an optional checkbox before Share. When enabled, the tutor gives short corrective hints at pauses while the student explains a solution. The control is locked during a session; End unlocks it for the next session.
+- **Reset tutor memory:** discard a connected tutor's prior conversation and marks, keep the shared screen, and open a fresh session with the selected mode and class. Stop microphone input and queued speech during reset; the student enables the microphone again afterward. Explain that the conversation will be cleared before the action.
+
+## Class library and study pages
+
+### Page map
+
+```text
+Classes ─┬─ Math 151 ─┬─ Library   (uploads: notes, docs, syllabus, slides, lectures)
+         │            ├─ Study     (generate + open quizzes, practice tests, guides, flashcards)
+         │            └─ Tutor     (screen-share workspace using this class's materials)
+         └─ Biology ── …
+```
+
+**Classes page.** A grid of class cards (name, color/icon, upload count, next exam from the syllabus if known) plus **New class**. Each card has rename and delete actions; delete asks for confirmation because it removes the class's uploads and study materials.
+
+**Class page.** A header with the class name and three tabs: Library, Study, and Tutor.
+
+### Library tab (uploads)
+
+The local SQLite workspace calls class/upload APIs without an access-token prerequisite. Existing browser route and IndexedDB IDs stay stable; a persisted `backendId` identifies the corresponding backend class or upload. Library refresh merges remote records into those mappings without discarding locally retained source files. New classes and uploads save through the API, with local files retained for recovery after network failures. Pasted notes use a multiline field with the backend's 1,000,000-character limit. Rename and deletion use the mapped backend UUID and surface API failures.
+
+```text
+┌────────────────────────────────────────────────────────────────────┐
+│ Math 151      [Library]  Study   Tutor                             │
+├────────────────────────────────────────────────────────────────────┤
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Drop files here or Browse   ·  Paste text                   │  │
+│  │  Notes, docs, syllabus, slides, lecture video/audio          │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│  Filter: All | Notes | Docs | Syllabus | Slides | Lectures         │
+│  ▸ Syllabus.pdf          Syllabus   Ready                          │
+│  ▸ Week 3 notes.jpg      Notes      Ready                          │
+│  ▸ Lecture 5.mp4  48:12  Lecture    Transcribing… 62%              │
+│  ▸ Ch4 slides.pptx       Slides     Failed — Retry                 │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+- **Upload zone:** drag-and-drop or file picker (multiple files), plus a Paste text option. Accepted types: PDF, DOCX, PPTX, TXT/MD, PNG/JPEG, MP4/WebM/MOV, MP3/M4A/WAV. The app suggests a kind (notes, document, syllabus, slides, lecture) from the file type and name, and the student can change it before or after upload.
+- **Progress and status:** each upload shows its upload progress, then a processing status from the backend (`uploading`, `processing`/`transcribing`, `ready`, `failed`). Poll the upload's status endpoint until it reaches `ready` or `failed`. Long lectures show progress and can be left to finish while the student keeps working.
+- **Validation before upload:** reject unsupported types and files over the size/length limit with a clear message, and don't send them.
+- **Upload detail view:** shows the original (PDF/slide viewer, image, or video/audio player) beside the extracted text. Lectures show a timestamped transcript; clicking a line seeks the player. The student can edit extracted text, rename, change kind, or delete.
+- **Syllabus outline:** when a syllabus is ready, show its parsed topics and exam dates at the top of the library so the student can check and correct them.
+- **Upload notice:** before the first upload, tell the student that uploaded content is stored in their account and sent to Google's Gemini API for processing.
+
+### Study tab (generated materials)
+
+- **Generate panel:** pick a type (Quiz, Practice test, Study guide, Flashcards); a scope (whole class, selected uploads, syllabus topics, or an upcoming exam such as “Midterm 1”); and options (number of questions, difficulty, time limit for practice tests). Show a generating state and allow cancel.
+- **Saved materials list:** every generated item with type, scope, date, and last score. The student can open, retake, regenerate, or delete it.
+- **Quiz / practice test player:** one question at a time or full-page mode, multiple-choice, true/false, and short/free-response inputs, an optional timer for practice tests, and Submit. The results page shows the score, correct answers, explanations, and source links (page/slide number or lecture timestamp that opens the upload detail view). Each missed question has **Ask the tutor**, which opens the Tutor tab with that question as context.
+- **Study guide view:** rendered headings, key terms, formulas (use KaTeX or MathJax for math), and source links; printable.
+- **Saved guide files:** remote guides offer Download PDF and Download LaTeX. Files remain saved with the guide; older guides export from stored content on first download. Practice tests display their generated instructions above the assessment form.
+- **Flashcards view:** flip card with keyboard support (Space to flip, arrows to move), “Got it” / “Study again” sorting, and shuffle.
+- **AI-generated label and Flag:** every generated item is labeled as AI-generated, and each question or card has a Flag as wrong action.
+
+### Upload document preview
+
+Each processed upload automatically receives a balanced study companion. The preview shows separate **Study document**, **Original file**, and **Original text** views. Original files and complete extracted text remain intact. Study document offers **Concise**, **Balanced**, and **Detailed** explanations, cached independently, plus PDF, LaTeX, and verbatim source-text downloads. PDFs separate the explanation from a full original extracted-text appendix.
+
+Refresh upload detail for current state and a fresh signed original URL. Poll `GET /api/uploads/{id}/document?detail_level=...` sequentially; create missing/retry failed versions with `POST /api/uploads/{id}/document` and `{detail_level}`. Show progress/errors and Retry document independently from extraction status. Closing or switching levels aborts client polling without cancelling the server job. Existing uploads create companions on first open. Original previews use signed backend URLs if IndexedDB lacks a copy. See the backend design for the full contract.
+
+### SQLite study generation integration
+
+Class-library calls use same-origin HTTP without requiring a bearer token in local SQLite mode. The Study tab refreshes backend uploads without replacing their browser IDs or local files. A source checklist shows each filename, kind, and processing status, with Select all, Clear, Notes only, and Syllabus only shortcuts. All uploads are initially selected; students can select any individual upload or combination. A live count summarizes the selection, and generation is disabled when nothing is selected. Choices survive returning from a saved quiz or flashcard player and are locked while generation runs.
+
+Before generation, `course-sync.js` accepts the explicit browser IDs as `selectedUploadIds`, validates that they still belong to the class, maps only those records to backend UUIDs, retrieves their original files from IndexedDB (or uses pasted source text), and waits only for those uploads to be `ready`. Empty or stale explicit selections fail without falling back to the whole class. Unselected uploads are neither submitted nor polled. Local IDs remain stable for routing and file previews; backend UUIDs are persisted as `backendId` fields. Saved generated materials show their selected source filenames.
+
+Study generation submits an explicit upload scope, keeps the returned pending material ID, and polls status sequentially. Pending and failed items remain visible for recovery; generation errors do not create template quizzes. Navigation stops client polling without claiming to cancel the server job. Old browser-only templates remain labeled as local drafts.
+
+Remote quiz detail omits answer keys. Submit choice IDs, true/false values, and short-answer text to the backend attempts endpoint for scoring and answer explanations. A submission failure keeps the student's answers available for retry instead of displaying a fabricated local score. Remote flags and mapped upload preview/retry/delete actions also call the backend without a token prerequisite. See [the backend integration contract](backend-design.md#quiz-generation-integration-for-the-frontend-agent) for request formats and recovery rules.
+
+### Tutor tab
+
+The screen-sharing workspace described above, with the class selected. The page tells the backend the class ID when starting the session so the tutor gets that class's materials. Tutor answers that rely on an upload show a source chip linking to it.
+
+## Accounts, guests, and access
+
+Guests and logged-in users never share a screen or a cache. The backend enforces this; the client only mirrors it.
+
+| Route | Who | Behavior |
+| --- | --- | --- |
+| `#/home` | Everyone | Welcome page. Guests see Log in and Continue as guest; logged-in users see Welcome back and Go to your classes. |
+| `#/login`, `#/signup` | Guests | Standalone Log in and Join Jot screens with no app header. They always ask for credentials, show "Checking your details..." while the server answers, and show inline errors for wrong or missing details. Only a successful server response logs anyone in. A visitor who is already logged in sees who they are logged in as, with Go to your classes and Log out, instead of being redirected. |
+| `#/account` | Logged-in only | Change username and email, change password (current password required; other devices are logged out), and Log out. A guest is sent to `#/login`. |
+| `#/classes`, `#/classes/:id/:tab` | Logged-in only | Class library, study, and class tutor. A guest is sent to `#/login`. |
+| `#/study` | Guests only | Local quick study. A logged-in visitor is sent to their classes. |
+| `#/tutor` | Everyone | Quick tutor without class materials. |
+
+The header's top-right control depends on who is looking:
+
+- **Guest:** a **Join Jot** menu with only *Log in* and *Create account*.
+- **Logged in:** the account name with a menu of *Account*, *Your classes*, and *Log out*.
+
+Only the demo account (`is_demo` from the server) starts with the built-in sample classes and study sets and sees *Restore sample data*. Every other account starts with an empty class list and a *Create your first class* empty state; any sample classes cached by earlier builds are removed from their view.
+
+Log in accepts a username or an email. Anything cached for an account (classes, uploaded files) is cleared on log out, when the server ends the session, and when a different account logs in on the same browser.
+
+## Create your own Jot
+
+The Account page has a character builder: pick one of 9 body colors, 5 faces (happy, wink, sleepy, surprised, big grin), and an accessory (none, round glasses, graduation cap, headphones, party hat, crown). A live preview updates as you choose; *Surprise me* picks at random and *Save my Jot* stores it on the account (`PATCH /api/auth/me` with `avatar`). The saved Jot appears in the header account menu. `avatar.js` draws it from three ids as SVG (a tilted note-block like the mascot, with a paper-colored sticker outline on accessories so they read on any color and in both themes); the ids must match the server's allowed lists. Every choice is a radio button with a text name, and the preview caption is a polite live region.
+
+## Your Jot in the live tutor
+
+The person's own Jot (their saved avatar, or the default) sits at the top of the tutor conversation panel and reacts to the live session. `jot-buddy.js` decides one state at a time, in this priority: **error**, **speaking**, **thinking**, **listening**, then **ready**, **connecting**, or **offline**, and shows a short status line for it.
+
+| State | When | Animation |
+| --- | --- | --- |
+| offline / connecting | No session yet, or starting | Slow breathing, a little dimmed |
+| ready | Connected and idle | Breathing and an occasional blink |
+| listening | Microphone on and the student's voice is above a small threshold | Leans in, eyes wide |
+| thinking | From sending a typed question until the tutor starts answering (15 s timeout) | Slow wobble, eyes looking up and aside |
+| speaking | While queued tutor audio is playing | The mouth opens and closes with the loudness of the real voice, and the body bounces with it |
+| error | The session dropped | Dimmed |
+
+Loudness comes from `AudioController`, which routes tutor speech through an `AnalyserNode` on the way to the speakers (`getOutputLevel()` is 0 to 1, `isSpeaking()` is true while queued audio is playing). Barge-in (`interrupted`) stops the talking at once. CSS in `styles.css` does all the moving, using `--mouth` and `--bounce` custom properties that the controller updates only while speaking. With `prefers-reduced-motion: reduce`, breathing, blinking, leaning, wobbling, and bouncing stop, but the mouth still opens and closes because that carries information. The animation parts exist only when `avatarSvg(..., { animated: true })` is used; every other place draws the plain static Jot.
+
+ and `\(...\)` inline, `$...$` and `\[...\]` display, `\# Frontend Design
+
+**Project:** Screen Tutor  
+**Status:** Design draft  
+**Client:** HTML, CSS, and JavaScript
+
+## Purpose and scope
+
+The frontend is a browser tutor workspace. A student shares a display, window, or browser tab; asks a question by voice or text; and sees the tutor's reply beside a live preview of the shared content. The tutor can place temporary marks over that preview.
+
+The frontend also has a **class library**: students create classes (Math, Biology, and so on), upload course materials into each one (notes, documents, syllabi, lecture slides, and video/audio lectures), and generate quizzes, practice tests, study guides, and flashcards from those materials. A tutoring session started inside a class uses that class's materials. See [Class library and study pages](#class-library-and-study-pages).
+
+The annotations live inside the Screen Tutor page. A normal web page cannot draw over the student's other desktop applications. The frontend does not click, type, or otherwise control the shared application.
+
+## Proposed client stack
+
+- Semantic HTML for the page and controls.
+- CSS for the responsive two-column workspace, preview overlays, and status indicators.
+- Vanilla JavaScript ES modules for capture, audio, conversation UI, annotations, and backend session events.
+- Vite for local development and static asset bundling; no UI framework.
+- A provider-neutral WebSocket client for the backend. The frontend contains no provider SDK, model identifier, model instructions, tool declarations, or provider credentials.
+- Browser APIs: `getDisplayMedia()` for screen capture, `getUserMedia()` and Web Audio for microphone capture/playback, Canvas for frame sampling, and an SVG/canvas layer for marks.
+- File input, drag-and-drop, and `fetch`/`XMLHttpRequest` upload progress for course materials; `<video>`/`<audio>` for playing uploaded lectures.
+- Simple hash-based routing (`#/classes`, `#/classes/:id/library`, …) so the library, study, and tutor pages stay in one static app.
+
+The browser must be served from HTTPS in deployed environments. Screen capture must start from a user gesture and uses the browser's own source picker. Support should be verified on the selected desktop browsers before promising cross-browser compatibility.
+
+## Workspace layout
+
+```text
+┌───────────────────────────────────────────────────────────────────┐
+│ Screen Tutor     Screen: Sharing / Paused     Mic     End session │
+├───────────────────────────────────────┬───────────────────────────┤
+│                                       │ Tutor conversation        │
+│   Shared screen preview               │                           │
+│   + annotation layer                  │ Tutor transcript          │
+│                                       │ Student questions         │
+│   Pause / choose another source       │                           │
+│                                       ├───────────────────────────┤
+│                                       │ Ask a question…   Send 🎙 │
+└───────────────────────────────────────┴───────────────────────────┘
+```
+
+On narrow viewports, stack the preview and conversation vertically. Keep the preview and active annotations visible together. Do not make color the only way to distinguish sharing, microphone, connection, or error states.
+
+### Main UI elements
+
+- **Header:** connection status, screen-sharing status, microphone status, and End session.
+- **Screen stage:** video preview, annotation layer, source/re-share controls, and an explicit pause action.
+- **Conversation:** user questions, tutor text transcript, connection/retry notices, and a Clear conversation control.
+- **Composer:** text question input, Send, and microphone toggle.
+- **Annotation controls:** dismiss one mark and Clear marks. Marks expire automatically after a short interval.
+- **Class selector:** shows which class's materials the tutor is using, or “No class” for a general session.
+- **Check my steps:** an optional checkbox before Share. When enabled, the tutor gives short corrective hints at pauses while the student explains a solution. The control is locked during a session; End unlocks it for the next session.
+- **Reset tutor memory:** discard a connected tutor's prior conversation and marks, keep the shared screen, and open a fresh session with the selected mode and class. Stop microphone input and queued speech during reset; the student enables the microphone again afterward. Explain that the conversation will be cleared before the action.
+
+## Class library and study pages
+
+### Page map
+
+```text
+Classes ─┬─ Math 151 ─┬─ Library   (uploads: notes, docs, syllabus, slides, lectures)
+         │            ├─ Study     (generate + open quizzes, practice tests, guides, flashcards)
+         │            └─ Tutor     (screen-share workspace using this class's materials)
+         └─ Biology ── …
+```
+
+**Classes page.** A grid of class cards (name, color/icon, upload count, next exam from the syllabus if known) plus **New class**. Each card has rename and delete actions; delete asks for confirmation because it removes the class's uploads and study materials.
+
+**Class page.** A header with the class name and three tabs: Library, Study, and Tutor.
+
+### Library tab (uploads)
+
+The local SQLite workspace calls class/upload APIs without an access-token prerequisite. Existing browser route and IndexedDB IDs stay stable; a persisted `backendId` identifies the corresponding backend class or upload. Library refresh merges remote records into those mappings without discarding locally retained source files. New classes and uploads save through the API, with local files retained for recovery after network failures. Pasted notes use a multiline field with the backend's 1,000,000-character limit. Rename and deletion use the mapped backend UUID and surface API failures.
+
+```text
+┌────────────────────────────────────────────────────────────────────┐
+│ Math 151      [Library]  Study   Tutor                             │
+├────────────────────────────────────────────────────────────────────┤
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Drop files here or Browse   ·  Paste text                   │  │
+│  │  Notes, docs, syllabus, slides, lecture video/audio          │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│  Filter: All | Notes | Docs | Syllabus | Slides | Lectures         │
+│  ▸ Syllabus.pdf          Syllabus   Ready                          │
+│  ▸ Week 3 notes.jpg      Notes      Ready                          │
+│  ▸ Lecture 5.mp4  48:12  Lecture    Transcribing… 62%              │
+│  ▸ Ch4 slides.pptx       Slides     Failed — Retry                 │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+- **Upload zone:** drag-and-drop or file picker (multiple files), plus a Paste text option. Accepted types: PDF, DOCX, PPTX, TXT/MD, PNG/JPEG, MP4/WebM/MOV, MP3/M4A/WAV. The app suggests a kind (notes, document, syllabus, slides, lecture) from the file type and name, and the student can change it before or after upload.
+- **Progress and status:** each upload shows its upload progress, then a processing status from the backend (`uploading`, `processing`/`transcribing`, `ready`, `failed`). Poll the upload's status endpoint until it reaches `ready` or `failed`. Long lectures show progress and can be left to finish while the student keeps working.
+- **Validation before upload:** reject unsupported types and files over the size/length limit with a clear message, and don't send them.
+- **Upload detail view:** shows the original (PDF/slide viewer, image, or video/audio player) beside the extracted text. Lectures show a timestamped transcript; clicking a line seeks the player. The student can edit extracted text, rename, change kind, or delete.
+- **Syllabus outline:** when a syllabus is ready, show its parsed topics and exam dates at the top of the library so the student can check and correct them.
+- **Upload notice:** before the first upload, tell the student that uploaded content is stored in their account and sent to Google's Gemini API for processing.
+
+### Study tab (generated materials)
+
+- **Generate panel:** pick a type (Quiz, Practice test, Study guide, Flashcards); a scope (whole class, selected uploads, syllabus topics, or an upcoming exam such as “Midterm 1”); and options (number of questions, difficulty, time limit for practice tests). Show a generating state and allow cancel.
+- **Saved materials list:** every generated item with type, scope, date, and last score. The student can open, retake, regenerate, or delete it.
+- **Quiz / practice test player:** one question at a time or full-page mode, multiple-choice, true/false, and short/free-response inputs, an optional timer for practice tests, and Submit. The results page shows the score, correct answers, explanations, and source links (page/slide number or lecture timestamp that opens the upload detail view). Each missed question has **Ask the tutor**, which opens the Tutor tab with that question as context.
+- **Study guide view:** rendered headings, key terms, formulas (use KaTeX or MathJax for math), and source links; printable.
+- **Saved guide files:** remote guides offer Download PDF and Download LaTeX. Files remain saved with the guide; older guides export from stored content on first download. Practice tests display their generated instructions above the assessment form.
+- **Flashcards view:** flip card with keyboard support (Space to flip, arrows to move), “Got it” / “Study again” sorting, and shuffle.
+- **AI-generated label and Flag:** every generated item is labeled as AI-generated, and each question or card has a Flag as wrong action.
+
+### Upload document preview
+
+Each processed upload automatically receives a balanced study companion. The preview shows separate **Study document**, **Original file**, and **Original text** views. Original files and complete extracted text remain intact. Study document offers **Concise**, **Balanced**, and **Detailed** explanations, cached independently, plus PDF, LaTeX, and verbatim source-text downloads. PDFs separate the explanation from a full original extracted-text appendix.
+
+Refresh upload detail for current state and a fresh signed original URL. Poll `GET /api/uploads/{id}/document?detail_level=...` sequentially; create missing/retry failed versions with `POST /api/uploads/{id}/document` and `{detail_level}`. Show progress/errors and Retry document independently from extraction status. Closing or switching levels aborts client polling without cancelling the server job. Existing uploads create companions on first open. Original previews use signed backend URLs if IndexedDB lacks a copy. See the backend design for the full contract.
+
+### SQLite study generation integration
+
+Class-library calls use same-origin HTTP without requiring a bearer token in local SQLite mode. The Study tab refreshes backend uploads without replacing their browser IDs or local files. A source checklist shows each filename, kind, and processing status, with Select all, Clear, Notes only, and Syllabus only shortcuts. All uploads are initially selected; students can select any individual upload or combination. A live count summarizes the selection, and generation is disabled when nothing is selected. Choices survive returning from a saved quiz or flashcard player and are locked while generation runs.
+
+Before generation, `course-sync.js` accepts the explicit browser IDs as `selectedUploadIds`, validates that they still belong to the class, maps only those records to backend UUIDs, retrieves their original files from IndexedDB (or uses pasted source text), and waits only for those uploads to be `ready`. Empty or stale explicit selections fail without falling back to the whole class. Unselected uploads are neither submitted nor polled. Local IDs remain stable for routing and file previews; backend UUIDs are persisted as `backendId` fields. Saved generated materials show their selected source filenames.
+
+Study generation submits an explicit upload scope, keeps the returned pending material ID, and polls status sequentially. Pending and failed items remain visible for recovery; generation errors do not create template quizzes. Navigation stops client polling without claiming to cancel the server job. Old browser-only templates remain labeled as local drafts.
+
+Remote quiz detail omits answer keys. Submit choice IDs, true/false values, and short-answer text to the backend attempts endpoint for scoring and answer explanations. A submission failure keeps the student's answers available for retry instead of displaying a fabricated local score. Remote flags and mapped upload preview/retry/delete actions also call the backend without a token prerequisite. See [the backend integration contract](backend-design.md#quiz-generation-integration-for-the-frontend-agent) for request formats and recovery rules.
+
+### Tutor tab
+
+The screen-sharing workspace described above, with the class selected. The page tells the backend the class ID when starting the session so the tutor gets that class's materials. Tutor answers that rely on an upload show a source chip linking to it.
+
+## Accounts, guests, and access
+
+Guests and logged-in users never share a screen or a cache. The backend enforces this; the client only mirrors it.
+
+| Route | Who | Behavior |
+| --- | --- | --- |
+| `#/home` | Everyone | Welcome page. Guests see Log in and Continue as guest; logged-in users see Welcome back and Go to your classes. |
+| `#/login`, `#/signup` | Guests | Standalone Log in and Join Jot screens with no app header. They always ask for credentials, show "Checking your details..." while the server answers, and show inline errors for wrong or missing details. Only a successful server response logs anyone in. A visitor who is already logged in sees who they are logged in as, with Go to your classes and Log out, instead of being redirected. |
+| `#/account` | Logged-in only | Change username and email, change password (current password required; other devices are logged out), and Log out. A guest is sent to `#/login`. |
+| `#/classes`, `#/classes/:id/:tab` | Logged-in only | Class library, study, and class tutor. A guest is sent to `#/login`. |
+| `#/study` | Guests only | Local quick study. A logged-in visitor is sent to their classes. |
+| `#/tutor` | Everyone | Quick tutor without class materials. |
+
+The header's top-right control depends on who is looking:
+
+- **Guest:** a **Join Jot** menu with only *Log in* and *Create account*.
+- **Logged in:** the account name with a menu of *Account*, *Your classes*, and *Log out*.
+
+Only the demo account (`is_demo` from the server) starts with the built-in sample classes and study sets and sees *Restore sample data*. Every other account starts with an empty class list and a *Create your first class* empty state; any sample classes cached by earlier builds are removed from their view.
+
+Log in accepts a username or an email. Anything cached for an account (classes, uploaded files) is cleared on log out, when the server ends the session, and when a different account logs in on the same browser.
+
+## Create your own Jot
+
+The Account page has a character builder: pick one of 9 body colors, 5 faces (happy, wink, sleepy, surprised, big grin), and an accessory (none, round glasses, graduation cap, headphones, party hat, crown). A live preview updates as you choose; *Surprise me* picks at random and *Save my Jot* stores it on the account (`PATCH /api/auth/me` with `avatar`). The saved Jot appears in the header account menu. `avatar.js` draws it from three ids as SVG (a tilted note-block like the mascot, with a paper-colored sticker outline on accessories so they read on any color and in both themes); the ids must match the server's allowed lists. Every choice is a radio button with a text name, and the preview caption is a polite live region.
+
+## Your Jot in the live tutor
+
+The person's own Jot (their saved avatar, or the default) sits at the top of the tutor conversation panel and reacts to the live session. `jot-buddy.js` decides one state at a time, in this priority: **error**, **speaking**, **thinking**, **listening**, then **ready**, **connecting**, or **offline**, and shows a short status line for it.
+
+| State | When | Animation |
+| --- | --- | --- |
+| offline / connecting | No session yet, or starting | Slow breathing, a little dimmed |
+| ready | Connected and idle | Breathing and an occasional blink |
+| listening | Microphone on and the student's voice is above a small threshold | Leans in, eyes wide |
+| thinking | From sending a typed question until the tutor starts answering (15 s timeout) | Slow wobble, eyes looking up and aside |
+| speaking | While queued tutor audio is playing | The mouth opens and closes with the loudness of the real voice, and the body bounces with it |
+| error | The session dropped | Dimmed |
+
+Loudness comes from `AudioController`, which routes tutor speech through an `AnalyserNode` on the way to the speakers (`getOutputLevel()` is 0 to 1, `isSpeaking()` is true while queued audio is playing). Barge-in (`interrupted`) stops the talking at once. CSS in `styles.css` does all the moving, using `--mouth` and `--bounce` custom properties that the controller updates only while speaking. With `prefers-reduced-motion: reduce`, breathing, blinking, leaning, wobbling, and bouncing stop, but the mouth still opens and closes because that carries information. The animation parts exist only when `avatarSvg(..., { animated: true })` is used; every other place draws the plain static Jot.
+
+ for a literal dollar sign. A single `# Frontend Design
+
+**Project:** Screen Tutor  
+**Status:** Design draft  
+**Client:** HTML, CSS, and JavaScript
+
+## Purpose and scope
+
+The frontend is a browser tutor workspace. A student shares a display, window, or browser tab; asks a question by voice or text; and sees the tutor's reply beside a live preview of the shared content. The tutor can place temporary marks over that preview.
+
+The frontend also has a **class library**: students create classes (Math, Biology, and so on), upload course materials into each one (notes, documents, syllabi, lecture slides, and video/audio lectures), and generate quizzes, practice tests, study guides, and flashcards from those materials. A tutoring session started inside a class uses that class's materials. See [Class library and study pages](#class-library-and-study-pages).
+
+The annotations live inside the Screen Tutor page. A normal web page cannot draw over the student's other desktop applications. The frontend does not click, type, or otherwise control the shared application.
+
+## Proposed client stack
+
+- Semantic HTML for the page and controls.
+- CSS for the responsive two-column workspace, preview overlays, and status indicators.
+- Vanilla JavaScript ES modules for capture, audio, conversation UI, annotations, and backend session events.
+- Vite for local development and static asset bundling; no UI framework.
+- A provider-neutral WebSocket client for the backend. The frontend contains no provider SDK, model identifier, model instructions, tool declarations, or provider credentials.
+- Browser APIs: `getDisplayMedia()` for screen capture, `getUserMedia()` and Web Audio for microphone capture/playback, Canvas for frame sampling, and an SVG/canvas layer for marks.
+- File input, drag-and-drop, and `fetch`/`XMLHttpRequest` upload progress for course materials; `<video>`/`<audio>` for playing uploaded lectures.
+- Simple hash-based routing (`#/classes`, `#/classes/:id/library`, …) so the library, study, and tutor pages stay in one static app.
+
+The browser must be served from HTTPS in deployed environments. Screen capture must start from a user gesture and uses the browser's own source picker. Support should be verified on the selected desktop browsers before promising cross-browser compatibility.
+
+## Workspace layout
+
+```text
+┌───────────────────────────────────────────────────────────────────┐
+│ Screen Tutor     Screen: Sharing / Paused     Mic     End session │
+├───────────────────────────────────────┬───────────────────────────┤
+│                                       │ Tutor conversation        │
+│   Shared screen preview               │                           │
+│   + annotation layer                  │ Tutor transcript          │
+│                                       │ Student questions         │
+│   Pause / choose another source       │                           │
+│                                       ├───────────────────────────┤
+│                                       │ Ask a question…   Send 🎙 │
+└───────────────────────────────────────┴───────────────────────────┘
+```
+
+On narrow viewports, stack the preview and conversation vertically. Keep the preview and active annotations visible together. Do not make color the only way to distinguish sharing, microphone, connection, or error states.
+
+### Main UI elements
+
+- **Header:** connection status, screen-sharing status, microphone status, and End session.
+- **Screen stage:** video preview, annotation layer, source/re-share controls, and an explicit pause action.
+- **Conversation:** user questions, tutor text transcript, connection/retry notices, and a Clear conversation control.
+- **Composer:** text question input, Send, and microphone toggle.
+- **Annotation controls:** dismiss one mark and Clear marks. Marks expire automatically after a short interval.
+- **Class selector:** shows which class's materials the tutor is using, or “No class” for a general session.
+- **Check my steps:** an optional checkbox before Share. When enabled, the tutor gives short corrective hints at pauses while the student explains a solution. The control is locked during a session; End unlocks it for the next session.
+- **Reset tutor memory:** discard a connected tutor's prior conversation and marks, keep the shared screen, and open a fresh session with the selected mode and class. Stop microphone input and queued speech during reset; the student enables the microphone again afterward. Explain that the conversation will be cleared before the action.
+
+## Class library and study pages
+
+### Page map
+
+```text
+Classes ─┬─ Math 151 ─┬─ Library   (uploads: notes, docs, syllabus, slides, lectures)
+         │            ├─ Study     (generate + open quizzes, practice tests, guides, flashcards)
+         │            └─ Tutor     (screen-share workspace using this class's materials)
+         └─ Biology ── …
+```
+
+**Classes page.** A grid of class cards (name, color/icon, upload count, next exam from the syllabus if known) plus **New class**. Each card has rename and delete actions; delete asks for confirmation because it removes the class's uploads and study materials.
+
+**Class page.** A header with the class name and three tabs: Library, Study, and Tutor.
+
+### Library tab (uploads)
+
+The local SQLite workspace calls class/upload APIs without an access-token prerequisite. Existing browser route and IndexedDB IDs stay stable; a persisted `backendId` identifies the corresponding backend class or upload. Library refresh merges remote records into those mappings without discarding locally retained source files. New classes and uploads save through the API, with local files retained for recovery after network failures. Pasted notes use a multiline field with the backend's 1,000,000-character limit. Rename and deletion use the mapped backend UUID and surface API failures.
+
+```text
+┌────────────────────────────────────────────────────────────────────┐
+│ Math 151      [Library]  Study   Tutor                             │
+├────────────────────────────────────────────────────────────────────┤
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Drop files here or Browse   ·  Paste text                   │  │
+│  │  Notes, docs, syllabus, slides, lecture video/audio          │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│  Filter: All | Notes | Docs | Syllabus | Slides | Lectures         │
+│  ▸ Syllabus.pdf          Syllabus   Ready                          │
+│  ▸ Week 3 notes.jpg      Notes      Ready                          │
+│  ▸ Lecture 5.mp4  48:12  Lecture    Transcribing… 62%              │
+│  ▸ Ch4 slides.pptx       Slides     Failed — Retry                 │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+- **Upload zone:** drag-and-drop or file picker (multiple files), plus a Paste text option. Accepted types: PDF, DOCX, PPTX, TXT/MD, PNG/JPEG, MP4/WebM/MOV, MP3/M4A/WAV. The app suggests a kind (notes, document, syllabus, slides, lecture) from the file type and name, and the student can change it before or after upload.
+- **Progress and status:** each upload shows its upload progress, then a processing status from the backend (`uploading`, `processing`/`transcribing`, `ready`, `failed`). Poll the upload's status endpoint until it reaches `ready` or `failed`. Long lectures show progress and can be left to finish while the student keeps working.
+- **Validation before upload:** reject unsupported types and files over the size/length limit with a clear message, and don't send them.
+- **Upload detail view:** shows the original (PDF/slide viewer, image, or video/audio player) beside the extracted text. Lectures show a timestamped transcript; clicking a line seeks the player. The student can edit extracted text, rename, change kind, or delete.
+- **Syllabus outline:** when a syllabus is ready, show its parsed topics and exam dates at the top of the library so the student can check and correct them.
+- **Upload notice:** before the first upload, tell the student that uploaded content is stored in their account and sent to Google's Gemini API for processing.
+
+### Study tab (generated materials)
+
+- **Generate panel:** pick a type (Quiz, Practice test, Study guide, Flashcards); a scope (whole class, selected uploads, syllabus topics, or an upcoming exam such as “Midterm 1”); and options (number of questions, difficulty, time limit for practice tests). Show a generating state and allow cancel.
+- **Saved materials list:** every generated item with type, scope, date, and last score. The student can open, retake, regenerate, or delete it.
+- **Quiz / practice test player:** one question at a time or full-page mode, multiple-choice, true/false, and short/free-response inputs, an optional timer for practice tests, and Submit. The results page shows the score, correct answers, explanations, and source links (page/slide number or lecture timestamp that opens the upload detail view). Each missed question has **Ask the tutor**, which opens the Tutor tab with that question as context.
+- **Study guide view:** rendered headings, key terms, formulas (use KaTeX or MathJax for math), and source links; printable.
+- **Saved guide files:** remote guides offer Download PDF and Download LaTeX. Files remain saved with the guide; older guides export from stored content on first download. Practice tests display their generated instructions above the assessment form.
+- **Flashcards view:** flip card with keyboard support (Space to flip, arrows to move), “Got it” / “Study again” sorting, and shuffle.
+- **AI-generated label and Flag:** every generated item is labeled as AI-generated, and each question or card has a Flag as wrong action.
+
+### Upload document preview
+
+Each processed upload automatically receives a balanced study companion. The preview shows separate **Study document**, **Original file**, and **Original text** views. Original files and complete extracted text remain intact. Study document offers **Concise**, **Balanced**, and **Detailed** explanations, cached independently, plus PDF, LaTeX, and verbatim source-text downloads. PDFs separate the explanation from a full original extracted-text appendix.
+
+Refresh upload detail for current state and a fresh signed original URL. Poll `GET /api/uploads/{id}/document?detail_level=...` sequentially; create missing/retry failed versions with `POST /api/uploads/{id}/document` and `{detail_level}`. Show progress/errors and Retry document independently from extraction status. Closing or switching levels aborts client polling without cancelling the server job. Existing uploads create companions on first open. Original previews use signed backend URLs if IndexedDB lacks a copy. See the backend design for the full contract.
+
+### SQLite study generation integration
+
+Class-library calls use same-origin HTTP without requiring a bearer token in local SQLite mode. The Study tab refreshes backend uploads without replacing their browser IDs or local files. A source checklist shows each filename, kind, and processing status, with Select all, Clear, Notes only, and Syllabus only shortcuts. All uploads are initially selected; students can select any individual upload or combination. A live count summarizes the selection, and generation is disabled when nothing is selected. Choices survive returning from a saved quiz or flashcard player and are locked while generation runs.
+
+Before generation, `course-sync.js` accepts the explicit browser IDs as `selectedUploadIds`, validates that they still belong to the class, maps only those records to backend UUIDs, retrieves their original files from IndexedDB (or uses pasted source text), and waits only for those uploads to be `ready`. Empty or stale explicit selections fail without falling back to the whole class. Unselected uploads are neither submitted nor polled. Local IDs remain stable for routing and file previews; backend UUIDs are persisted as `backendId` fields. Saved generated materials show their selected source filenames.
+
+Study generation submits an explicit upload scope, keeps the returned pending material ID, and polls status sequentially. Pending and failed items remain visible for recovery; generation errors do not create template quizzes. Navigation stops client polling without claiming to cancel the server job. Old browser-only templates remain labeled as local drafts.
+
+Remote quiz detail omits answer keys. Submit choice IDs, true/false values, and short-answer text to the backend attempts endpoint for scoring and answer explanations. A submission failure keeps the student's answers available for retry instead of displaying a fabricated local score. Remote flags and mapped upload preview/retry/delete actions also call the backend without a token prerequisite. See [the backend integration contract](backend-design.md#quiz-generation-integration-for-the-frontend-agent) for request formats and recovery rules.
+
+### Tutor tab
+
+The screen-sharing workspace described above, with the class selected. The page tells the backend the class ID when starting the session so the tutor gets that class's materials. Tutor answers that rely on an upload show a source chip linking to it.
+
+## Accounts, guests, and access
+
+Guests and logged-in users never share a screen or a cache. The backend enforces this; the client only mirrors it.
+
+| Route | Who | Behavior |
+| --- | --- | --- |
+| `#/home` | Everyone | Welcome page. Guests see Log in and Continue as guest; logged-in users see Welcome back and Go to your classes. |
+| `#/login`, `#/signup` | Guests | Standalone Log in and Join Jot screens with no app header. They always ask for credentials, show "Checking your details..." while the server answers, and show inline errors for wrong or missing details. Only a successful server response logs anyone in. A visitor who is already logged in sees who they are logged in as, with Go to your classes and Log out, instead of being redirected. |
+| `#/account` | Logged-in only | Change username and email, change password (current password required; other devices are logged out), and Log out. A guest is sent to `#/login`. |
+| `#/classes`, `#/classes/:id/:tab` | Logged-in only | Class library, study, and class tutor. A guest is sent to `#/login`. |
+| `#/study` | Guests only | Local quick study. A logged-in visitor is sent to their classes. |
+| `#/tutor` | Everyone | Quick tutor without class materials. |
+
+The header's top-right control depends on who is looking:
+
+- **Guest:** a **Join Jot** menu with only *Log in* and *Create account*.
+- **Logged in:** the account name with a menu of *Account*, *Your classes*, and *Log out*.
+
+Only the demo account (`is_demo` from the server) starts with the built-in sample classes and study sets and sees *Restore sample data*. Every other account starts with an empty class list and a *Create your first class* empty state; any sample classes cached by earlier builds are removed from their view.
+
+Log in accepts a username or an email. Anything cached for an account (classes, uploaded files) is cleared on log out, when the server ends the session, and when a different account logs in on the same browser.
+
+## Create your own Jot
+
+The Account page has a character builder: pick one of 9 body colors, 5 faces (happy, wink, sleepy, surprised, big grin), and an accessory (none, round glasses, graduation cap, headphones, party hat, crown). A live preview updates as you choose; *Surprise me* picks at random and *Save my Jot* stores it on the account (`PATCH /api/auth/me` with `avatar`). The saved Jot appears in the header account menu. `avatar.js` draws it from three ids as SVG (a tilted note-block like the mascot, with a paper-colored sticker outline on accessories so they read on any color and in both themes); the ids must match the server's allowed lists. Every choice is a radio button with a text name, and the preview caption is a polite live region.
+
+## Your Jot in the live tutor
+
+The person's own Jot (their saved avatar, or the default) sits at the top of the tutor conversation panel and reacts to the live session. `jot-buddy.js` decides one state at a time, in this priority: **error**, **speaking**, **thinking**, **listening**, then **ready**, **connecting**, or **offline**, and shows a short status line for it.
+
+| State | When | Animation |
+| --- | --- | --- |
+| offline / connecting | No session yet, or starting | Slow breathing, a little dimmed |
+| ready | Connected and idle | Breathing and an occasional blink |
+| listening | Microphone on and the student's voice is above a small threshold | Leans in, eyes wide |
+| thinking | From sending a typed question until the tutor starts answering (15 s timeout) | Slow wobble, eyes looking up and aside |
+| speaking | While queued tutor audio is playing | The mouth opens and closes with the loudness of the real voice, and the body bounces with it |
+| error | The session dropped | Dimmed |
+
+Loudness comes from `AudioController`, which routes tutor speech through an `AnalyserNode` on the way to the speakers (`getOutputLevel()` is 0 to 1, `isSpeaking()` is true while queued audio is playing). Barge-in (`interrupted`) stops the talking at once. CSS in `styles.css` does all the moving, using `--mouth` and `--bounce` custom properties that the controller updates only while speaking. With `prefers-reduced-motion: reduce`, breathing, blinking, leaning, wobbling, and bouncing stop, but the mouth still opens and closes because that carries information. The animation parts exist only when `avatarSvg(..., { animated: true })` is used; every other place draws the plain static Jot.
+
+ only opens math when it looks like math (not followed by a space, closing `# Frontend Design
+
+**Project:** Screen Tutor  
+**Status:** Design draft  
+**Client:** HTML, CSS, and JavaScript
+
+## Purpose and scope
+
+The frontend is a browser tutor workspace. A student shares a display, window, or browser tab; asks a question by voice or text; and sees the tutor's reply beside a live preview of the shared content. The tutor can place temporary marks over that preview.
+
+The frontend also has a **class library**: students create classes (Math, Biology, and so on), upload course materials into each one (notes, documents, syllabi, lecture slides, and video/audio lectures), and generate quizzes, practice tests, study guides, and flashcards from those materials. A tutoring session started inside a class uses that class's materials. See [Class library and study pages](#class-library-and-study-pages).
+
+The annotations live inside the Screen Tutor page. A normal web page cannot draw over the student's other desktop applications. The frontend does not click, type, or otherwise control the shared application.
+
+## Proposed client stack
+
+- Semantic HTML for the page and controls.
+- CSS for the responsive two-column workspace, preview overlays, and status indicators.
+- Vanilla JavaScript ES modules for capture, audio, conversation UI, annotations, and backend session events.
+- Vite for local development and static asset bundling; no UI framework.
+- A provider-neutral WebSocket client for the backend. The frontend contains no provider SDK, model identifier, model instructions, tool declarations, or provider credentials.
+- Browser APIs: `getDisplayMedia()` for screen capture, `getUserMedia()` and Web Audio for microphone capture/playback, Canvas for frame sampling, and an SVG/canvas layer for marks.
+- File input, drag-and-drop, and `fetch`/`XMLHttpRequest` upload progress for course materials; `<video>`/`<audio>` for playing uploaded lectures.
+- Simple hash-based routing (`#/classes`, `#/classes/:id/library`, …) so the library, study, and tutor pages stay in one static app.
+
+The browser must be served from HTTPS in deployed environments. Screen capture must start from a user gesture and uses the browser's own source picker. Support should be verified on the selected desktop browsers before promising cross-browser compatibility.
+
+## Workspace layout
+
+```text
+┌───────────────────────────────────────────────────────────────────┐
+│ Screen Tutor     Screen: Sharing / Paused     Mic     End session │
+├───────────────────────────────────────┬───────────────────────────┤
+│                                       │ Tutor conversation        │
+│   Shared screen preview               │                           │
+│   + annotation layer                  │ Tutor transcript          │
+│                                       │ Student questions         │
+│   Pause / choose another source       │                           │
+│                                       ├───────────────────────────┤
+│                                       │ Ask a question…   Send 🎙 │
+└───────────────────────────────────────┴───────────────────────────┘
+```
+
+On narrow viewports, stack the preview and conversation vertically. Keep the preview and active annotations visible together. Do not make color the only way to distinguish sharing, microphone, connection, or error states.
+
+### Main UI elements
+
+- **Header:** connection status, screen-sharing status, microphone status, and End session.
+- **Screen stage:** video preview, annotation layer, source/re-share controls, and an explicit pause action.
+- **Conversation:** user questions, tutor text transcript, connection/retry notices, and a Clear conversation control.
+- **Composer:** text question input, Send, and microphone toggle.
+- **Annotation controls:** dismiss one mark and Clear marks. Marks expire automatically after a short interval.
+- **Class selector:** shows which class's materials the tutor is using, or “No class” for a general session.
+- **Check my steps:** an optional checkbox before Share. When enabled, the tutor gives short corrective hints at pauses while the student explains a solution. The control is locked during a session; End unlocks it for the next session.
+- **Reset tutor memory:** discard a connected tutor's prior conversation and marks, keep the shared screen, and open a fresh session with the selected mode and class. Stop microphone input and queued speech during reset; the student enables the microphone again afterward. Explain that the conversation will be cleared before the action.
+
+## Class library and study pages
+
+### Page map
+
+```text
+Classes ─┬─ Math 151 ─┬─ Library   (uploads: notes, docs, syllabus, slides, lectures)
+         │            ├─ Study     (generate + open quizzes, practice tests, guides, flashcards)
+         │            └─ Tutor     (screen-share workspace using this class's materials)
+         └─ Biology ── …
+```
+
+**Classes page.** A grid of class cards (name, color/icon, upload count, next exam from the syllabus if known) plus **New class**. Each card has rename and delete actions; delete asks for confirmation because it removes the class's uploads and study materials.
+
+**Class page.** A header with the class name and three tabs: Library, Study, and Tutor.
+
+### Library tab (uploads)
+
+The local SQLite workspace calls class/upload APIs without an access-token prerequisite. Existing browser route and IndexedDB IDs stay stable; a persisted `backendId` identifies the corresponding backend class or upload. Library refresh merges remote records into those mappings without discarding locally retained source files. New classes and uploads save through the API, with local files retained for recovery after network failures. Pasted notes use a multiline field with the backend's 1,000,000-character limit. Rename and deletion use the mapped backend UUID and surface API failures.
+
+```text
+┌────────────────────────────────────────────────────────────────────┐
+│ Math 151      [Library]  Study   Tutor                             │
+├────────────────────────────────────────────────────────────────────┤
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  Drop files here or Browse   ·  Paste text                   │  │
+│  │  Notes, docs, syllabus, slides, lecture video/audio          │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│  Filter: All | Notes | Docs | Syllabus | Slides | Lectures         │
+│  ▸ Syllabus.pdf          Syllabus   Ready                          │
+│  ▸ Week 3 notes.jpg      Notes      Ready                          │
+│  ▸ Lecture 5.mp4  48:12  Lecture    Transcribing… 62%              │
+│  ▸ Ch4 slides.pptx       Slides     Failed — Retry                 │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+- **Upload zone:** drag-and-drop or file picker (multiple files), plus a Paste text option. Accepted types: PDF, DOCX, PPTX, TXT/MD, PNG/JPEG, MP4/WebM/MOV, MP3/M4A/WAV. The app suggests a kind (notes, document, syllabus, slides, lecture) from the file type and name, and the student can change it before or after upload.
+- **Progress and status:** each upload shows its upload progress, then a processing status from the backend (`uploading`, `processing`/`transcribing`, `ready`, `failed`). Poll the upload's status endpoint until it reaches `ready` or `failed`. Long lectures show progress and can be left to finish while the student keeps working.
+- **Validation before upload:** reject unsupported types and files over the size/length limit with a clear message, and don't send them.
+- **Upload detail view:** shows the original (PDF/slide viewer, image, or video/audio player) beside the extracted text. Lectures show a timestamped transcript; clicking a line seeks the player. The student can edit extracted text, rename, change kind, or delete.
+- **Syllabus outline:** when a syllabus is ready, show its parsed topics and exam dates at the top of the library so the student can check and correct them.
+- **Upload notice:** before the first upload, tell the student that uploaded content is stored in their account and sent to Google's Gemini API for processing.
+
+### Study tab (generated materials)
+
+- **Generate panel:** pick a type (Quiz, Practice test, Study guide, Flashcards); a scope (whole class, selected uploads, syllabus topics, or an upcoming exam such as “Midterm 1”); and options (number of questions, difficulty, time limit for practice tests). Show a generating state and allow cancel.
+- **Saved materials list:** every generated item with type, scope, date, and last score. The student can open, retake, regenerate, or delete it.
+- **Quiz / practice test player:** one question at a time or full-page mode, multiple-choice, true/false, and short/free-response inputs, an optional timer for practice tests, and Submit. The results page shows the score, correct answers, explanations, and source links (page/slide number or lecture timestamp that opens the upload detail view). Each missed question has **Ask the tutor**, which opens the Tutor tab with that question as context.
+- **Study guide view:** rendered headings, key terms, formulas (use KaTeX or MathJax for math), and source links; printable.
+- **Saved guide files:** remote guides offer Download PDF and Download LaTeX. Files remain saved with the guide; older guides export from stored content on first download. Practice tests display their generated instructions above the assessment form.
+- **Flashcards view:** flip card with keyboard support (Space to flip, arrows to move), “Got it” / “Study again” sorting, and shuffle.
+- **AI-generated label and Flag:** every generated item is labeled as AI-generated, and each question or card has a Flag as wrong action.
+
+### Upload document preview
+
+Each processed upload automatically receives a balanced study companion. The preview shows separate **Study document**, **Original file**, and **Original text** views. Original files and complete extracted text remain intact. Study document offers **Concise**, **Balanced**, and **Detailed** explanations, cached independently, plus PDF, LaTeX, and verbatim source-text downloads. PDFs separate the explanation from a full original extracted-text appendix.
+
+Refresh upload detail for current state and a fresh signed original URL. Poll `GET /api/uploads/{id}/document?detail_level=...` sequentially; create missing/retry failed versions with `POST /api/uploads/{id}/document` and `{detail_level}`. Show progress/errors and Retry document independently from extraction status. Closing or switching levels aborts client polling without cancelling the server job. Existing uploads create companions on first open. Original previews use signed backend URLs if IndexedDB lacks a copy. See the backend design for the full contract.
+
+### SQLite study generation integration
+
+Class-library calls use same-origin HTTP without requiring a bearer token in local SQLite mode. The Study tab refreshes backend uploads without replacing their browser IDs or local files. A source checklist shows each filename, kind, and processing status, with Select all, Clear, Notes only, and Syllabus only shortcuts. All uploads are initially selected; students can select any individual upload or combination. A live count summarizes the selection, and generation is disabled when nothing is selected. Choices survive returning from a saved quiz or flashcard player and are locked while generation runs.
+
+Before generation, `course-sync.js` accepts the explicit browser IDs as `selectedUploadIds`, validates that they still belong to the class, maps only those records to backend UUIDs, retrieves their original files from IndexedDB (or uses pasted source text), and waits only for those uploads to be `ready`. Empty or stale explicit selections fail without falling back to the whole class. Unselected uploads are neither submitted nor polled. Local IDs remain stable for routing and file previews; backend UUIDs are persisted as `backendId` fields. Saved generated materials show their selected source filenames.
+
+Study generation submits an explicit upload scope, keeps the returned pending material ID, and polls status sequentially. Pending and failed items remain visible for recovery; generation errors do not create template quizzes. Navigation stops client polling without claiming to cancel the server job. Old browser-only templates remain labeled as local drafts.
+
+Remote quiz detail omits answer keys. Submit choice IDs, true/false values, and short-answer text to the backend attempts endpoint for scoring and answer explanations. A submission failure keeps the student's answers available for retry instead of displaying a fabricated local score. Remote flags and mapped upload preview/retry/delete actions also call the backend without a token prerequisite. See [the backend integration contract](backend-design.md#quiz-generation-integration-for-the-frontend-agent) for request formats and recovery rules.
+
+### Tutor tab
+
+The screen-sharing workspace described above, with the class selected. The page tells the backend the class ID when starting the session so the tutor gets that class's materials. Tutor answers that rely on an upload show a source chip linking to it.
+
+## Accounts, guests, and access
+
+Guests and logged-in users never share a screen or a cache. The backend enforces this; the client only mirrors it.
+
+| Route | Who | Behavior |
+| --- | --- | --- |
+| `#/home` | Everyone | Welcome page. Guests see Log in and Continue as guest; logged-in users see Welcome back and Go to your classes. |
+| `#/login`, `#/signup` | Guests | Standalone Log in and Join Jot screens with no app header. They always ask for credentials, show "Checking your details..." while the server answers, and show inline errors for wrong or missing details. Only a successful server response logs anyone in. A visitor who is already logged in sees who they are logged in as, with Go to your classes and Log out, instead of being redirected. |
+| `#/account` | Logged-in only | Change username and email, change password (current password required; other devices are logged out), and Log out. A guest is sent to `#/login`. |
+| `#/classes`, `#/classes/:id/:tab` | Logged-in only | Class library, study, and class tutor. A guest is sent to `#/login`. |
+| `#/study` | Guests only | Local quick study. A logged-in visitor is sent to their classes. |
+| `#/tutor` | Everyone | Quick tutor without class materials. |
+
+The header's top-right control depends on who is looking:
+
+- **Guest:** a **Join Jot** menu with only *Log in* and *Create account*.
+- **Logged in:** the account name with a menu of *Account*, *Your classes*, and *Log out*.
+
+Only the demo account (`is_demo` from the server) starts with the built-in sample classes and study sets and sees *Restore sample data*. Every other account starts with an empty class list and a *Create your first class* empty state; any sample classes cached by earlier builds are removed from their view.
+
+Log in accepts a username or an email. Anything cached for an account (classes, uploaded files) is cleared on log out, when the server ends the session, and when a different account logs in on the same browser.
+
+## Create your own Jot
+
+The Account page has a character builder: pick one of 9 body colors, 5 faces (happy, wink, sleepy, surprised, big grin), and an accessory (none, round glasses, graduation cap, headphones, party hat, crown). A live preview updates as you choose; *Surprise me* picks at random and *Save my Jot* stores it on the account (`PATCH /api/auth/me` with `avatar`). The saved Jot appears in the header account menu. `avatar.js` draws it from three ids as SVG (a tilted note-block like the mascot, with a paper-colored sticker outline on accessories so they read on any color and in both themes); the ids must match the server's allowed lists. Every choice is a radio button with a text name, and the preview caption is a polite live region.
+
+## Your Jot in the live tutor
+
+The person's own Jot (their saved avatar, or the default) sits at the top of the tutor conversation panel and reacts to the live session. `jot-buddy.js` decides one state at a time, in this priority: **error**, **speaking**, **thinking**, **listening**, then **ready**, **connecting**, or **offline**, and shows a short status line for it.
+
+| State | When | Animation |
+| --- | --- | --- |
+| offline / connecting | No session yet, or starting | Slow breathing, a little dimmed |
+| ready | Connected and idle | Breathing and an occasional blink |
+| listening | Microphone on and the student's voice is above a small threshold | Leans in, eyes wide |
+| thinking | From sending a typed question until the tutor starts answering (15 s timeout) | Slow wobble, eyes looking up and aside |
+| speaking | While queued tutor audio is playing | The mouth opens and closes with the loudness of the real voice, and the body bounces with it |
+| error | The session dropped | Dimmed |
+
+Loudness comes from `AudioController`, which routes tutor speech through an `AnalyserNode` on the way to the speakers (`getOutputLevel()` is 0 to 1, `isSpeaking()` is true while queued audio is playing). Barge-in (`interrupted`) stops the talking at once. CSS in `styles.css` does all the moving, using `--mouth` and `--bounce` custom properties that the controller updates only while speaking. With `prefers-reduced-motion: reduce`, breathing, blinking, leaning, wobbling, and bouncing stop, but the mouth still opens and closes because that carries information. The animation parts exist only when `avatarSvg(..., { animated: true })` is used; every other place draws the plain static Jot.
+
+ not preceded by a space or followed by a digit), so "$5 and $10" stays text.
+- **Two steps:** `mathHtml(text)` returns safe HTML immediately (text escaped, math shown as its source); `typesetMath(root)` then loads KaTeX and replaces each source with rendered math plus MathML for screen readers. KaTeX is a separate lazy chunk, fetched only when a page has math.
+- **Safe by construction:** all non-math text and all TeX are HTML-escaped, KaTeX runs with `trust: false` (no links, HTML, or images from TeX), expressions are capped at 2,000 characters and 200 per text, and anything KaTeX cannot parse stays as readable text.
+- **Tests:** `frontend/tests/math.test.js` covers the parser, escaping, and limits.
+
+## Tutor language lock
+
+The tutor panel has a **Language lock** picker under *Check my steps*: *No lock (match me)* or one of 11 languages (English, Spanish, French, German, Portuguese, Italian, Mandarin Chinese, Japanese, Korean, Hindi, Arabic). With a lock, the tutor speaks and writes only in that language, even when the student asks in another language or the screen shows one. Like *Check my steps*, it is chosen before a session and disabled while one runs. The choice is remembered in the browser (`localStorage["jot-tutor-language"]`, validated on load) and sent as `language` when a session starts; with no lock nothing is sent. `tutor-language.js` holds the list, which must match the server's.
+
 ## Light and dark mode
 
 The theme is a choice, not just the system setting. `<html data-theme="light|dark">` selects the color tokens in `styles.css`. A small script in `index.html` applies the saved choice (`localStorage["jot-theme"]`) before first paint, so there is no flash; with no saved choice it follows `prefers-color-scheme`, including live changes, until the person picks one. `theme.js` owns the toggle: a sun/moon button in every header and floating in the corner of the welcome, login, and sign-up screens. It works if storage is blocked (the choice then lasts for the visit). Both themes keep text at 4.5:1 or better and control borders at 3:1 or better.

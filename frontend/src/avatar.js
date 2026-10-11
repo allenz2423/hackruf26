@@ -62,27 +62,43 @@ const GOLD = "#f6d94a";
 const RED = "#e0614f";
 
 // Faces are drawn in the color's own "face" ink, like the mascot's light-blue features.
+// Eyes and mouth are kept apart so the live tutor can blink and talk with them.
 const FACES = {
-  happy: (f) => `
+  happy: (f) => ({
+    eyes: `
     <ellipse cx="44" cy="67" rx="4.4" ry="6.4" fill="${f}"/>
-    <ellipse cx="76" cy="64" rx="4.4" ry="6.4" fill="${f}"/>
-    <path d="M50 81 Q60 90 70 81" fill="none" stroke="${f}" stroke-width="4.6" stroke-linecap="round"/>`,
-  wink: (f) => `
+    <ellipse cx="76" cy="64" rx="4.4" ry="6.4" fill="${f}"/>`,
+    mouth: `
+    <path d="M50 81 Q60 90 70 81" fill="none" stroke="${f}" stroke-width="4.6" stroke-linecap="round"/>`
+  }),
+  wink: (f) => ({
+    eyes: `
     <ellipse cx="44" cy="67" rx="4.4" ry="6.4" fill="${f}"/>
-    <path d="M70.5 65 Q76 58.5 81.5 65" fill="none" stroke="${f}" stroke-width="4.4" stroke-linecap="round"/>
-    <path d="M50 81 Q60 90 70 81" fill="none" stroke="${f}" stroke-width="4.6" stroke-linecap="round"/>`,
-  sleepy: (f) => `
+    <path d="M70.5 65 Q76 58.5 81.5 65" fill="none" stroke="${f}" stroke-width="4.4" stroke-linecap="round"/>`,
+    mouth: `
+    <path d="M50 81 Q60 90 70 81" fill="none" stroke="${f}" stroke-width="4.6" stroke-linecap="round"/>`
+  }),
+  sleepy: (f) => ({
+    eyes: `
     <path d="M38.5 66 Q44 72 49.5 66" fill="none" stroke="${f}" stroke-width="4.4" stroke-linecap="round"/>
-    <path d="M70.5 63 Q76 69 81.5 63" fill="none" stroke="${f}" stroke-width="4.4" stroke-linecap="round"/>
-    <path d="M55 82 Q60 85.5 65 82" fill="none" stroke="${f}" stroke-width="4.2" stroke-linecap="round"/>`,
-  surprised: (f) => `
+    <path d="M70.5 63 Q76 69 81.5 63" fill="none" stroke="${f}" stroke-width="4.4" stroke-linecap="round"/>`,
+    mouth: `
+    <path d="M55 82 Q60 85.5 65 82" fill="none" stroke="${f}" stroke-width="4.2" stroke-linecap="round"/>`
+  }),
+  surprised: (f) => ({
+    eyes: `
     <circle cx="44" cy="66" r="5.6" fill="${f}"/>
-    <circle cx="76" cy="63" r="5.6" fill="${f}"/>
-    <ellipse cx="60" cy="84" rx="5" ry="6.4" fill="${f}"/>`,
-  grin: (f) => `
+    <circle cx="76" cy="63" r="5.6" fill="${f}"/>`,
+    mouth: `
+    <ellipse cx="60" cy="84" rx="5" ry="6.4" fill="${f}"/>`
+  }),
+  grin: (f) => ({
+    eyes: `
     <ellipse cx="44" cy="67" rx="4.4" ry="6.4" fill="${f}"/>
-    <ellipse cx="76" cy="64" rx="4.4" ry="6.4" fill="${f}"/>
+    <ellipse cx="76" cy="64" rx="4.4" ry="6.4" fill="${f}"/>`,
+    mouth: `
     <path d="M45 78 Q60 100 75 78 Z" fill="${f}" stroke="${f}" stroke-width="3" stroke-linejoin="round"/>`
+  })
 };
 
 // Accessories get a paper-colored sticker outline so they stay readable on any
@@ -134,17 +150,29 @@ const ACCESSORIES = {
 };
 
 // The whole character is drawn upright, then tilted as one piece, like the mascot.
-export function avatarSvg(avatar, { size = 96, label = "" } = {}) {
+// With `animated`, the parts get class names the live tutor's CSS can move: the
+// figure breathes and bounces, the eyes blink, and a separate talking mouth takes
+// over from the resting one while the tutor speaks.
+export function avatarSvg(avatar, { size = 96, label = "", animated = false } = {}) {
   const choice = normalizeAvatar(avatar);
   const color = AVATAR_COLORS.find((item) => item.id === choice.color);
   const a11y = label ? `role="img" aria-label="${label}"` : 'aria-hidden="true"';
+  const face = FACES[choice.face](color.face);
 
-  return `<svg class="avatar" viewBox="0 0 120 120" width="${size}" height="${size}" ${a11y} focusable="false">
-    <g transform="rotate(-8 60 64)">
+  const features = animated
+    ? `<g class="jot-eyes">${face.eyes}</g>
+      <g class="jot-mouth">${face.mouth}</g>
+      <ellipse class="jot-talk" cx="60" cy="84" rx="7" ry="7.5" fill="${color.face}"/>`
+    : face.eyes + face.mouth;
+
+  const character = `<g transform="rotate(-8 60 64)">
       <rect x="18" y="26" width="84" height="76" rx="28" fill="${color.body}"/>
       <ellipse cx="38" cy="46" rx="9" ry="5.5" fill="rgba(255,255,255,.38)" transform="rotate(-38 38 46)"/>
-      ${FACES[choice.face](color.face)}
+      ${features}
       ${ACCESSORIES[choice.accessory]()}
-    </g>
+    </g>`;
+
+  return `<svg class="avatar${animated ? " avatar-animated" : ""}" viewBox="0 0 120 120" width="${size}" height="${size}" ${a11y} focusable="false">
+    ${animated ? `<g class="jot-figure">${character}</g>` : character}
   </svg>`;
 }

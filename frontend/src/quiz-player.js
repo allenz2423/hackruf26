@@ -1,3 +1,4 @@
+import { mathHtml, typesetMath } from "./math.js";
 import { escapeHtml, toast } from "./ui.js";
 import { submitAttemptApi, flagMaterialItemApi } from "./api.js";
 
@@ -132,7 +133,7 @@ function renderQuestionInput(question, index) {
         return `
           <label class="practice-option">
             <input type="radio" name="question-${index}" value="${escapeHtml(val)}" />
-            <span>${escapeHtml(label)}</span>
+            <span>${mathHtml(label)}</span>
           </label>
         `;
       }).join("")}
@@ -215,10 +216,10 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
                     <strong>${isCorrect ? "Correct" : "Review"}</strong>
                   </span>
                 </div>
-                <p class="review-prompt">${escapeHtml(question.prompt)}</p>
-                <p class="review-answer">Your answer: <strong>${escapeHtml(selected || "None")}</strong></p>
-                <p class="review-answer">Answer key: <strong>${escapeHtml(correct || "N/A")}</strong></p>
-                ${explanation ? `<p class="review-explanation">${escapeHtml(explanation)}</p>` : ""}
+                <p class="review-prompt">${mathHtml(question.prompt)}</p>
+                <p class="review-answer">Your answer: <strong>${mathHtml(selected || "None")}</strong></p>
+                <p class="review-answer">Answer key: <strong>${mathHtml(correct || "N/A")}</strong></p>
+                ${explanation ? `<p class="review-explanation">${mathHtml(explanation)}</p>` : ""}
                 ${sources && sources.length ? `
                   <div class="source-chips" style="margin-top: 0.5rem;">
                     ${sources.map((src) => {
@@ -247,6 +248,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
         </div>
       </section>
     `;
+    void typesetMath(root);
 
     root.querySelectorAll("[data-back-to-study]").forEach((button) => {
       button.addEventListener("click", goBack);
@@ -390,7 +392,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
             <legend>
               <span class="practice-question-heading">
                 <span class="question-number">${index + 1}</span>
-                <span class="practice-prompt">${escapeHtml(question.prompt)}</span>
+                <span class="practice-prompt">${mathHtml(question.prompt)}</span>
               </span>
             </legend>
             ${renderQuestionInput(question, index)}
@@ -403,6 +405,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
       </form>
     </section>
   `;
+  void typesetMath(root);
 
   root.querySelectorAll("[data-back-to-study]").forEach((button) => {
     button.addEventListener("click", goBack);

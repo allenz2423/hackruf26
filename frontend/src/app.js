@@ -23,6 +23,9 @@ import { createRouter } from "./router.js";
 import { ScreenCaptureController } from "./screen-capture.js";
 import { renderStudyTab } from "./study.js";
 import { AVATAR_ACCESSORIES, AVATAR_COLORS, AVATAR_FACES, avatarSvg, describeAvatar, normalizeAvatar, randomAvatar } from "./avatar.js";
+import { JotBuddy } from "./jot-buddy.js";
+import { renderMathInto } from "./math.js";
+import { TUTOR_LANGUAGES, languageLabel, loadTutorLanguage, saveTutorLanguage } from "./tutor-language.js";
 import { initTheme, themeToggleMarkup } from "./theme.js";
 import { renderGuestStudy } from "./guest-study.js";
 import { clearUploadedFiles, deleteUploadedFile, deleteUploadedFiles } from "./file-store.js";
@@ -50,6 +53,7 @@ const state = {
   mic: "off",
   micDevice: "",
   tutorMode: "conversation",
+  tutorLanguage: loadTutorLanguage(),
   messages: []
 };
 
@@ -102,6 +106,18 @@ function syncTutorControls() {
       : modeLocked
         ? "Conversation mode is active. End the session to enable Check my steps."
         : "Enable before sharing for corrective hints at pauses as you explain your solution.";
+  }
+  const languageSelect = document.querySelector("#tutor-language");
+  if (languageSelect) {
+    const languageLocked = inSession || ["connecting", "connected"].includes(state.connection);
+    languageSelect.value = state.tutorLanguage;
+    languageSelect.disabled = languageLocked;
+    const locked = state.tutorLanguage !== "auto";
+    document.querySelector("#language-description").textContent = locked
+      ? `The tutor speaks and writes only in ${languageLabel(state.tutorLanguage)}.${languageLocked ? " End the session to change it." : ""}`
+      : languageLocked
+        ? "The tutor matches your language. End the session to lock one."
+        : "The tutor matches your language. Pick one to keep it in that language.";
   }
   const micToggle = document.querySelector("#mic-toggle");
   if (micToggle) {
@@ -572,7 +588,7 @@ function appendMessage(role, text) {
 
   const item = document.createElement("li");
   item.className = role === "student" ? "message student" : "message tutor";
-  item.textContent = text;
+  renderMathInto(item, text);
   list.append(item);
   list.scrollTop = list.scrollHeight;
 }
@@ -607,6 +623,7 @@ function renderTutor(klass = null) {
         </div>
       </div>
       <aside class="panel conversation-panel" aria-label="Tutor conversation">
+        <div id="jot-buddy"></div>
         <div class="conversation-head">
           <div class="conversation-title-row">
             <h2>Conversation</h2>
@@ -619,6 +636,13 @@ function renderTutor(klass = null) {
               <span>Check my steps</span>
             </label>
             <p id="coaching-description" role="status" aria-live="polite"></p>
+            <label class="language-lock-control" for="tutor-language">
+              <span>${icon("lock", { size: 16 })} Language lock</span>
+              <select id="tutor-language" aria-describedby="language-description">
+                ${TUTOR_LANGUAGES.map((item) => `<option value="${item.id}">${escapeHtml(item.label)}</option>`).join("")}
+              </select>
+            </label>
+            <p id="language-description" role="status" aria-live="polite"></p>
           </div>
         </div>
         <ol id="conversation-list" class="conversation-list" data-empty-prompt="${escapeHtml(klass ? `Ask about your shared screen or ${klass.name}'s course materials.` : "Share your screen or ask a general question to get started.")}" aria-live="polite"></ol>
@@ -672,12 +696,17 @@ function renderTutor(klass = null) {
   let sessionRequestId = 0;
   let audioController = null;
   let classPreparation = null;
+  let buddy = null;
   const live = new LiveSessionController({
     classId: klass ? getBackendClassId(klass) : null,
-    onMessage: (message) => appendMessage(message.role, message.text),
+    onMessage: (message) => {
+      appendMessage(message.role, message.text);
+      if (message.role === "tutor") buddy?.turnComplete();
+    },
     onStatusChange: (connection, errorMessage) => {
       if (disposed) return;
       setStatus({ connection });
+      buddy?.setConnection(connection);
       if (connection === "error") {
         const wasActive = ["active", "screen_paused"].includes(state.session);
         if (wasActive) sessionRequestId += 1;
@@ -691,8 +720,14 @@ function renderTutor(klass = null) {
         }
       }
     },
-    onAudioData: (data, mimeType) => audioController?.playPcm(data, mimeType),
-    onAudioInterrupted: () => audioController?.stopPlayback(),
+    onAudioData: (data, mimeType) => {
+      audioController?.playPcm(data, mimeType);
+      buddy?.audioArrived();
+    },
+    onAudioInterrupted: () => {
+      audioController?.stopPlayback();
+      buddy?.interrupted();
+    },
     onAnnotationRequest: (payload) => {
       const frameId = payload?.frame_id;
       const items = (payload?.items || []).map((item) => ({ ...item, frame_id: frameId }));
@@ -721,18 +756,29 @@ function renderTutor(klass = null) {
       if (disposed) return;
       const wasSendingAudio = state.mic === "on";
       setStatus({ mic, micDevice: deviceLabel });
+      buddy?.setMicOn(mic === "on");
       if (wasSendingAudio && ["off", "muted"].includes(mic)) live.endAudioInput();
     },
     onAudioChunk: (chunk) => {
       if (!live.sendAudio(chunk)) audioController.disable();
     },
     onAudioLevel: (level) => {
-      if (!disposed) micLevel.style.transform = `scaleX(${level})`;
+      if (disposed) return;
+      micLevel.style.transform = `scaleX(${level})`;
+      buddy?.micLevel(level);
     },
     onError: (error) => {
       if (!disposed) toast(error.message, { tone: "error" });
     }
   });
+
+  buddy = new JotBuddy({
+    root: document.querySelector("#jot-buddy"),
+    avatar: currentUser?.avatar,
+    getSpeechLevel: () => audioController.getOutputLevel(),
+    isSpeaking: () => audioController.isSpeaking()
+  });
+  buddy.setConnection(state.connection);
 
   function stopSession() {
     sessionRequestId += 1;
@@ -747,6 +793,7 @@ function renderTutor(klass = null) {
 
   disposeTutor = () => {
     disposed = true;
+    buddy?.dispose();
     stopSession();
     annotations.destroy();
     Object.assign(state, {
@@ -773,7 +820,7 @@ function renderTutor(klass = null) {
           if (disposed || requestId !== sessionRequestId) return;
           classPreparation = null;
         }
-        await live.connect({ mode: state.tutorMode });
+        await live.connect({ mode: state.tutorMode, language: state.tutorLanguage });
       }
       if (disposed || requestId !== sessionRequestId) return;
       setStatus({ session: "active" });
@@ -814,7 +861,7 @@ function renderTutor(klass = null) {
     try {
       await audioController.preparePlayback();
       if (disposed || requestId !== sessionRequestId) return;
-      await live.connect({ mode: state.tutorMode });
+      await live.connect({ mode: state.tutorMode, language: state.tutorLanguage });
       if (disposed || requestId !== sessionRequestId) return;
       if (capture.stream) {
         capture.sampleFrame();
@@ -830,6 +877,10 @@ function renderTutor(klass = null) {
       setStatus({ session: "error", screen: "not sharing", connection: "offline" });
       toast(`Could not reset the tutor: ${error.message}`, { tone: "error" });
     }
+  });
+  document.querySelector("#tutor-language").addEventListener("change", (event) => {
+    if (event.currentTarget.disabled) return;
+    setStatus({ tutorLanguage: saveTutorLanguage(event.currentTarget.value) });
   });
   document.querySelector("#check-steps").addEventListener("change", (event) => {
     if (event.currentTarget.disabled) return;
@@ -853,6 +904,7 @@ function renderTutor(klass = null) {
     try {
       if (!live.sendText(text)) return;
       appendMessage("student", text);
+      buddy?.questionSent();
       input.value = "";
     } catch (error) {
       toast(error.message || "The question could not be sent.", { tone: "error" });

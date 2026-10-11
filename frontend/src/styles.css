@@ -3898,3 +3898,220 @@ p {
     animation: none;
   }
 }
+
+/* Jot buddy: your Jot in the live tutor */
+
+.jot-buddy {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface-muted);
+  --mouth: 0.14;
+  --bounce: 0;
+}
+
+.jot-buddy-art {
+  flex: none;
+  width: 72px;
+  height: 72px;
+}
+
+.jot-buddy-art .avatar {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.jot-buddy-text {
+  display: grid;
+  min-width: 0;
+}
+
+.jot-buddy-name {
+  color: var(--muted);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.jot-buddy-status {
+  font-weight: 700;
+}
+
+.avatar-animated .jot-figure {
+  transform-box: view-box;
+  transform-origin: 50% 85%;
+  animation: jot-breathe 3.8s ease-in-out infinite;
+}
+
+.avatar-animated .jot-eyes {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: jot-blink 5.4s infinite;
+}
+
+.avatar-animated .jot-talk {
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@keyframes jot-breathe {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-1.5px) scale(1.025, 0.985);
+  }
+}
+
+@keyframes jot-blink {
+  0%,
+  92%,
+  100% {
+    transform: scaleY(1);
+  }
+  95.5% {
+    transform: scaleY(0.1);
+  }
+}
+
+/* Leaning in while you speak, eyes wide. */
+.jot-buddy[data-state="listening"] .jot-figure {
+  animation: jot-listen 1.8s ease-in-out infinite;
+}
+
+.jot-buddy[data-state="listening"] .jot-eyes {
+  animation: none;
+  transform: scale(1.14);
+}
+
+@keyframes jot-listen {
+  0%,
+  100% {
+    transform: translateX(2px) rotate(4deg);
+  }
+  50% {
+    transform: translateX(3px) rotate(5.5deg) scale(1.02);
+  }
+}
+
+/* A slow wobble, eyes up and to the side, while it works out an answer. */
+.jot-buddy[data-state="thinking"] .jot-figure {
+  animation: jot-think 1.5s ease-in-out infinite;
+}
+
+.jot-buddy[data-state="thinking"] .jot-eyes {
+  animation: none;
+  transform: translate(3px, -3px);
+}
+
+@keyframes jot-think {
+  0%,
+  100% {
+    transform: rotate(-3.5deg);
+  }
+  50% {
+    transform: rotate(3.5deg) translateY(-1px);
+  }
+}
+
+/* Talking: the mouth follows the loudness of the real voice, the body bounces with it. */
+.jot-buddy[data-state="speaking"] .jot-figure {
+  animation: none;
+  transform: translateY(calc(var(--bounce) * -3px)) scale(calc(1 + var(--bounce) * 0.03));
+}
+
+.jot-buddy[data-state="speaking"] .jot-mouth {
+  opacity: 0;
+}
+
+.jot-buddy[data-state="speaking"] .jot-talk {
+  opacity: 1;
+  transform: scaleY(var(--mouth));
+}
+
+/* Disconnected or waiting: calmer and a touch dimmer. */
+.jot-buddy[data-state="offline"] .avatar,
+.jot-buddy[data-state="error"] .avatar {
+  opacity: 0.75;
+}
+
+.jot-buddy[data-state="offline"] .jot-figure {
+  animation-duration: 6s;
+}
+
+/* No wobbling, bouncing, or blinking for people who asked for less motion. The
+   mouth still opens and closes, because that is information, not decoration. */
+@media (prefers-reduced-motion: reduce) {
+  .avatar-animated .jot-figure,
+  .avatar-animated .jot-eyes {
+    animation: none !important;
+  }
+
+  .jot-buddy[data-state="speaking"] .jot-figure {
+    transform: none;
+  }
+
+  .jot-buddy[data-state="listening"] .jot-figure {
+    transform: rotate(4deg);
+  }
+}
+
+/* Math in AI text */
+
+.tex-math .katex {
+  font-size: 1.05em;
+}
+
+/* A long display equation scrolls inside its box instead of widening the page. */
+.tex-math.is-display {
+  display: block;
+  max-width: 100%;
+  margin: 0.4em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Math that could not be typeset stays as the original text, set apart as code. */
+.tex-math.is-error {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
+
+/* Language lock */
+
+.language-lock-control {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  font-weight: 600;
+}
+
+.language-lock-control > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.language-lock-control select {
+  min-height: 40px;
+  max-width: 100%;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 500;
+}
+
+#language-description {
+  color: var(--muted);
+  font-size: 0.8125rem;
+}

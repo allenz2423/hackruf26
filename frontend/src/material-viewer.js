@@ -1,3 +1,4 @@
+import { mathHtml, typesetMath } from "./math.js";
 import { escapeHtml, toast } from "./ui.js";
 import { icon } from "./icons.js";
 import { renderFlashcards, normalizeCards, formatSourceCitation } from "./flashcards.js";
@@ -131,7 +132,7 @@ function formatBodyParagraphs(body) {
   return body
     .split(/\n{2,}/)
     .filter((p) => p.trim())
-    .map((p) => `<p>${escapeHtml(p.trim()).replace(/\n/g, "<br>")}</p>`)
+    .map((p) => `<p>${mathHtml(p.trim()).replace(/\n/g, "<br>")}</p>`)
     .join("");
 }
 
@@ -164,7 +165,7 @@ function renderGuide(root, material) {
         <div class="guide-sections-list">
           ${sections.map((section, idx) => `
             <section class="guide-section">
-              <h3 class="guide-section-heading">${escapeHtml(section.heading || `Section ${idx + 1}`)}</h3>
+              <h3 class="guide-section-heading">${mathHtml(section.heading || `Section ${idx + 1}`)}</h3>
               <div class="guide-section-body">
                 ${formatBodyParagraphs(section.body)}
               </div>
@@ -192,6 +193,7 @@ function renderGuide(root, material) {
       `}
     </article>
   `;
+  void typesetMath(root);
 
   root.querySelectorAll("[data-download-guide]").forEach((button) => button.addEventListener("click", async () => {
     const buttons = root.querySelectorAll("[data-download-guide]");
@@ -279,12 +281,12 @@ function renderQuestions(root, material, onReturn = null) {
           ${item.choices.map((choice) => {
             const val = choice && typeof choice === "object" ? (choice.id ?? choice.text) : choice;
             const label = choice && typeof choice === "object" ? (choice.text ?? choice.label ?? choice.id) : choice;
-            return `<label><input type="radio" name="answer" value="${escapeHtml(val)}" ${selected === val ? "checked" : ""} /><span>${escapeHtml(label)}</span></label>`;
+            return `<label><input type="radio" name="answer" value="${escapeHtml(val)}" ${selected === val ? "checked" : ""} /><span>${mathHtml(label)}</span></label>`;
           }).join("")}
         </fieldset>` : `<p class="muted">Answer from memory, then reveal the review note.</p>`}
         <div class="answer-feedback" aria-live="polite">${isChecked ? hasChoices
-          ? `<strong data-correct="${isCorrect}">${isCorrect ? "Correct" : `Answer: ${escapeHtml(item.answer)}`}</strong><p>${escapeHtml(item.explanation || "")}</p>`
-          : `<strong>Review note</strong><p>${escapeHtml(item.answer || `Look for this idea in ${material.sources?.[0] || "your class materials"}.`)}</p>`
+          ? `<strong data-correct="${isCorrect}">${isCorrect ? "Correct" : `Answer: ${mathHtml(item.answer)}`}</strong><p>${mathHtml(item.explanation || "")}</p>`
+          : `<strong>Review note</strong><p>${mathHtml(item.answer || `Look for this idea in ${material.sources?.[0] || "your class materials"}.`)}</p>`
           : ""}</div>
       </section>
       <div class="study-actions">
@@ -298,6 +300,7 @@ function renderQuestions(root, material, onReturn = null) {
             : `<button class="btn btn-primary" type="button" data-reveal>Reveal review note</button>`}
       </div>
     `;
+    void typesetMath(root);
 
     const checkButton = root.querySelector("[data-check]");
     if (checkButton) {

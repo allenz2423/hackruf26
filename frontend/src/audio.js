@@ -50,6 +50,8 @@ export class AudioController {
     this.lastLevelAt = 0;
     this.playbackSources = new Set();
     this.nextPlaybackTime = 0;
+    this.outputAnalyser = null;
+    this.outputSamples = null;
   }
 
   ensureContext() {
@@ -62,6 +64,37 @@ export class AudioController {
 
     this.context = new AudioContextConstructor({ latencyHint: "interactive" });
     return this.context;
+  }
+
+  // Tutor speech passes through an analyser on its way to the speakers, so the
+  // interface can react to how loud the voice is right now.
+  ensureOutputAnalyser(context) {
+    if (!this.outputAnalyser) {
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 512;
+      analyser.smoothingTimeConstant = 0.5;
+      analyser.connect(context.destination);
+      this.outputAnalyser = analyser;
+      this.outputSamples = new Uint8Array(analyser.fftSize);
+    }
+    return this.outputAnalyser;
+  }
+
+  // 0 (silent) to 1 (loud): the current loudness of the tutor's voice.
+  getOutputLevel() {
+    if (!this.outputAnalyser) return 0;
+    this.outputAnalyser.getByteTimeDomainData(this.outputSamples);
+    let sum = 0;
+    for (const value of this.outputSamples) {
+      const centered = (value - 128) / 128;
+      sum += centered * centered;
+    }
+    return Math.min(1, Math.sqrt(sum / this.outputSamples.length) * 3.5);
+  }
+
+  // True while queued tutor speech is still playing.
+  isSpeaking() {
+    return Boolean(this.context) && this.playbackSources.size > 0 && this.context.currentTime < this.nextPlaybackTime;
   }
 
   async preparePlayback() {
@@ -248,7 +281,7 @@ export class AudioController {
 
     const source = context.createBufferSource();
     source.buffer = buffer;
-    source.connect(context.destination);
+    source.connect(this.ensureOutputAnalyser(context));
     source.onended = () => {
       source.disconnect();
       this.playbackSources.delete(source);
@@ -277,6 +310,8 @@ export class AudioController {
     this.stopPlayback();
     const context = this.context;
     this.context = null;
+    this.outputAnalyser = null;
+    this.outputSamples = null;
     this.workletLoaded = false;
     if (context && context.state !== "closed") await context.close();
   }
