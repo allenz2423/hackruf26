@@ -110,7 +110,7 @@ function syncTutorControls() {
 function shell(content, { section = "classes" } = {}) {
   const isGuest = !currentUser?.email;
   const userLabel = currentUser?.email ? currentUser.email.split("@")[0] : "Guest";
-  const brandHref = isGuest ? "#/" : "#/classes";
+  const brandHref = "#/home";
   const showSessionStatus = section === "tutor" || !["idle", "ended"].includes(state.session);
 
   app.innerHTML = `
@@ -148,10 +148,20 @@ function shell(content, { section = "classes" } = {}) {
 }
 
 function renderHome() {
-  if (currentUser) {
-    window.location.hash = "#/classes";
-    return;
-  }
+  const name = currentUser?.email ? currentUser.email.split("@")[0] : "";
+
+  const copy = currentUser
+    ? `<p class="home-greeting">Welcome back, ${escapeHtml(name)}! Pick up where you left off, or open a class to study or get tutoring from its materials.</p>
+        <div class="home-actions">
+          <a class="btn btn-primary btn-large" href="#/classes">Go to your classes</a>
+          <a class="home-guest" href="#/auth">Account</a>
+        </div>`
+    : `<p class="home-greeting">Welcome! Share your screen and ask me anything out loud, or drop in your notes and lectures and I'll turn them into quizzes, flashcards, and study guides.</p>
+        <div class="home-actions">
+          <a class="btn btn-primary btn-large" href="#/auth">Log in</a>
+          <a class="home-guest" href="#/study">Continue as guest</a>
+          <p class="home-note">Guests can try everything, but nothing is saved.</p>
+        </div>`;
 
   app.innerHTML = `
     <main id="main-content" class="home" tabindex="-1">
@@ -160,12 +170,7 @@ function renderHome() {
           <span class="home-mascot" aria-hidden="true"><img src="${jotMascot}" alt="" /></span>
           <h1>Jot</h1>
         </div>
-        <p class="home-greeting">Welcome! Share your screen and ask me anything out loud, or drop in your notes and lectures and I'll turn them into quizzes, flashcards, and study guides.</p>
-        <div class="home-actions">
-          <a class="btn btn-primary btn-large" href="#/auth">Log in</a>
-          <a class="home-guest" href="#/study">Continue as guest</a>
-          <p class="home-note">Guests can try everything, but nothing is saved.</p>
-        </div>
+        ${copy}
       </div>
     </main>
   `;
@@ -831,6 +836,7 @@ async function renderAuth() {
 
 const router = createRouter(
   [
+    { path: "/home", render: renderHome },
     { path: "/study", render: renderGuestWorkspace },
     { path: "/guest", render: renderGuestWorkspace },
     { path: "/classes", render: renderClasses },
