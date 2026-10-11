@@ -152,7 +152,7 @@ flowchart LR
 
 **Notes and study backend**
 
-- Scopes notes to the configured local owner UUID in SQLite for the hackathon build.
+- Scopes notes to the logged-in account in SQLite.
 - Stores uploaded files in private object storage and stores classes, extracted note text, and generated materials in a database.
 - Extracts text from uploads: direct parsing for text, DOCX, PPTX, and text-based PDFs; Gemini multimodal input for images and scanned PDFs.
 - Transcribes video/audio lectures with Gemini in a background job (upload to the Gemini Files API, request a timestamped transcript and summary), since long recordings can take minutes to process.
@@ -173,7 +173,7 @@ StudyMaterial  { id, class_id, type: quiz|study_guide|practice_exam|flashcards, 
 Attempt        { id, material_id, answers, score, completed_at }
 ```
 
-The hackathon build stores application data in SQLite and uses `LOCAL_OWNER_ID` as the owner namespace. It does not include an external account provider.
+The hackathon build stores application data in SQLite. Accounts (username or email plus password) and login sessions are handled by the backend itself, with no external account provider. Guests can use quick tutoring and local study, but class libraries require an account.
 
 **Generated material format (quiz example)**
 
@@ -253,7 +253,7 @@ The tool should have no capability beyond adding or clearing this overlay. In pa
 - Keep all provider credentials and model configuration on the backend. Session tickets grant only access to the same-origin WebSocket, expire quickly, and can be consumed once.
 - Pause immediately when the student pauses capture, the browser reports the track ended, permission is revoked, or the session ends. A change of source requires a new browser selection flow.
 - Avoid sending unchanged frames repeatedly. Provide a clear screen pause control for sensitive content.
-- Uploaded notes and generated study materials **are** stored, because the student explicitly saves them. They are scoped to the configured local owner, and the student can delete any note, material, or whole class. Deleting a note removes the file and its extracted text.
+- Uploaded notes and generated study materials **are** stored, because the student explicitly saves them. They are scoped to the student's account, and the student can delete any note, material, or whole class. Deleting a note removes the file and its extracted text.
 - Uploaded content, including lecture recordings, is sent to the Gemini API for text extraction, transcription, generation, and per-class tutoring. Tell the student this at upload time, and remind them to upload only recordings they are allowed to keep (some courses restrict lecture recordings).
 
 ## MVP acceptance criteria

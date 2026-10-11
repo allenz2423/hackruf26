@@ -23,6 +23,7 @@ from app.api.class_library import (
 from app.api.schemas import AttemptSubmission, LeanProofResponse
 from app.config import Settings
 from app.security.rate_limit import InMemoryRateLimiter
+from app.services.auth import SESSION_COOKIE, create_session, create_user
 from app.services.database import create_database, recover_interrupted_jobs
 from app.services.gemini_content import GeminiContentService
 from app.services.live_sessions import GeminiLiveSessionService, _FrameState
@@ -109,6 +110,10 @@ class QuizScoringRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.settings = make_test_settings()
         self.database = await create_database(self.settings)
+        self.user = await create_user(
+            self.database, username="scoring_student", password="fixture-password"
+        )
+        self.session_token, _ = await create_session(self.database, self.user["id"], 1)
         self.material_id = uuid4()
         class_id = uuid4()
         self.questions = [
@@ -131,7 +136,7 @@ class QuizScoringRegressionTests(unittest.IsolatedAsyncioTestCase):
         await self.database.execute(
             "INSERT INTO course_classes (id, owner_id, name) VALUES (?1, ?2, ?3)",
             class_id,
-            self.settings.local_owner_id,
+            self.user["id"],
             "Isolated scoring fixture",
         )
         await self.database.execute(
@@ -151,7 +156,10 @@ class QuizScoringRegressionTests(unittest.IsolatedAsyncioTestCase):
                 "type": "http",
                 "method": "POST",
                 "path": "/api/study-materials/test/attempts",
-                "headers": [(b"origin", b"http://localhost:5173")],
+                "headers": [
+                    (b"origin", b"http://localhost:5173"),
+                    (b"cookie", f"{SESSION_COOKIE}={self.session_token}".encode()),
+                ],
                 "state": {},
                 "app": SimpleNamespace(
                     state=SimpleNamespace(
