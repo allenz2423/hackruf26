@@ -76,6 +76,7 @@ Students can also upload their own course materials (notes, documents, syllabi, 
 - Show when annotations are active. Let the student dismiss one mark or clear all marks.
 - On disconnect or permission loss, stop sending media and explain how to resume.
 - Select Check my steps before starting. End the session to change modes; microphone access is still enabled separately.
+- Keep tutoring preferences and saved recap controls in Tutor settings, opened from the stage toolbar, so they do not consume the conversation history area.
 - Provide Restart conversation to discard the current conversation and marks and skip saved recaps while retaining the authorized shared-screen preview. It starts a fresh tutor connection and leaves the microphone off until enabled again. Clear saved recaps separately deletes persisted memory.
 
 ### Notes and study materials

@@ -45,8 +45,9 @@ On narrow viewports, stack the preview and conversation vertically. Keep the pre
 
 ### Main UI elements
 
-- **Header:** connection status, screen-sharing status, microphone status, and End session.
+- **Header:** on Tutor pages, session, connection, screen-sharing, and microphone indicators share the app navigation row on wide screens and wrap below it on narrower screens. Keep the class name, All classes link, and Library/Study/Tutor tabs in one compact row when space allows; use a smaller heading and reduced top spacing so the preview starts near the top of the page. Class navigation wraps on mobile, and all status text remains visible. End session stays in the stage toolbar.
 - **Screen stage:** video preview, annotation layer, source/re-share controls, and an explicit pause action.
+- **Tutor settings:** a dedicated modal opened from Settings in the stage toolbar. Check my steps, language lock, Remember sessions, saved recaps, and Restart conversation live here. The conversation panel contains the buddy, heading, transcript, microphone status, and composer. Closing settings returns focus to its trigger; Escape closes it, navigation disposes it, and existing session locks remain in effect.
 - **Conversation:** user questions, tutor text transcript, connection/retry notices, and a Clear conversation control.
 - **Composer:** text question input, Send, and microphone toggle.
 - **Annotation controls:** dismiss one mark and Clear marks. Marks expire automatically after a short interval.
@@ -67,7 +68,7 @@ Classes ─┬─ Math 151 ─┬─ Library   (uploads: notes, docs, syllabus, 
 
 **Classes page.** A grid of class cards plus **New class**. Each card has a band in the class color with the class badge (a subject icon or the class initial) hanging over its edge, then the name, upload and study-set counts ("No materials yet" when empty), and the next exam from the syllabus if known. A "⋯" options menu holds **Edit class** and **Delete**. Edit class changes the name, color (nine deep inks), and icon (sixteen subject icons or the initial) with a live badge preview. Color and icon are saved with the class on the account (`color` and `icon` ids from fixed lists in `class-style.js`), so every device shows the same card; classes styled before the backend stored the look upload it on the next sync. Delete asks for confirmation because it removes the class's uploads and study materials.
 
-**Class page.** A header with the class name and three tabs: Library, Study, and Tutor.
+**Class page.** A header with the class name and three tabs: Library, Study, and Tutor. The Tutor tab uses the compact workspace header described above.
 
 ### Library tab (uploads)
 
@@ -208,7 +209,7 @@ The tutor and generated study material sometimes write LaTeX (for example "the $
 
 ## Saved tutoring recaps
 
-The student approved frontend integration for session memory on 2026-10-11. Signed-in tutors offer **Remember sessions**, off by default and persisted by the backend per account/class (general tutoring is separate). **Clear saved recaps** deletes that scope's history. Show recent recaps with their dates in an expandable list. Guests receive a sign-in explanation. Preference and deletion controls are locked during tutoring or saving.
+The student approved frontend integration for session memory on 2026-10-11. **Tutor settings** contains **Remember sessions**, off by default and persisted by the backend per account/class (general tutoring is separate). **Clear saved recaps** deletes that scope's history. Show recent recaps with their dates in an expandable list. Guests receive a sign-in explanation. Preference and deletion controls are locked during tutoring or saving. Save outcomes appear as notices when the settings modal is closed. Retry is visible only for a memory-loading error.
 
 The account-scoped API is `GET|DELETE /api/tutor-memory?class_id=<optional backend UUID>` and `PATCH /api/tutor-memory` with `{class_id: null | UUID, enabled: boolean}`. Use cookie auth. Do not store recaps or preferences in browser persistence. Backend class IDs come from existing class mapping; API failures remain visible and do not block ordinary tutoring.
 
@@ -218,7 +219,7 @@ The existing **Reset memory** control is renamed **Restart conversation** to dis
 
 ## Tutor language lock
 
-The tutor panel has a **Language lock** picker under *Check my steps*: *No lock (match me)* or one of 11 languages (English, Spanish, French, German, Portuguese, Italian, Mandarin Chinese, Japanese, Korean, Hindi, Arabic). With a lock, the tutor speaks and writes only in that language, even when the student asks in another language or the screen shows one. Like *Check my steps*, it is chosen before a session and disabled while one runs. The choice is remembered in the browser (`localStorage["jot-tutor-language"]`, validated on load) and sent as `language` when a session starts; with no lock nothing is sent. `tutor-language.js` holds the list, which must match the server's.
+Tutor settings has a **Language lock** picker under *Check my steps*: *No lock (match me)* or one of 11 languages (English, Spanish, French, German, Portuguese, Italian, Mandarin Chinese, Japanese, Korean, Hindi, Arabic). With a lock, the tutor speaks and writes only in that language, even when the student asks in another language or the screen shows one. Like *Check my steps*, it is chosen before a session and disabled while one runs. The choice is remembered in the browser (`localStorage["jot-tutor-language"]`, validated on load) and sent as `language` when a session starts; with no lock nothing is sent. `tutor-language.js` holds the list, which must match the server's.
 
 ## Light and dark mode
 

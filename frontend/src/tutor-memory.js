@@ -161,6 +161,7 @@ export class TutorMemoryPanel {
   }
 
   report(status, loadedCount = 0, enabled = false) {
+    if (this.disposed) return;
     if (status === "loaded" && this.data) this.data.enabled = enabled;
     const messages = {
       saving: "Saving a short session recap… Your screen and microphone are stopped.",
@@ -176,6 +177,9 @@ export class TutorMemoryPanel {
         : "Memory is off for this session. No recap will be saved."
       : "");
     this.render();
+    if (["saved", "empty", "failed", "unconfirmed"].includes(status) && !this.root.closest("dialog")?.open) {
+      toast(messages[status], { tone: ["failed", "unconfirmed"].includes(status) ? "error" : "info" });
+    }
   }
 
   dispose() {
