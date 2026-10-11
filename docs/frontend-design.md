@@ -52,7 +52,7 @@ On narrow viewports, stack the preview and conversation vertically. Keep the pre
 - **Annotation controls:** dismiss one mark and Clear marks. Marks expire automatically after a short interval.
 - **Class selector:** shows which class's materials the tutor is using, or “No class” for a general session.
 - **Check my steps:** an optional checkbox before Share. When enabled, the tutor gives short corrective hints at pauses while the student explains a solution. The control is locked during a session; End unlocks it for the next session.
-- **Reset tutor memory:** discard a connected tutor's prior conversation and marks, keep the shared screen, and open a fresh session with the selected mode and class. Stop microphone input and queued speech during reset; the student enables the microphone again afterward. Explain that the conversation will be cleared before the action.
+- **Restart conversation:** discard a connected tutor's prior conversation and marks, skip saved recaps, keep the shared screen, and open a fresh session with the selected mode and class. Stop microphone input and queued speech; the student enables the microphone again afterward. Saved recaps remain available to later sessions and are deleted separately.
 
 ## Class library and study pages
 
@@ -123,6 +123,14 @@ Study generation submits an explicit upload scope, keeps the returned pending ma
 Remote quiz detail omits answer keys. Submit choice IDs, true/false values, and short-answer text to the backend attempts endpoint for scoring and answer explanations. A submission failure keeps the student's answers available for retry instead of displaying a fabricated local score. Remote flags and mapped upload preview/retry/delete actions also call the backend without a token prerequisite. See [the backend integration contract](backend-design.md#quiz-generation-integration-for-the-frontend-agent) for request formats and recovery rules.
 
 ### Tutor tab
+
+Review integration fixes: PDFs/images opened on the tutor stage render at up to 1920 pixels on their longest edge, matching screen capture. Screen samples are dropped when WebSocket buffers are congested, including a projected-size check, so stale frames do not accumulate without bound.
+
+Quiz **Ask the tutor** queues the question, all choices, the student's attempted answer, and relevant backend upload IDs. The tutor pre-fills that context and initially selects matching uploads; the student still chooses when to share and send the question. Existing plain-text queued questions remain readable.
+
+Study sets display `source_warnings` for changed/deleted uploads and partial source coverage. Source citations in quizzes, study guides, and flashcards open the original upload preview. PDF references open at the cited page; lecture references seek to the cited timestamp; slide references retain their visible locator. Missing sources show a recoverable error and leave the saved study set usable. Opening a citation does not start companion generation unless the student selects Study document.
+
+Practice-test scoring failures preserve answers and resume the countdown against its original deadline. If time has expired, inputs stay locked and Retry scoring resubmits the frozen answers; retries never extend the deadline. Navigation cancels the countdown and ignores late submission responses.
 
 The screen-sharing workspace described above, with the class selected. The page tells the backend the class ID when starting the session so the tutor gets that class's materials. Tutor answers that rely on an upload show a source chip linking to it.
 
@@ -198,6 +206,16 @@ The tutor and generated study material sometimes write LaTeX (for example "the $
 - **Safe by construction:** all non-math text and all TeX are HTML-escaped, KaTeX runs with `trust: false` (no links, HTML, or images from TeX), expressions are capped at 2,000 characters and 200 per text, and anything KaTeX cannot parse stays as readable text.
 - **Tests:** `frontend/tests/math.test.js` covers the parser, escaping, and limits.
 
+## Saved tutoring recaps
+
+The student approved frontend integration for session memory on 2026-10-11. Signed-in tutors offer **Remember sessions**, off by default and persisted by the backend per account/class (general tutoring is separate). **Clear saved recaps** deletes that scope's history. Show recent recaps with their dates in an expandable list. Guests receive a sign-in explanation. Preference and deletion controls are locked during tutoring or saving.
+
+The account-scoped API is `GET|DELETE /api/tutor-memory?class_id=<optional backend UUID>` and `PATCH /api/tutor-memory` with `{class_id: null | UUID, enabled: boolean}`. Use cookie auth. Do not store recaps or preferences in browser persistence. Backend class IDs come from existing class mapping; API failures remain visible and do not block ordinary tutoring.
+
+End stops capture, input, playback, and marks immediately, then sends `end_session` over the existing WebSocket. Show saving progress while waiting at most 30 seconds for `session_ended.memory_status`, then close. Report failed/unconfirmed saves honestly. Navigation without End and failed sessions close without saving; a save already requested by End may finish after navigation. No screenshot, audio, or full transcript is persisted.
+
+The existing **Reset memory** control is renamed **Restart conversation** to distinguish ephemeral conversation reset from deleting saved recaps. It opens a fresh connection with `use_saved_memory: false`, keeping the preview and leaving the microphone off. Saved recaps remain available to later normal sessions. The restarted session can still save its own recap when ended if memory is enabled.
+
 ## Tutor language lock
 
 The tutor panel has a **Language lock** picker under *Check my steps*: *No lock (match me)* or one of 11 languages (English, Spanish, French, German, Portuguese, Italian, Mandarin Chinese, Japanese, Korean, Hindi, Arabic). With a lock, the tutor speaks and writes only in that language, even when the student asks in another language or the screen shows one. Like *Check my steps*, it is chosen before a session and disabled while one runs. The choice is remembered in the browser (`localStorage["jot-tutor-language"]`, validated on load) and sent as `language` when a session starts; with no lock nothing is sent. `tutor-language.js` holds the list, which must match the server's.
@@ -229,7 +247,7 @@ Keep the backend session in one controller so capture, audio, transcript, and an
 1. The student presses **Share screen**. In that click handler, call `navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })`. Let the browser choose the source; do not attempt to select one from JavaScript or reuse permission silently.
 2. Show the returned stream in a `<video>` element using `srcObject`. The local preview does not pass through the backend.
 3. Request a one-use ticket from `POST /api/live-sessions`, then open `WS /api/live` on the same origin using the ticket subprotocol. If ticket creation or connection fails, stop capture tracks and show a retry action.
-4. While screen sharing is active, sample the preview to JPEG no more than once per second, scaling its longest dimension to at most 1280 pixels without enlarging small sources. Send each frame over the backend WebSocket with a client-generated `frame_id` and keep a short in-memory map of frame IDs to JPEG dimensions, original source dimensions, and timestamps. Stop clears the frame map and the sampling canvas.
+4. While screen sharing is active, sample the preview to JPEG no more than once per second, scaling its longest dimension to at most 1920 pixels without enlarging small sources. Start at quality 0.85 and reduce quality or dimensions to fit the existing byte limit. Send each frame over the backend WebSocket with a client-generated `frame_id` and keep a short in-memory map of frame IDs to JPEG dimensions, original source dimensions, timestamps, and bounded grayscale comparison thumbnails. Stop clears the frame map and capture/comparison canvases.
 5. Send typed questions as text. When the student enables the microphone, request microphone permission separately and stream audio over the same WebSocket. Screen-only plus typed input remains available when microphone permission is denied.
 6. Play returned tutor audio and show transcript events as captions/conversation text. The backend translates provider events into a small, provider-neutral event protocol.
 7. When the student ends screen sharing, stop the tracks, close the backend session, clear frame buffers, and remove annotations. When only the microphone is paused, stop sending audio while keeping text/screen tutoring available.
@@ -238,7 +256,7 @@ The browser-to-backend event contract is intentionally separate from provider pa
 
 The session ticket request may include `mode: "conversation"` or `mode: "check_steps"`, alongside an optional backend class UUID. The default is conversation. The browser sends only the selected mode, never coaching instructions or speech detection settings. Coaching uses the same audio, frame, annotation, and interruption events. Resuming a paused screen retains the selected mode and existing connection.
 
-When sharing is paused or the browser's track ends, send `{ "type": "screen_paused" }` through the existing gateway and clear local marks. The backend owns the context notice and invalidates its current frame. The browser contains no provider prompts. Reset tutor memory closes the old WebSocket, clears the in-memory frame map, transcript, and marks, and obtains a fresh ticket through the existing endpoint. It does not replay conversation history or old frames. On readiness, sample the still-authorized preview again; no new screen picker or microphone request is started automatically. End and navigation cancel a pending reset.
+When sharing is paused or the browser's track ends, send `{ "type": "screen_paused" }` through the existing gateway and clear local marks. The backend owns the context notice and invalidates its current frame. The browser contains no provider prompts. Restart conversation closes the old WebSocket, clears the in-memory frame map, transcript, and marks, and obtains a fresh ticket through the existing endpoint with `use_saved_memory: false`. It does not replay conversation history, saved recaps, or old frames. On readiness, sample the still-authorized preview again; no new screen picker or microphone request is started automatically. End and navigation cancel a pending restart.
 
 When Check my steps is enabled, show a reminder to turn on the microphone, explain one step at a time, and pause for feedback. Feedback is AI-generated and may miss errors. Microphone permission stays separate and explicit. The tutor does not promise to speak over uninterrupted student speech.
 
@@ -252,7 +270,7 @@ When Check my steps is enabled, show a reminder to turn on the microphone, expla
 
 ## Annotation rendering
 
-`add_annotations` is the only provider-requested visual action. The backend attaches the `frame_id` of the latest frame it forwarded. Each item contains a shape, a short label, and a normalized rectangle. The frontend:
+`add_annotations` is the only provider-requested visual action. The backend attaches the exact frame reference pinned to the question or automatic review, rather than rebinding to a frame arriving during generation. Each item contains a shape, a short label, and a normalized rectangle. The student authorized the annotation integration fixes on 2026-10-11. The frontend:
 
 - Accepts only known shapes (`pointer`, `rectangle`, `underline`, `note`) and finite coordinates in the `0..1` range.
 - Rejects unknown frames, old frame IDs, out-of-bounds regions, long labels, and excessive mark counts.
@@ -261,6 +279,11 @@ When Check my steps is enabled, show a reminder to turn on the microphone, expla
 - Places each explanatory label inside its region, wraps long text, and reduces its font size to fit. Labels cannot spill outside the box. For regions too small for readable text, show an abbreviated label or omit it in the preview; the annotation list retains the complete explanation.
 - Renders marks as pointer-events-disabled UI elements; they must not intercept input to the video or conversation controls.
 - Gives each mark a dismiss button in an accessible list and expires marks automatically. If an annotation references a stale frame, return an error tool response and display the spoken explanation without a mark.
+- Captures at most 1920 pixels along the long dimension, without upscaling, at JPEG quality 0.85. Reduce quality or dimensions if the decoded JPEG would exceed 2,200,000 bytes; retain one sampled frame per second and the existing WebSocket formats.
+- Keeps an in-memory grayscale comparison thumbnail of at most 960 pixels along the long dimension with each of the eight frame references. Do not retain old JPEGs, write comparison data to storage, or send comparison data to the backend. Release it when capture ends or memory resets.
+- Compares the marked region, including a small surrounding margin, with the current preview at admission, on sampled frames, and every 250 ms while marks are present. Remove changed targets, including scroll/window movement and edits in that region. Unrelated changes outside the region and narrow cursor-like differences are ignored. Missing comparison data or changed source dimensions fail closed in the application. This heuristic cannot guarantee pixel-perfect placement or track moving targets.
+- Draws an underline at the bottom of its target bounds, a pointer arrow toward their center, a rectangle outline, and a distinct note box. Small text regions show their complete explanation in the annotation list rather than covering the text with a label. Preserve the centered SVG/video scaling.
+- Clears marks on a provider interruption as well as pause, End, source replacement, and memory reset.
 
 The example schema and coordinate convention live in [the product design](design.md#annotation-contract). The browser performs final frame and geometry validation because it owns the preview and frame map.
 
@@ -276,6 +299,7 @@ Represent the session with explicit states instead of inferring status from whet
 | `active` | Live session and selected inputs are available | Ask, mute, pause screen, end |
 | `screen_paused` | Screen track ended; text/audio may continue | Share screen again, end |
 | `reconnecting` | Live connection is recovering | End, retry if recovery fails |
+| `ending` | Capture and audio are stopped; waiting for recap acknowledgement | Navigation remains available; new sessions wait for completion |
 | `ended` | Tracks and Live session are closed | Start another session |
 | `error` | Permission, network, or setup failed | Retry, change browser/source |
 

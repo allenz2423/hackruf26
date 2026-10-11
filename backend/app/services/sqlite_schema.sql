@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS course_notes (
     status                  TEXT NOT NULL DEFAULT 'processing'
         CHECK (status IN ('processing', 'ready', 'failed')),
     processing_progress     INTEGER NOT NULL DEFAULT 0 CHECK (processing_progress BETWEEN 0 AND 100),
+    processing_revision     INTEGER NOT NULL DEFAULT 0,
     failure_code            TEXT,
     created_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -70,6 +71,9 @@ CREATE TABLE IF NOT EXISTS study_materials (
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     generated_at    TEXT,
+    sources_outdated INTEGER NOT NULL DEFAULT 0 CHECK (sources_outdated IN (0, 1)),
+    sources_missing INTEGER NOT NULL DEFAULT 0 CHECK (sources_missing IN (0, 1)),
+    context_truncated INTEGER NOT NULL DEFAULT 0 CHECK (context_truncated IN (0, 1)),
     UNIQUE (id, class_id),
     CHECK (status <> 'ready' OR content IS NOT NULL),
     CHECK (status = 'failed' OR failure_code IS NULL)
@@ -206,14 +210,6 @@ CREATE INDEX IF NOT EXISTS uploaded_assessments_class_status_idx
 CREATE INDEX IF NOT EXISTS study_material_flags_reporter_created_idx
     ON study_material_flags (reporter_id, created_at DESC);
 
-CREATE TRIGGER IF NOT EXISTS course_notes_delete_derived_materials
-BEFORE DELETE ON course_notes
-FOR EACH ROW
-BEGIN
-    DELETE FROM study_materials
-    WHERE id IN (SELECT material_id FROM study_material_sources WHERE note_id = OLD.id);
-END;
-
 -- Accounts and cookie-backed login sessions. Class rows keep a plain TEXT
 -- owner_id so existing local data can be adopted by an account.
 CREATE TABLE IF NOT EXISTS users (
@@ -236,3 +232,24 @@ CREATE TABLE IF NOT EXISTS user_sessions (
 
 CREATE INDEX IF NOT EXISTS user_sessions_user_idx ON user_sessions (user_id);
 CREATE INDEX IF NOT EXISTS user_sessions_expires_idx ON user_sessions (expires_at);
+
+-- Opted-in derived tutoring recaps. Raw conversations and media are never stored.
+CREATE TABLE IF NOT EXISTS tutor_memory_scopes (
+    id          TEXT PRIMARY KEY,
+    owner_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    class_id    TEXT REFERENCES course_classes(id) ON DELETE CASCADE,
+    scope_key   TEXT NOT NULL,
+    enabled     INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+    revision    INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (owner_id, scope_key),
+    CHECK (scope_key = coalesce(class_id, 'general'))
+);
+
+CREATE TABLE IF NOT EXISTS tutor_recaps (
+    id          TEXT PRIMARY KEY,
+    scope_id    TEXT NOT NULL REFERENCES tutor_memory_scopes(id) ON DELETE CASCADE,
+    session_id  TEXT NOT NULL UNIQUE,
+    content     TEXT NOT NULL CHECK (json_valid(content) AND json_type(content) = 'object'),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS tutor_recaps_scope_idx ON tutor_recaps (scope_id, created_at DESC);

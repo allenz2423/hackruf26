@@ -35,6 +35,7 @@ from app.services.lean_proofs import (
 from app.services.live_coaching import (
     COACHING_INPUT_PAUSE_SECONDS,
     MAX_PENDING_TOOLS,
+    AnnotationRequest,
     ScreenReviewResult,
     ToolJob,
     inspect_frame,
@@ -55,6 +56,7 @@ from app.services.live_config import (
     annotation_items_for_client,
     live_connect_config,
 )
+from app.services.tutor_memory import MemoryTarget, SessionTranscript, TutorMemoryService
 
 logger = logging.getLogger("screen_tutor.live")
 TICKET_TTL_SECONDS = 45
@@ -76,6 +78,7 @@ class LiveSessionTicket:
     expires_at: datetime
     mode: TutorMode = TutorMode.CONVERSATION
     language: TutorLanguage = TutorLanguage.AUTO
+    memory_target: MemoryTarget | None = None
 
 
 class LiveSessionTicketStore:
@@ -91,13 +94,14 @@ class LiveSessionTicketStore:
         *,
         mode: TutorMode = TutorMode.CONVERSATION,
         language: TutorLanguage = TutorLanguage.AUTO,
+        memory_target: MemoryTarget | None = None,
     ) -> tuple[str, datetime]:
         now = datetime.now(UTC)
         expires_at = now + timedelta(seconds=TICKET_TTL_SECONDS)
         ticket = secrets.token_urlsafe(32)
         async with self._lock:
             self._remove_expired(now)
-            self._tickets[ticket] = LiveSessionTicket(class_context, expires_at, mode, language)
+            self._tickets[ticket] = LiveSessionTicket(class_context, expires_at, mode, language, memory_target)
         return ticket, expires_at
 
     async def consume(self, ticket: str) -> LiveSessionTicket | None:
@@ -137,6 +141,10 @@ class _ScreenPausedEvent(_ClientEvent):
     type: Literal["screen_paused"]
 
 
+class _EndSessionEvent(_ClientEvent):
+    type: Literal["end_session"]
+
+
 class _FrameEvent(_ClientEvent):
     type: Literal["frame"]
     frame_id: UUID
@@ -158,6 +166,7 @@ _EVENT_ADAPTER = TypeAdapter(
     | _ScreenPausedEvent
     | _FrameEvent
     | _AnnotationResultEvent
+    | _EndSessionEvent
 )
 
 
@@ -172,12 +181,14 @@ class GeminiLiveSessionService:
         calculator_limiter: InMemoryRateLimiter,
         lean_limiter: InMemoryRateLimiter,
         lean_service: LeanProofService | None,
+        memory_service: TutorMemoryService | None = None,
     ) -> None:
         self._client = client
         self._settings = settings
         self._calculator_limiter = calculator_limiter
         self._lean_limiter = lean_limiter
         self._lean_service = lean_service
+        self._memory_service = memory_service
 
     async def run(
         self,
@@ -186,6 +197,7 @@ class GeminiLiveSessionService:
         *,
         mode: TutorMode = TutorMode.CONVERSATION,
         language: TutorLanguage = TutorLanguage.AUTO,
+        memory_target: MemoryTarget | None = None,
     ) -> None:
         request_id = secrets.token_hex(12)
         send_lock = asyncio.Lock()
@@ -196,6 +208,7 @@ class GeminiLiveSessionService:
         # check_steps sessions enable the automatic screen-review scheduler.
         coaching = _CoachingState()
         peer = websocket.client.host if websocket.client else "unknown"
+        transcript = SessionTranscript(enabled=False)
 
         async def send_client(payload: dict[str, Any], *, generation: int | None = None) -> None:
             async with send_lock:
@@ -204,17 +217,29 @@ class GeminiLiveSessionService:
                 await websocket.send_json(payload)
 
         try:
+            memory_context = None
+            memory_count = 0
+            if memory_target is not None and self._memory_service is not None:
+                enabled, memory_context, memory_count = await self._memory_service.context(memory_target)
+                if not enabled:
+                    memory_target = None
+            else:
+                memory_target = None
+            transcript.enabled = memory_target is not None
             config = live_connect_config(
                 class_context,
                 mode=mode,
                 language=language,
                 include_lean_tool=self._settings.lean_tool_enabled,
+                memory_context=memory_context,
             )
             async with self._client.aio.live.connect(
                 model=self._settings.gemini_model,
                 config=config,
             ) as session:
-                await send_client({"type": "ready"})
+                await send_client({
+                    "type": "ready", "memory": {"enabled": transcript.enabled, "loaded_count": memory_count},
+                })
                 input_task = asyncio.create_task(
                     self._read_client(
                         websocket,
@@ -225,6 +250,7 @@ class GeminiLiveSessionService:
                         peer,
                         send_client,
                         coaching=coaching,
+                        transcript=transcript,
                     )
                 )
                 output_task = asyncio.create_task(
@@ -236,6 +262,7 @@ class GeminiLiveSessionService:
                         peer,
                         send_client,
                         coaching=coaching,
+                        transcript=transcript,
                     )
                 )
                 tasks = [
@@ -258,7 +285,7 @@ class GeminiLiveSessionService:
                     )
                     for task in done:
                         task.result()
-                    if output_task in done:
+                    if output_task in done and not transcript.end_requested:
                         await send_client(
                             {
                                 "type": "error",
@@ -274,6 +301,19 @@ class GeminiLiveSessionService:
                         if not task.done():
                             task.cancel()
                     await asyncio.gather(*tasks, return_exceptions=True)
+            if transcript.end_requested:
+                # Media and provider tasks are released before recap generation.
+                frames.clear()
+                coaching.clear()
+                status = "disabled"
+                if memory_target is not None and self._memory_service is not None:
+                    status = await self._memory_service.finish(memory_target, request_id, transcript)
+                transcript.clear()
+                try:
+                    await send_client({"type": "session_ended", "memory_status": status})
+                    await websocket.close(code=1000)
+                except (WebSocketDisconnect, RuntimeError):
+                    pass
         except WebSocketDisconnect:
             return
         except Exception as exc:  # noqa: BLE001 - upstream content and credentials stay private
@@ -306,6 +346,7 @@ class GeminiLiveSessionService:
             except Exception:
                 pass
         finally:
+            transcript.clear()
             frames.clear()
             coaching.clear()
             for future in pending_annotations.values():
@@ -323,6 +364,7 @@ class GeminiLiveSessionService:
         send_client: Any,
         *,
         coaching: _CoachingState | None = None,
+        transcript: SessionTranscript | None = None,
     ) -> None:
         while True:
             try:
@@ -352,10 +394,14 @@ class GeminiLiveSessionService:
                 await websocket.close(code=1003)
                 return
 
+            if isinstance(event, _EndSessionEvent):
+                if transcript is not None:
+                    transcript.end_requested = True
+                return
             if isinstance(event, _TextEvent):
                 async with upstream_send_lock:
                     if coaching is not None:
-                        coaching.user_turn()
+                        coaching.user_turn(frames)
                     # Flush audio already buffered in the browser even when
                     # provider generation has finished before this question.
                     await send_client(interruption_event())
@@ -364,7 +410,7 @@ class GeminiLiveSessionService:
                     parts = [types.Part(text=NO_CURRENT_SCREEN_CONTEXT)]
                     if frames.is_current() and frames.latest_image is not None:
                         parts = [
-                            types.Part(text=CURRENT_SCREEN_CONTEXT),
+                            types.Part(text=f"{CURRENT_SCREEN_CONTEXT}\n{_frame_context(frames)}"),
                             types.Part(
                                 inline_data=types.Blob(
                                     data=frames.latest_image, mime_type="image/jpeg"
@@ -381,6 +427,8 @@ class GeminiLiveSessionService:
                         ],
                         turn_complete=True,
                     )
+                    if transcript is not None:
+                        transcript.append("student", event.text + "\n")
                     del parts
             elif isinstance(event, _AudioEvent):
                 try:
@@ -525,7 +573,8 @@ class GeminiLiveSessionService:
                                 types.Part(
                                     text=(
                                         f"{AUTOMATIC_SCREEN_REVIEW}\n\n"
-                                        f"review_id: {coaching.review.review_id}"
+                                        f"review_id: {coaching.review.review_id}\n"
+                                        f"{_frame_context(frames)}"
                                     )
                                 ),
                                 types.Part(
@@ -549,6 +598,7 @@ class GeminiLiveSessionService:
         send_client: Any,
         *,
         coaching: _CoachingState | None = None,
+        transcript: SessionTranscript | None = None,
     ) -> None:
         state = coaching if coaching is not None else _CoachingState()
         try:
@@ -563,13 +613,23 @@ class GeminiLiveSessionService:
                         activity = voice_activity.voice_activity_type
                         if activity == types.VoiceActivityType.ACTIVITY_START:
                             state.student_speaking = True
-                            state.user_turn()
+                            state.user_turn(frames, voice=True)
                             # Generation may already be over while the browser
                             # is still playing buffered speech.
                             await send_client(interruption_event())
                         elif activity == types.VoiceActivityType.ACTIVITY_END:
                             state.student_speaking = False
                             state.last_user_activity_at = time.monotonic()
+                            # Freeze the utterance's final view before tools or
+                            # output start. Later streamed images cannot rebind it.
+                            if (
+                                state.voice_frame_pending
+                                and state.awaiting_user_response
+                                and not state.tools
+                                and not state.turn_output_sent
+                            ):
+                                state.pin_annotation_frame(frames)
+                            state.voice_frame_pending = False
 
                     cancellation = getattr(message, "tool_call_cancellation", None)
                     for call_id in getattr(cancellation, "ids", None) or []:
@@ -580,12 +640,14 @@ class GeminiLiveSessionService:
                     content = message.server_content
                     transcription = getattr(content, "input_transcription", None)
                     if getattr(transcription, "text", None):
+                        if transcript is not None:
+                            transcript.append("student", transcription.text)
                         now = time.monotonic()
                         if (
                             not state.student_speaking
                             and now - state.last_transcription_at >= COACHING_INPUT_PAUSE_SECONDS
                         ):
-                            state.user_turn()
+                            state.user_turn(frames, voice=True)
                             await send_client(interruption_event())
                         state.last_transcription_at = now
                         state.last_user_activity_at = now
@@ -593,7 +655,7 @@ class GeminiLiveSessionService:
                         if frames.paused:
                             state.invalidate_review()
                         else:
-                            state.provider_interrupted()
+                            state.provider_interrupted(frames)
                         await send_client(interruption_event())
 
                     tool_call = message.tool_call
@@ -627,6 +689,7 @@ class GeminiLiveSessionService:
                                 # unbounded executor or blocking speech input.
                                 raise RuntimeError("Live tool concurrency limit exceeded.")
                             state.model_busy = True
+                            state.voice_frame_pending = False
                             state.awaiting_user_response = False
                             state.turn_complete = False
                             job = ToolJob(generation=state.generation)
@@ -680,6 +743,8 @@ class GeminiLiveSessionService:
                                 event["audio"] = []
                             if (has_output and audible) or event["turn_complete"]:
                                 await send_client(event, generation=state.generation)
+                                if transcript is not None and event["text"]:
+                                    transcript.append("tutor", event["text"])
                         elif state.review is not None and state.review.output_sent:
                             await send_client(interruption_event())
                             state.review.output_sent = False
@@ -825,12 +890,23 @@ class GeminiLiveSessionService:
                     result = {"accepted": True, "decision": outcome.decision}
         elif name == "add_annotations":
             marks, mark_errors = annotation_items_for_client(args.get("items", []))
-            frame_id = (
-                coaching.review.frame_id
-                if coaching is not None and coaching.review is not None
-                else frames.latest_frame_id
-            )
-            if (
+            reference = coaching.annotation_frame if coaching is not None else None
+            try:
+                request = AnnotationRequest.model_validate({**args, "items": marks})
+            except ValidationError:
+                request = None
+            if request is None or mark_errors:
+                result = {
+                    "error": {
+                        "code": "invalid_annotations",
+                        "message": (
+                            "Use 1 to 5 known marks with finite box_2d edges "
+                            "[ymin, xmin, ymax, xmax] scaled 0 to 1000 "
+                            "and labels up to 80 characters."
+                        ),
+                    }
+                }
+            elif (
                 coaching is not None
                 and coaching.review is not None
                 and (
@@ -847,17 +923,26 @@ class GeminiLiveSessionService:
                         ),
                     }
                 }
-            elif not frames.is_current():
+            elif reference is None or not reference.is_current(frames):
                 result = {
                     "error": {
-                        "code": "no_frame",
+                        "code": "stale_frame",
                         "message": (
-                            "No current screen frame is available. Do not mark remembered work."
+                            "No current pinned frame is available for this turn. "
+                            "Give a verbal explanation without a mark."
                         ),
                     }
                 }
-            elif mark_errors and not marks:
-                result = {"error": {"code": "invalid_annotation", "message": " ".join(mark_errors)}}
+            elif request.frame_id is not None and request.frame_id != reference.frame_id:
+                result = {
+                    "error": {
+                        "code": "frame_mismatch",
+                        "message": (
+                            "The frame ID does not match this question/review. "
+                            "Do not reuse old coordinates."
+                        ),
+                    }
+                }
             elif not call_id:
                 result = {
                     "error": {
@@ -872,7 +957,10 @@ class GeminiLiveSessionService:
                     payload = {
                         "type": "annotation_request",
                         "call_id": call_id,
-                        "payload": {"frame_id": frame_id, "items": marks},
+                        "payload": {
+                            "frame_id": reference.frame_id,
+                            "items": [item.model_dump() for item in request.items],
+                        },
                     }
                     if coaching is None:
                         await send_client(payload)
@@ -960,6 +1048,16 @@ class GeminiLiveSessionService:
             }
 
         return types.FunctionResponse(id=call_id, name=name, response=result)
+
+
+def _frame_context(frames: _FrameState) -> str:
+    """Identify the image in this ordered snapshot update, without media logs."""
+    return (
+        f"frame_id: {frames.latest_frame_id}\n"
+        f"Captured image dimensions: {frames.size}. "
+        "For marks use box_2d [ymin, xmin, ymax, xmax], scaled 0 to 1000 "
+        "relative to this exact image."
+    )
 
 
 def _has_audio_activity(data: bytes) -> bool:

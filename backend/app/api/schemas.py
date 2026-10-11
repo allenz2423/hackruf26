@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from datetime import date as calendar_date
-from datetime import datetime, timezone
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -21,12 +21,42 @@ class LiveSessionRequest(BaseModel):
     upload_ids: tuple[UUID, ...] | None = Field(default=None, max_length=100)
     mode: TutorMode = TutorMode.CONVERSATION
     language: TutorLanguage = TutorLanguage.AUTO
+    use_saved_memory: bool = Field(default=True, strict=True)
 
     @model_validator(mode="after")
     def uploads_need_a_class(self) -> LiveSessionRequest:
         if self.upload_ids is not None and self.class_id is None:
             raise ValueError("upload_ids requires class_id.")
         return self
+
+
+class TutorRecapContent(BaseModel):
+    """Small observations about a session, never its full transcript."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    summary: str = Field(min_length=1, max_length=800)
+    topics: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(max_length=6)
+    observed_progress: list[Annotated[str, Field(min_length=1, max_length=240)]] = Field(max_length=4)
+    practice_targets: list[Annotated[str, Field(min_length=1, max_length=240)]] = Field(max_length=4)
+    next_step: str = Field(max_length=400)
+
+
+class TutorMemoryPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    class_id: UUID | None = None
+    enabled: bool = Field(strict=True)
+
+
+class TutorRecap(BaseModel):
+    id: UUID
+    created_at: datetime
+    content: TutorRecapContent
+
+
+class TutorMemoryState(BaseModel):
+    enabled: bool = False
+    saved_count: int = 0
+    items: list[TutorRecap] = Field(default_factory=list)
 
 
 class CalculatorRequest(BaseModel):
@@ -76,7 +106,7 @@ class LiveSessionTicketResponse(BaseModel):
     def require_timezone_aware_expiration(cls, value: datetime) -> datetime:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("expires_at must include a timezone.")
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
 
 class HealthResponse(BaseModel):
@@ -224,7 +254,7 @@ class ExamMaterialsScope(BaseModel):
 
 
 MaterialsScope = Annotated[
-    Union[AllMaterialsScope, UploadsMaterialsScope, TopicsMaterialsScope, ExamMaterialsScope],
+    AllMaterialsScope | UploadsMaterialsScope | TopicsMaterialsScope | ExamMaterialsScope,
     Field(discriminator="kind"),
 ]
 StudyMaterialKind = Literal["quiz", "practice_exam", "study_guide", "flashcards"]
@@ -276,6 +306,7 @@ class MaterialSummary(BaseModel):
     created_at: datetime
     generated_at: datetime | None = None
     latest_attempt: LatestAttempt | None = None
+    source_warnings: list[Literal["changed", "missing", "truncated"]] = Field(default_factory=list)
 
 
 class MaterialDetail(MaterialSummary):

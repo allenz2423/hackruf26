@@ -12,14 +12,14 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from PIL import Image, UnidentifiedImageError
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MAX_FRAME_AGE_SECONDS = 10.0
 SCREEN_REVIEW_INTERVAL_SECONDS = 5.0
 SCREEN_REVIEW_STABLE_SECONDS = 1.5
 SCREEN_REVIEW_MAX_AGE_SECONDS = 2.5
 COACHING_INPUT_PAUSE_SECONDS = 2.0
-COACHING_FEEDBACK_PAUSE_SECONDS = 10.0
+COACHING_FEEDBACK_PAUSE_SECONDS = 3.0
 MAX_PENDING_TOOLS = 4
 MAX_IMAGE_PIXELS = 4_194_304
 
@@ -28,6 +28,53 @@ class ScreenReviewResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     review_id: str = Field(pattern=r"^[a-f0-9]{32}$", max_length=32, strict=True)
     decision: Literal["mistake", "no_issue", "incomplete", "uncertain"]
+
+
+class AnnotationRegion(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    x: float = Field(ge=0, le=1, strict=True, allow_inf_nan=False)
+    y: float = Field(ge=0, le=1, strict=True, allow_inf_nan=False)
+    width: float = Field(gt=0, le=1, strict=True, allow_inf_nan=False)
+    height: float = Field(gt=0, le=1, strict=True, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def within_frame(self) -> AnnotationRegion:
+        if self.x + self.width > 1 or self.y + self.height > 1:
+            raise ValueError("Annotation exceeds frame bounds.")
+        return self
+
+
+class AnnotationItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["pointer", "rectangle", "underline", "note"]
+    region: AnnotationRegion
+    label: str = Field(max_length=80, strict=True)
+
+
+class AnnotationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    frame_id: str | None = Field(default=None, min_length=1, max_length=36, strict=True)
+    items: list[AnnotationItem] = Field(min_length=1, max_length=5)
+
+
+@dataclass(frozen=True, slots=True)
+class AnnotationFrame:
+    """Immutable geometry reference; does not retain an additional screenshot."""
+
+    frame_id: str
+    size: tuple[int, int] | None
+    signature: bytes | None
+    epoch: int
+    captured_at: float
+
+    def is_current(self, frames: FrameState) -> bool:
+        return bool(
+            frames.is_current()
+            and self.epoch == frames.epoch
+            and self.size == frames.size
+            and time.monotonic() - self.captured_at <= MAX_FRAME_AGE_SECONDS
+            and not major_screen_change(self.signature, frames.signature)
+        )
 
 
 def inspect_frame(data: bytes) -> tuple[tuple[int, int], bytes]:
@@ -151,6 +198,8 @@ class LiveTurnState:
     discard_output: bool = False
     turn_output_sent: bool = False
     review: ScreenReview | None = None
+    annotation_frame: AnnotationFrame | None = None
+    voice_frame_pending: bool = False
     reviewed_digests: deque[bytes] = field(default_factory=lambda: deque(maxlen=16))
     tools: dict[str, ToolJob] = field(default_factory=dict)
     tool_failure: Exception | None = None
@@ -161,13 +210,30 @@ class LiveTurnState:
             if job.task is not None:
                 job.task.cancel()
 
-    def user_turn(self) -> None:
+    def pin_annotation_frame(self, frames: FrameState) -> None:
+        self.annotation_frame = (
+            AnnotationFrame(
+                frame_id=frames.latest_frame_id,
+                size=frames.size,
+                signature=frames.signature,
+                epoch=frames.epoch,
+                captured_at=frames.last_frame_at,
+            )
+            if frames.is_current() and frames.latest_frame_id is not None
+            else None
+        )
+
+    def user_turn(self, frames: FrameState | None = None, *, voice: bool = False) -> None:
         # The old interruption/completion boundary must not release the gate
         # while the new student question is still waiting for its response.
         self.waiting_for_old_turn |= self.model_busy and not self.awaiting_user_response
         self.invalidate_review()
         self.generation += 1
         self.cancel_tools()
+        self.annotation_frame = None
+        self.voice_frame_pending = voice
+        if frames is not None:
+            self.pin_annotation_frame(frames)
         self.model_busy = self.awaiting_user_response = True
         self.provider_idle = False
         self.interaction_status = None
@@ -183,13 +249,15 @@ class LiveTurnState:
         self.invalidate_review()
         self.generation += 1
         self.cancel_tools()
+        self.annotation_frame = None
+        self.voice_frame_pending = False
         self.awaiting_user_response = False
         self.waiting_for_old_turn = False
         self.discard_output = self.model_busy
 
-    def provider_interrupted(self) -> None:
+    def provider_interrupted(self, frames: FrameState | None = None) -> None:
         if not self.awaiting_user_response:
-            self.user_turn()
+            self.user_turn(frames, voice=True)
         self.invalidate_review()
         self.waiting_for_old_turn = True
         self.discard_output = True
@@ -206,6 +274,7 @@ class LiveTurnState:
                 self.turn_complete = False
             return
         if has_output:
+            self.voice_frame_pending = False
             self.awaiting_user_response = False
             self.model_busy = True
             self.turn_complete = False
@@ -238,6 +307,8 @@ class LiveTurnState:
             if self.review is not None and not self.review.invalidated:
                 self.reviewed_digests.append(self.review.digest)
             self.review = None
+            self.annotation_frame = None
+            self.voice_frame_pending = False
             self.discard_output = False
             self.turn_output_sent = False
 
@@ -257,7 +328,6 @@ class LiveTurnState:
             self.review is not None
             and not self.review_is_stale(frames)
             and time.monotonic() - self.review.captured_at <= MAX_FRAME_AGE_SECONDS
-            and self.review.digest == frames.latest_digest
         )
 
     def can_review(self, frames: FrameState, now: float) -> bool:
@@ -283,6 +353,8 @@ class LiveTurnState:
     def start_review(self, frames: FrameState, now: float) -> None:
         assert frames.latest_frame_id is not None and frames.latest_digest is not None
         self.generation += 1
+        self.pin_annotation_frame(frames)
+        self.voice_frame_pending = False
         self.model_busy = True
         self.provider_idle = False
         self.interaction_status = None
@@ -310,6 +382,8 @@ class LiveTurnState:
         self.tools.clear()
         self.tool_failure = None
         self.review = None
+        self.annotation_frame = None
+        self.voice_frame_pending = False
         self.reviewed_digests.clear()
 
 

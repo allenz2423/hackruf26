@@ -129,6 +129,8 @@ async def create_database(settings: Settings) -> SQLiteDatabase:
     schema = Path(__file__).with_name("sqlite_schema.sql").read_text(encoding="utf-8")
     await connection.executescript(schema)
     await _add_missing_columns(connection)
+    triggers = Path(__file__).with_name("source_triggers.sql").read_text(encoding="utf-8")
+    await connection.executescript(triggers)
     return SQLiteDatabase(connection)
 
 
@@ -171,6 +173,21 @@ def json_value(value: object, fallback: object = None) -> object:
 
 async def _add_missing_columns(connection: aiosqlite.Connection) -> None:
     """Upgrade tables created by earlier versions of the schema in place."""
+    for table, additions in {
+        "course_notes": {"processing_revision": "INTEGER NOT NULL DEFAULT 0"},
+        "study_materials": {
+            "sources_outdated": "INTEGER NOT NULL DEFAULT 0",
+            "sources_missing": "INTEGER NOT NULL DEFAULT 0",
+            "context_truncated": "INTEGER NOT NULL DEFAULT 0",
+        },
+    }.items():
+        cursor = await connection.execute(f"PRAGMA table_info({table})")
+        columns = {row[1] for row in await cursor.fetchall()}
+        await cursor.close()
+        for name, definition in additions.items():
+            if name not in columns:
+                await connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
     cursor = await connection.execute("PRAGMA table_info(users)")
     columns = {row[1] for row in await cursor.fetchall()}
     await cursor.close()

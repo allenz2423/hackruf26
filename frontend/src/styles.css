@@ -3611,12 +3611,24 @@ p {
   background-color: color-mix(in srgb, var(--hl-soft) 78%, var(--surface));
 }
 
-/* Tutor marks are highlighter strokes */
+/* Keep geometry distinct and text readable under the tutor's marks. */
 
 .mark {
-  fill: rgba(246, 217, 74, 0.34);
+  fill: none;
   stroke: #f6d94a;
-  stroke-width: 1.5;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.mark-underline,
+.mark-pointer {
+  stroke-width: 3;
+}
+
+.mark-note {
+  fill: rgba(246, 217, 74, 0.18);
+  stroke-dasharray: 5 3;
 }
 
 .mark-label {
@@ -4697,3 +4709,12 @@ p {
     box-shadow: 0 0 0 3px var(--ring);
   }
 }
+/* Saved recaps are account data; full tutoring transcripts remain temporary. */
+.tutor-saved-memory { margin-top: 1rem; padding-top: .75rem; border-top: 1px solid var(--line); }
+.saved-memory-actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: start; }
+.saved-memory-actions details { width: 100%; font-size: .875rem; }
+.saved-memory-actions summary { cursor: pointer; padding: .35rem 0; }
+.saved-recap-list { list-style: none; padding: 0; max-height: 18rem; overflow: auto; }
+.saved-recap-list > li { padding: .75rem 0; border-bottom: 1px solid var(--line); }
+.saved-recap-list time { color: var(--muted); font-size: .8rem; }
+.saved-recap-list p { margin: .35rem 0; }

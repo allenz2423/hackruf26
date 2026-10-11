@@ -1,29 +1,8 @@
 import { icon } from "./icons.js";
 import { mathHtml, typesetMath } from "./math.js";
-import { escapeHtml } from "./ui.js";
 
-/**
- * Formats a source citation into a user-readable string.
- * Supports strings and backend SourceCitation objects ({ upload_id, page, slide, timestamp_seconds, name, title }).
- */
-export function formatSourceCitation(source) {
-  if (!source) return "";
-  if (typeof source === "string") return source;
-  const parts = [];
-  if (source.name || source.title || source.filename) {
-    parts.push(source.name || source.title || source.filename);
-  }
-  if (source.page != null) parts.push(`p. ${source.page}`);
-  if (source.slide != null) parts.push(`slide ${source.slide}`);
-  if (source.timestamp_seconds != null) {
-    const mins = Math.floor(source.timestamp_seconds / 60);
-    const secs = Math.floor(source.timestamp_seconds % 60).toString().padStart(2, "0");
-    parts.push(`${mins}:${secs}`);
-  }
-  if (parts.length) return parts.join(" · ");
-  if (source.upload_id) return `Source ${String(source.upload_id).slice(0, 8)}`;
-  return "Source reference";
-}
+import { sourceCitationHtml, bindSourceCitations, sourceWarningsHtml } from "./source-citations.js";
+export { formatSourceCitation } from "./source-citations.js";
 
 /**
  * Normalizes flashcard data from backend content.cards, sample materials,
@@ -235,6 +214,7 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
 
     root.innerHTML = `
       <section class="flashcard-player assessment-view">
+        ${sourceWarningsHtml(material)}
         ${onBack ? `<button class="back-link assessment-back" type="button" data-back>&larr; Back to study materials</button>` : ""}
         <div class="session-complete">
           <span class="kind-icon" style="color: var(--accent);">${icon("cards", { size: 36 })}</span>
@@ -278,6 +258,7 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
       </section>
     `;
     void typesetMath(root);
+    bindSourceCitations(root, material);
 
     root.querySelectorAll("[data-back]").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -293,6 +274,7 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
   function renderEmptyState() {
     root.innerHTML = `
       <section class="flashcard-player assessment-view">
+        ${sourceWarningsHtml(material)}
         ${onBack ? `<button class="back-link assessment-back" type="button" data-back>&larr; Back to study materials</button>` : ""}
         <div class="session-complete">
           <span class="kind-icon">${icon("cards", { size: 36 })}</span>
@@ -303,6 +285,7 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
       </section>
     `;
     void typesetMath(root);
+    bindSourceCitations(root, material);
 
     root.querySelectorAll("[data-back]").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -332,6 +315,7 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
 
     root.innerHTML = `
       <section class="flashcard-player assessment-view">
+        ${sourceWarningsHtml(material)}
         ${onBack ? `<button class="back-link assessment-back" type="button" data-back>&larr; Back to study materials</button>` : ""}
 
         <header class="flashcard-header">
@@ -375,12 +359,12 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
               <strong>${mathHtml(isFlipped ? card.back : card.front)}</strong>
             </div>
 
+          </div>
             ${card.sources?.length ? `
               <div class="flashcard-card-sources">
-                ${card.sources.map((s) => `<span class="chip source-chip">${escapeHtml(formatSourceCitation(s))}</span>`).join("")}
+                ${card.sources.map(sourceCitationHtml).join("")}
               </div>
             ` : ""}
-          </div>
         </div>
 
         <div class="flashcard-sorting-bar">
@@ -419,6 +403,7 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
       </section>
     `;
     void typesetMath(root);
+    bindSourceCitations(root, material);
 
     root.querySelectorAll("[data-back]").forEach((btn) => {
       btn.addEventListener("click", () => {

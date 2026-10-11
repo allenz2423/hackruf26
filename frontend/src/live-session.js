@@ -17,7 +17,8 @@ export class LiveSessionController {
     onAudioData,
     onAudioInterrupted,
     onStatusChange,
-    onTutorText
+    onTutorText,
+    onMemoryState
   } = {}) {
     this.classId = classId;
     // Backend upload ids for the class context; null uses every ready upload.
@@ -28,6 +29,12 @@ export class LiveSessionController {
     this.onAudioInterrupted = onAudioInterrupted || (() => {});
     this.onStatusChange = onStatusChange || (() => {});
     this.onTutorText = onTutorText || (() => {});
+    this.onMemoryState = onMemoryState || (() => {});
+    this.memoryEnabled = false;
+    this.ending = false;
+    this.resolveEnd = null;
+    this.endTimer = null;
+    this.endPromise = null;
     this.socket = null;
     this.outputText = "";
     this.failed = false;
@@ -38,14 +45,16 @@ export class LiveSessionController {
     this.connectionId = 0;
   }
 
-  async connect({ mode = "conversation", language = "auto" } = {}) {
+  async connect({ mode = "conversation", language = "auto", useSavedMemory = true } = {}) {
+    if (this.ending) throw new Error("Wait for the current session to finish saving.");
     this.rejectPending(new Error("A new tutoring session was started."));
     this.detachSocket();
     const connectionId = ++this.connectionId;
     this.failed = false;
     this.intentionalClose = false;
+    this.memoryEnabled = false;
     this.onStatusChange("connecting");
-    const { ticket } = await requestLiveSession(this.classId, mode, language, this.uploadIds);
+    const { ticket } = await requestLiveSession(this.classId, mode, language, this.uploadIds, useSavedMemory);
     if (connectionId !== this.connectionId) throw new Error("The tutoring session was ended.");
     const socket = new WebSocket(websocketUrl(), [SESSION_PROTOCOL, `ticket.${ticket}`]);
     this.socket = socket;
@@ -62,10 +71,12 @@ export class LiveSessionController {
       };
       socket.onerror = () => {
         if (this.socket !== socket) return;
+        if (this.ending) { this.completeEnd("unconfirmed"); return; }
         this.markFailed(new Error("The tutoring service could not connect. Please try again."));
       };
       socket.onclose = () => {
         if (this.socket !== socket) return;
+        if (this.ending) { this.completeEnd("unconfirmed"); return; }
         if (this.intentionalClose) {
           this.onStatusChange("closed");
           return;
@@ -96,6 +107,7 @@ export class LiveSessionController {
   }
 
   markFailed(error = new Error("The tutoring session could not continue. Please try again.")) {
+    if (this.ending) { this.completeEnd("unconfirmed"); return; }
     if (this.failed) return;
     this.failed = true;
     this.outputText = "";
@@ -115,14 +127,26 @@ export class LiveSessionController {
     }
 
     if (message.type === "ready") {
+      if (this.ending) return;
+      this.memoryEnabled = message.memory?.enabled === true;
+      this.onMemoryState(message.memory || { enabled: false, loaded_count: 0 });
       this.markReady();
       return;
     }
 
+    if (message.type === "session_ended" && this.ending) {
+      const status = ["saved", "disabled", "empty", "failed"].includes(message.memory_status)
+        ? message.memory_status : "unconfirmed";
+      this.completeEnd(status);
+      return;
+    }
     if (message.type === "error") {
+      if (this.ending) { this.completeEnd("failed"); return; }
       this.markFailed(new Error(message.message || "The tutoring session could not continue."));
       return;
     }
+
+    if (this.ending) return;
 
     if (message.type === "assistant") {
       if (message.interrupted) {
@@ -169,6 +193,7 @@ export class LiveSessionController {
   }
 
   send(payload) {
+    if (this.ending && payload.type !== "end_session") return false;
     if (this.failed || this.socket?.readyState !== WebSocket.OPEN) return false;
     try {
       this.socket.send(JSON.stringify(payload));
@@ -204,11 +229,14 @@ export class LiveSessionController {
   }
 
   sendFrame(frame) {
-    if (!frame?.jpeg || !frame?.frame_id) return;
-    this.send({
+    // Drop this sample on congestion; the next sample contains the current screen.
+    if (!frame?.jpeg || !frame?.frame_id || this.socket?.bufferedAmount > MAX_BUFFERED_BYTES) return false;
+    const data = frame.jpeg.split(",")[1];
+    if ((this.socket?.bufferedAmount || 0) + data.length + 128 > MAX_BUFFERED_BYTES) return false;
+    return this.send({
       type: "frame",
       frame_id: frame.frame_id,
-      data: frame.jpeg.split(",")[1]
+      data
     });
   }
 
@@ -222,7 +250,43 @@ export class LiveSessionController {
     socket.close(1000);
   }
 
+  finish() {
+    if (this.ending) return this.endPromise;
+    if (this.failed || this.resolveReady || this.socket?.readyState !== WebSocket.OPEN) {
+      this.close();
+      return Promise.resolve("unconfirmed");
+    }
+    this.ending = true;
+    this.rejectPending(new Error("The tutoring session was ended."));
+    this.intentionalClose = true;
+    this.outputText = "";
+    this.onAudioInterrupted();
+    this.endPromise = new Promise((resolve) => { this.resolveEnd = resolve; });
+    // Capture the promise before send(), whose failure may close synchronously.
+    const promise = this.endPromise;
+    this.endTimer = window.setTimeout(() => this.completeEnd("unconfirmed"), 30_000);
+    if (!this.send({ type: "end_session" })) this.completeEnd("unconfirmed");
+    return promise;
+  }
+
+  completeEnd(status) {
+    const resolve = this.resolveEnd;
+    this.resolveEnd = null;
+    if (this.endTimer) window.clearTimeout(this.endTimer);
+    this.endTimer = null;
+    this.ending = false;
+    this.endPromise = null;
+    this.close();
+    resolve?.(status);
+  }
+
   close() {
+    const resolveEnd = this.resolveEnd;
+    this.resolveEnd = null;
+    if (this.endTimer) window.clearTimeout(this.endTimer);
+    this.endTimer = null;
+    this.ending = false;
+    this.endPromise = null;
     this.connectionId += 1;
     this.intentionalClose = true;
     this.failed = true;
@@ -233,5 +297,6 @@ export class LiveSessionController {
     this.detachSocket();
     this.outputText = "";
     this.onStatusChange("closed");
+    resolveEnd?.("unconfirmed");
   }
 }

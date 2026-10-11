@@ -132,9 +132,10 @@ export async function checkBackendHealth() {
 }
 
 // One-use same-origin session ticket
-export async function requestLiveSession(classId = null, mode = "conversation", language = "auto", uploadIds = null) {
+export async function requestLiveSession(classId = null, mode = "conversation", language = "auto", uploadIds = null, useSavedMemory = true) {
   const body = {
     mode,
+    ...(useSavedMemory === false ? { use_saved_memory: false } : {}),
     ...(classId ? { class_id: classId } : {}),
     ...(classId && Array.isArray(uploadIds) ? { upload_ids: uploadIds } : {}),
     ...(language && language !== "auto" ? { language } : {})
@@ -143,6 +144,34 @@ export async function requestLiveSession(classId = null, mode = "conversation", 
     method: "POST",
     body: JSON.stringify(body)
   });
+}
+
+function tutorMemoryPath(classId = null) {
+  return `/api/tutor-memory${classId ? `?class_id=${encodeURIComponent(classId)}` : ""}`;
+}
+
+async function tutorMemoryRequest(path, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+  try {
+    return await apiFetch(path, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export function getTutorMemoryApi(classId = null) {
+  return tutorMemoryRequest(tutorMemoryPath(classId));
+}
+
+export function setTutorMemoryApi(classId, enabled) {
+  return tutorMemoryRequest("/api/tutor-memory", {
+    method: "PATCH", body: JSON.stringify({ class_id: classId || null, enabled })
+  });
+}
+
+export function clearTutorMemoryApi(classId = null) {
+  return tutorMemoryRequest(tutorMemoryPath(classId), { method: "DELETE" });
 }
 
 // Calculator tool execution

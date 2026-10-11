@@ -32,6 +32,7 @@ from app.services.lean_proofs import (
     LeanRuntimeUnavailable,
 )
 from app.services.live_sessions import LiveSessionTicketStore
+from app.services.source_context import source_excerpts
 
 logger = logging.getLogger("screen_tutor.api")
 router = APIRouter()
@@ -89,7 +90,7 @@ async def create_live_session_ticket(
             placeholders = ", ".join(f"?{index}" for index in range(2, len(upload_ids) + 2))
             selected = f"AND id IN ({placeholders}) " if upload_ids else "AND 0 "
         notes = await database_connection.fetch(
-            "SELECT title, substr(COALESCE(summary, extracted_text, ''), 1, 40000) AS context "
+            "SELECT id, title, extracted_text, summary "
             "FROM course_notes "
             f"WHERE class_id = ?1 AND status = 'ready' {selected}ORDER BY "
             "CASE WHEN kind = 'syllabus' THEN 0 ELSE 1 END, created_at",
@@ -97,21 +98,27 @@ async def create_live_session_ticket(
             *upload_ids,
         )
         context_parts = [f"Class: {class_row['name']}\n"]
-        remaining = 40_000
-        for note in notes:
-            excerpt = str(note["context"] or "")[:remaining]
-            if excerpt:
-                context_parts.append(f"Source: {note['title']}\n{excerpt}")
-                remaining -= len(excerpt)
-            if remaining <= 0:
-                break
+        for excerpt in source_excerpts(notes, 40_000):
+            coverage = " (partial excerpt; omitted text is unavailable)" if excerpt["truncated"] else ""
+            context_parts.append(
+                f"Source: {excerpt['title']} [{excerpt['upload_id']}]{coverage}\n{excerpt['text']}"
+            )
         class_context = "\n\n".join(context_parts)
 
     response.headers["Cache-Control"] = "no-store, private"
     response.headers["Pragma"] = "no-cache"
 
     store: LiveSessionTicketStore = request.app.state.live_session_ticket_store
-    ticket, expires_at = await store.issue(class_context, mode=payload.mode, language=payload.language)
+    memory_target = None
+    user_id = getattr(request.state, "user_id", None)
+    memory_service = getattr(request.app.state, "tutor_memory_service", None)
+    if user_id is not None and memory_service is not None:
+        memory_target = await memory_service.target(
+            user_id, payload.class_id, use_saved_memory=payload.use_saved_memory,
+        )
+    ticket, expires_at = await store.issue(
+        class_context, mode=payload.mode, language=payload.language, memory_target=memory_target,
+    )
     return LiveSessionTicketResponse(ticket=ticket, expires_at=expires_at)
 
 

@@ -30,6 +30,7 @@ from app.api.schemas import (
     UploadDocumentChunk,
 )
 from app.config import Settings
+from app.services.source_context import source_excerpts
 from app.services.study_prompts import STUDY_MATERIAL_SYSTEM_PROMPTS
 
 T = TypeVar("T", bound=BaseModel)
@@ -399,18 +400,10 @@ class GeminiContentService:
     ) -> tuple[str, dict]:
         """Generate one typed material object and validate every cited source."""
         source_ids = {str(source["id"]) for source in sources}
-        context_parts: list[str] = []
-        remaining = MAX_NOTE_CONTEXT_CHARS
-        for source in sources:
-            text = str(source.get("extracted_text") or source.get("summary") or "")
-            if not text or remaining <= 0:
-                continue
-            excerpt = text[:remaining]
-            remaining -= len(excerpt)
-            context_parts.append(json.dumps(
-                {"upload_id": str(source["id"]), "title": str(source["title"]), "text": excerpt},
-                ensure_ascii=False,
-            ))
+        context_parts = [
+            json.dumps(excerpt, ensure_ascii=False)
+            for excerpt in source_excerpts(sources, MAX_NOTE_CONTEXT_CHARS)
+        ]
         if not context_parts:
             raise ContentGenerationFailure("No processed source text is available.")
 
@@ -484,6 +477,8 @@ class GeminiContentService:
             "facts that the sources do not support. Preserve course notation. Every item must cite "
             "at least one supplied upload_id; never invent upload IDs, page numbers, slides, or "
             "timestamps. "
+            "Sources marked truncated contain excerpts, not the complete upload. Use the supplied "
+            "text and do not imply that omitted pages or topics have been covered. "
             f"Return exactly {count} {item_label}. {time_limit_instruction}"
             f"Difficulty: {options.get('difficulty', 'mixed')}. "
             f"Study-material kind: {kind}. Class JSON: {json.dumps(class_name, ensure_ascii=False)}. Scope: "
@@ -531,12 +526,17 @@ class GeminiContentService:
             return path.read_text(encoding="utf-8", errors="replace")
         if suffix == ".pdf":
             reader = PdfReader(str(path))
+            page_texts = [page.extract_text() or "" for page in reader.pages]
             pages = [
-                f"[Page {index}]\n{page.extract_text() or ''}"
-                for index, page in enumerate(reader.pages, start=1)
+                f"[Page {index}]\n{page_text}"
+                for index, page_text in enumerate(page_texts, start=1)
             ]
             text = "\n\n".join(pages).strip()
-            if len(text) >= 100:
+            # Labels are not document text; a readable cover must not hide scanned pages.
+            if (
+                sum(len(page_text.strip()) for page_text in page_texts) >= 100
+                and all(len(page_text.strip()) >= 20 for page_text in page_texts)
+            ):
                 return text
             if path.stat().st_size > MAX_PDF_FILE_BYTES:
                 raise ContentGenerationFailure("Scanned PDFs must be 50 MiB or smaller.")

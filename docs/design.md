@@ -58,7 +58,8 @@ Students can also upload their own course materials (notes, documents, syllabi, 
 
 ### Tutor style
 
-- Start with a hint or a clarifying question instead of immediately solving the whole problem.
+- Adapt support to the current learning obstacle: start with a hint when the student can take a next step, explain a missing prerequisite directly, and switch to a small analogous worked example after repeated unsuccessful hints. Fade help as the student progresses. Keep automatic screen checks brief and mistake-only.
+- Withhold final answers and nontrivial step answers, even when directly requested. A routine intermediate step may be supplied only relative to the student's demonstrated level and when it is not the learning target. Reserve direct nontrivial answers for clearly communicated severe overwhelm after simpler help has failed; provide the minimum needed to resume learning. Confirming the student's own proposed answer is allowed.
 - Explain what is visible and name uncertainty when text or layout is unclear.
 - Treat newer screen frames and the student's corrections as updates. Do not describe erased or replaced work as still present, or keep flagging a step that has been corrected. Ask for the current step when uncertain.
 - Keep spoken turns brief and let the student interrupt.
@@ -75,7 +76,7 @@ Students can also upload their own course materials (notes, documents, syllabi, 
 - Show when annotations are active. Let the student dismiss one mark or clear all marks.
 - On disconnect or permission loss, stop sending media and explain how to resume.
 - Select Check my steps before starting. End the session to change modes; microphone access is still enabled separately.
-- Provide Reset tutor memory to discard the current conversation and marks while retaining the authorized shared-screen preview. It starts a fresh tutor connection and leaves the microphone off until enabled again.
+- Provide Restart conversation to discard the current conversation and marks and skip saved recaps while retaining the authorized shared-screen preview. It starts a fresh tutor connection and leaves the microphone off until enabled again. Clear saved recaps separately deletes persisted memory.
 
 ### Notes and study materials
 
@@ -116,6 +117,8 @@ The app keeps the original file and the extracted text or transcript. The studen
 
 Each question or section links back to the upload it was drawn from (page or slide number, or lecture timestamp). Materials are saved to the class so the student can retake or regenerate them. Generated content can be wrong, so the UI labels it as AI-generated and lets the student flag an incorrect question.
 
+Editing or deleting a source upload preserves saved study sets, downloadable guide files, and attempt history. The app marks changed or missing sources so the student knows when to regenerate. Large selected sources share a bounded excerpt budget, and partial coverage is disclosed. Deleting a whole class still removes its uploads and study materials.
+
 ## System design
 
 ```mermaid
@@ -155,7 +158,7 @@ flowchart LR
 - Holds the long-lived Gemini API key and owns provider SDK use, model selection, system instructions, class context, and tool execution.
 - Issues a short-lived, one-use WebSocket ticket after origin, access, rate-limit, and optional class-ownership checks. The ticket is not a provider credential and cannot be used to call the provider directly.
 - Receives sampled frames, enabled microphone audio, and typed questions over the browser's same-origin WebSocket, then forwards them in memory to the Live API.
-- Streams audio, transcripts, and frame-bound annotation requests back to the browser. It does not record or persist live media or conversation data.
+- Streams audio, transcripts, and frame-bound annotation requests back to the browser. It does not record or persist live media or raw conversation data; only explicitly enabled derived session recaps persist.
 - For a public deployment, apply rate limits and abuse controls to ticket issuance and active WebSocket sessions.
 
 **Notes and study backend**
@@ -210,7 +213,7 @@ The backend rejects output that doesn't match the schema, is missing answers, or
 - Uses `gemini-3.8-live` for low-latency multimodal conversation.
 - Receives screen frames as image/video input, along with the student's audio or typed question.
 - Returns audio for spoken tutoring. Enable output transcription when the app needs text captions or response cards; the Live model's primary response modality is audio.
-- May call the app's narrow `add_annotations` function to request visual marks. The backend binds the request to the latest forwarded frame and owns the provider tool response; the browser still validates geometry and frame freshness before rendering.
+- May call the app's narrow `add_annotations` function to request visual marks. The backend binds the request to the question or review's pinned frame and owns the provider tool response; the browser validates geometry, frame freshness, and current target content before rendering.
 
 ### Gemini Live integration
 
@@ -249,9 +252,13 @@ Expose one visual tool to the model, for example:
 }
 ```
 
-The backend attaches the ID of the latest frame it forwarded when it sends an annotation request to the browser. Coordinates are normalized to that exact frame (`0..1`, origin at top-left). The browser rejects malformed values, unknown or stale frame IDs, excessive annotation counts, and regions outside the capture bounds. Annotations are short-lived, non-interactive, and removable. If geometry is missing or invalid, show the verbal explanation without drawing.
+The backend attaches the frame ID pinned to the question or automatic review when it sends an annotation request to the browser. It never rebinds coordinates to a later frame. Coordinates are normalized to that exact frame (`0..1`, origin at top-left), with width and height as extents rather than end coordinates. The browser rejects malformed values, unknown or stale frame IDs, excessive annotation counts, regions outside the capture bounds, and targets that no longer match the preview. Annotations are short-lived, non-interactive, and removable. If geometry is missing or invalid, show the verbal explanation without drawing.
 
 The tool should have no capability beyond adding or clearing this overlay. In particular, do not expose general desktop-control tools.
+
+## Saved session memory
+
+Approved on 2026-10-11: signed-in students may enable saved tutoring recaps separately for each class or general tutoring. Memory starts off. Explicitly ending a session saves a short recap of topics, observed progress, practice targets, and the next unfinished step; recent recaps inform future sessions. Students can view and clear saved recaps. Full conversations, raw transcripts, screenshots, and microphone audio remain temporary. No learner diagnosis or automatic mastery profile is created. Unexpected disconnects do not save in this first version.
 
 ## Privacy and data handling
 

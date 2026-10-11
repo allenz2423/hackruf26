@@ -1,7 +1,8 @@
 import { mathHtml, typesetMath } from "./math.js";
 import { escapeHtml, toast } from "./ui.js";
 import { icon } from "./icons.js";
-import { renderFlashcards, normalizeCards, formatSourceCitation } from "./flashcards.js";
+import { renderFlashcards, normalizeCards } from "./flashcards.js";
+import { sourceCitationHtml, bindSourceCitations, sourceWarningsHtml } from "./source-citations.js";
 import { downloadStudyFileApi } from "./api.js";
 
 function addDialog(title) {
@@ -142,6 +143,7 @@ function renderGuide(root, material) {
   const questionsAvailable = (material.items?.length || material.questions?.length || 0) > 0;
 
   root.innerHTML = `
+    ${sourceWarningsHtml(material)}
     <div class="study-mode-actions">
       ${material.isRemote ? `
         <button class="btn btn-primary" type="button" data-download-guide="pdf">Download PDF</button>
@@ -181,7 +183,7 @@ function renderGuide(root, material) {
                 <div class="guide-meta-block">
                   <span class="guide-meta-label">Sources:</span>
                   <div class="guide-chips">
-                    ${section.sources.map((src) => `<span class="chip source-chip">${escapeHtml(formatSourceCitation(src))}</span>`).join("")}
+                    ${section.sources.map(sourceCitationHtml).join("")}
                   </div>
                 </div>
               ` : ""}
@@ -194,6 +196,7 @@ function renderGuide(root, material) {
     </article>
   `;
   void typesetMath(root);
+  bindSourceCitations(root, material);
 
   root.querySelectorAll("[data-download-guide]").forEach((button) => button.addEventListener("click", async () => {
     const buttons = root.querySelectorAll("[data-download-guide]");

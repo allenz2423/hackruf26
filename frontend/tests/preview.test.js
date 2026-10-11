@@ -28,8 +28,19 @@ function preview(t, width = 1920, height = 1080) {
     getContext() { return this.context; },
     toDataURL() { return "data:image/jpeg;base64,/9j/"; }
   };
+  canvas.context.getImageData = () => ({ data: new Uint8ClampedArray(canvas.width * canvas.height * 4) });
+  let canvasCount = 0;
+  const createCanvas = () => {
+    if (canvasCount++ === 0) return canvas;
+    const comparison = { width: 0, height: 0 };
+    comparison.getContext = () => ({
+      drawImage() {},
+      getImageData: () => ({ data: new Uint8ClampedArray(comparison.width * comparison.height * 4) })
+    });
+    return comparison;
+  };
   const globals = {
-    document: { createElement: (tag) => tag === "canvas" ? canvas : new Element(), createElementNS: () => new Element() },
+    document: { createElement: (tag) => tag === "canvas" ? createCanvas() : new Element(), createElementNS: () => new Element() },
     window: { setTimeout: () => 1, clearTimeout() {}, setInterval: () => 2, clearInterval() {} },
     ResizeObserver: class {
       constructor(callback) { observer = this; this.callback = callback; }
@@ -129,13 +140,13 @@ test("sampling bounds 4K JPEG size and retains source dimensions for marks", (t)
   const capture = new ScreenCaptureController({ video: f.video, onFrame: (value) => { frame = value; } });
   capture.stream = {};
   capture.sampleFrame();
-  assert.equal(frame.width, 1280);
-  assert.equal(frame.height, 720);
-  assert.deepEqual(f.canvas.context.draws[0].slice(1), [0, 0, 1280, 720]);
+  assert.equal(frame.width, 1920);
+  assert.equal(frame.height, 1080);
+  assert.deepEqual(f.canvas.context.draws[0].slice(1), [0, 0, 1920, 1080]);
   const metadata = capture.getFrames().get(frame.frame_id);
   assert.equal(metadata.sourceWidth, 3840);
   assert.equal(metadata.sourceHeight, 2160);
-  assert.equal(metadata.width, 1280);
+  assert.equal(metadata.width, 1920);
   f.frames.set(frame.frame_id, metadata);
   assert.equal(f.annotations.addMany([mark(frame.frame_id)]).accepted.length, 1);
 });
@@ -149,7 +160,7 @@ test("portrait sources are bounded and small sources are never enlarged", (t) =>
   f.video.videoWidth = 320;
   f.video.videoHeight = 240;
   capture.sampleFrame();
-  assert.deepEqual(sizes, [[720, 1280], [320, 240]]);
+  assert.deepEqual(sizes, [[1080, 1920], [320, 240]]);
 });
 
 test("stopping capture releases its canvas and prevents late samples", (t) => {
