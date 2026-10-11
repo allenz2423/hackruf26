@@ -43,4 +43,5 @@ async def live_session(websocket: WebSocket) -> None:
     await websocket.app.state.live_session_service.run(
         websocket,
         session_ticket.class_context,
+        mode=session_ticket.mode,
     )

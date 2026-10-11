@@ -47,7 +47,7 @@ Class-library routes always scope reads and writes to the configured owner UUID.
 ## HTTP API
 
 - `GET /healthz`
-- `POST /api/live-sessions` with `{}` or optional `{"class_id":"<uuid>"}`; returns a one-use connection ticket and expiry
+- `POST /api/live-sessions` with `{}` or optional `class_id` (UUID) and `mode` (`conversation` or `check_steps`); returns a one-use connection ticket and expiry
 - `WS /api/live` using the ticket as a WebSocket subprotocol
 - `POST /api/tools/calculate`
 - `POST /api/tools/verify-lean`
@@ -78,6 +78,14 @@ Errors use `{"code": "...", "message": "...", "request_id": "..."}` with user-sa
 The SDK's `session.receive()` iterator ends after each completed model turn. The backend starts another receive iteration for the next turn, keeping the same Live connection open until the student ends it or a real disconnection occurs.
 
 If `class_id` is supplied, the backend checks ownership in SQLite and builds class context from ready uploads. The client cannot choose the provider, model, system instructions, modalities, or tool declarations. Tickets contain no provider credential and do not grant direct model access.
+
+### Check my steps mode
+
+The browser may select `mode: "check_steps"` when requesting a ticket. Omitted mode defaults to `conversation`. This selects a predefined backend coaching policy; it accepts no client instructions or additional permissions. The mode is bound to the one-use ticket and fixed for that connection. End the session before changing it.
+
+In coaching mode, the tutor follows the student's spoken steps and available screen frames, using ready class materials when supplied. At a speech pause it identifies a clear error, gives one short corrective hint, and requests a mark only when the affected step is visible. It asks for clarification when the speech, screen, or notes are ambiguous, avoids solving the remaining problem, and lets the student continue. It does not guarantee error detection or interruption during uninterrupted speech.
+
+Automatic speech detection uses a 900 ms silence window in this mode to allow short thinking pauses. Student speech can still interrupt tutor output; the existing `interrupted` event clears browser playback. Coaching adds no recordings, stored transcripts, extra model connections, or new tools. Normal conversation retains its existing speech detection configuration. See [Live speech detection configuration](https://ai.google.dev/gemini-api/docs/live-api/capabilities#automatic-vad-configuration).
 
 ### WebSocket events
 

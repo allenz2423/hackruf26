@@ -1595,8 +1595,47 @@ main {
 
 .conversation-head {
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-3);
+}
+
+.coaching-controls {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+}
+
+.check-steps-control {
+  display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: 32px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.check-steps-control input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--primary);
+}
+
+.check-steps-control input:disabled {
+  cursor: not-allowed;
+}
+
+#coaching-description {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .conversation-list {

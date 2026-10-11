@@ -62,6 +62,7 @@ Students can also upload their own course materials (notes, documents, syllabi, 
 - Use marks sparingly; each one should clarify a spoken explanation.
 - When the student explicitly asks for a mark on a clearly visible target, place it rather than only describing it.
 - If a location cannot be identified confidently, describe it (“the second line under the graph”) or ask the student instead of inventing a precise mark.
+- Optional **Check my steps** mode follows a student's spoken solution and gives a short corrective hint at a pause when a clear mistake is identified. Use the available class notes and screen, ask when uncertain, and let the student continue without giving away the full solution. Feedback can miss errors; interruption during uninterrupted speech is not guaranteed.
 
 ### Session controls
 
@@ -70,6 +71,7 @@ Students can also upload their own course materials (notes, documents, syllabi, 
 - Provide separate pause/resume controls for screen and microphone input, plus an obvious end-session action.
 - Show when annotations are active. Let the student dismiss one mark or clear all marks.
 - On disconnect or permission loss, stop sending media and explain how to resume.
+- Select Check my steps before starting. End the session to change modes; microphone access is still enabled separately.
 
 ### Notes and study materials
 

@@ -51,6 +51,7 @@ On narrow viewports, stack the preview and conversation vertically. Keep the pre
 - **Composer:** text question input, Send, and microphone toggle.
 - **Annotation controls:** dismiss one mark and Clear marks. Marks expire automatically after a short interval.
 - **Class selector:** shows which class's materials the tutor is using, or “No class” for a general session.
+- **Check my steps:** an optional checkbox before Share. When enabled, the tutor gives short corrective hints at pauses while the student explains a solution. The control is locked during a session; End unlocks it for the next session.
 
 ## Class library and study pages
 
@@ -142,6 +143,10 @@ Keep the backend session in one controller so capture, audio, transcript, and an
 7. When the student ends screen sharing, stop the tracks, close the backend session, clear frame buffers, and remove annotations. When only the microphone is paused, stop sending audio while keeping text/screen tutoring available.
 
 The browser-to-backend event contract is intentionally separate from provider payloads. The backend owns all provider connections, model configuration, instructions, and tool execution.
+
+The session ticket request may include `mode: "conversation"` or `mode: "check_steps"`, alongside an optional backend class UUID. The default is conversation. The browser sends only the selected mode, never coaching instructions or speech detection settings. Coaching uses the same audio, frame, annotation, and interruption events. Resuming a paused screen retains the selected mode and existing connection.
+
+When Check my steps is enabled, show a reminder to turn on the microphone, explain one step at a time, and pause for feedback. Feedback is AI-generated and may miss errors. Microphone permission stays separate and explicit. The tutor does not promise to speak over uninterrupted student speech.
 
 ### Microphone controls
 

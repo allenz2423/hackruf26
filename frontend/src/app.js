@@ -41,6 +41,7 @@ const state = {
   screen: "not sharing",
   mic: "off",
   micDevice: "",
+  tutorMode: "conversation",
   messages: []
 };
 
@@ -78,6 +79,18 @@ function syncTutorControls() {
   share.disabled = sharing;
   document.querySelector("#pause-screen").disabled = !sharing;
   document.querySelector("#end-session").disabled = !inSession;
+  const coachingToggle = document.querySelector("#check-steps");
+  if (coachingToggle) {
+    const coaching = state.tutorMode === "check_steps";
+    const modeLocked = inSession || ["connecting", "connected"].includes(state.connection);
+    coachingToggle.checked = coaching;
+    coachingToggle.disabled = modeLocked;
+    document.querySelector("#coaching-description").textContent = coaching
+      ? `Explain one step at a time and pause for a short corrective hint. Feedback can miss mistakes.${modeLocked ? " End the session to change modes." : ""}`
+      : modeLocked
+        ? "Conversation mode is active. End the session to enable Check my steps."
+        : "Enable before sharing for corrective hints at pauses as you explain your solution.";
+  }
   const micToggle = document.querySelector("#mic-toggle");
   if (micToggle) {
     const micActive = ["on", "muted", "requesting"].includes(state.mic);
@@ -94,10 +107,14 @@ function syncTutorControls() {
     micFeedback.dataset.mic = state.mic;
     const descriptions = {
       requesting: "Allow microphone access in your browser, or click the mic again to cancel.",
-      on: "Listening. Speak your question, then pause for the tutor to reply.",
+      on: state.tutorMode === "check_steps"
+        ? "Listening to your steps. Pause for feedback; speaking again interrupts the tutor."
+        : "Listening. Speak your question, then pause for the tutor to reply.",
       muted: "Your microphone is temporarily muted or unavailable. Check your device.",
       off: state.connection === "connected"
-        ? "Microphone off. Turn it on to ask a question aloud."
+        ? state.tutorMode === "check_steps"
+          ? "Microphone off. Turn it on to walk through your solution."
+          : "Microphone off. Turn it on to ask a question aloud."
         : "Share your screen to connect, then turn on the microphone."
     };
     document.querySelector("#mic-description").textContent = descriptions[state.mic] || descriptions.off;
@@ -397,6 +414,13 @@ function renderTutor(klass = null) {
       <aside class="panel conversation-panel" aria-label="Tutor conversation">
         <div class="conversation-head">
           <h2>Conversation</h2>
+          <div class="coaching-controls">
+            <label class="check-steps-control" for="check-steps">
+              <input id="check-steps" type="checkbox" aria-describedby="coaching-description" />
+              <span>Check my steps</span>
+            </label>
+            <p id="coaching-description" role="status" aria-live="polite"></p>
+          </div>
         </div>
         <ol id="conversation-list" class="conversation-list" data-empty-prompt="${escapeHtml(klass ? `Ask about your shared screen or ${klass.name}'s course materials.` : "Share your screen or ask a general question to get started.")}" aria-live="polite"></ol>
         <div id="mic-feedback" class="mic-feedback" data-mic="off">
@@ -524,7 +548,7 @@ function renderTutor(klass = null) {
     annotations.destroy();
     Object.assign(state, {
       session: "idle", connection: "offline", screen: "not sharing",
-      mic: "off", micDevice: "", messages: []
+      mic: "off", micDevice: "", tutorMode: "conversation", messages: []
     });
     disposeTutor = null;
   };
@@ -539,7 +563,7 @@ function renderTutor(klass = null) {
       if (disposed || requestId !== sessionRequestId || !stream) return;
       emptyStage.hidden = true;
       setStatus({ session: "connecting", screen: "sharing" });
-      if (state.connection !== "connected") await live.connect();
+      if (state.connection !== "connected") await live.connect({ mode: state.tutorMode });
       if (disposed || requestId !== sessionRequestId) return;
       setStatus({ session: "active" });
     } catch (error) {
@@ -563,6 +587,10 @@ function renderTutor(klass = null) {
   });
 
   document.querySelector("#clear-marks").addEventListener("click", () => annotations.clear());
+  document.querySelector("#check-steps").addEventListener("change", (event) => {
+    if (event.currentTarget.disabled) return;
+    setStatus({ tutorMode: event.currentTarget.checked ? "check_steps" : "conversation" });
+  });
   document.querySelector("#mic-toggle")?.addEventListener("click", async () => {
     try {
       if (state.connection !== "connected" && !audioController.enabled && !audioController.requesting) return;

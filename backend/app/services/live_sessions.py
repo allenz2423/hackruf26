@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from starlette.websockets import WebSocketDisconnect
 
 from app.config import Settings
+from app.live_modes import TutorMode
 from app.security.rate_limit import InMemoryRateLimiter
 from app.services.calculator import CalculatorInputError, evaluate_expression
 from app.services.lean_proofs import (
@@ -43,6 +44,7 @@ ANNOTATION_REPLY_TIMEOUT_SECONDS = 15
 class LiveSessionTicket:
     class_context: str | None
     expires_at: datetime
+    mode: TutorMode = TutorMode.CONVERSATION
 
 
 class LiveSessionTicketStore:
@@ -52,13 +54,15 @@ class LiveSessionTicketStore:
         self._tickets: dict[str, LiveSessionTicket] = {}
         self._lock = asyncio.Lock()
 
-    async def issue(self, class_context: str | None) -> tuple[str, datetime]:
+    async def issue(
+        self, class_context: str | None, *, mode: TutorMode = TutorMode.CONVERSATION
+    ) -> tuple[str, datetime]:
         now = datetime.now(UTC)
         expires_at = now + timedelta(seconds=TICKET_TTL_SECONDS)
         ticket = secrets.token_urlsafe(32)
         async with self._lock:
             self._remove_expired(now)
-            self._tickets[ticket] = LiveSessionTicket(class_context, expires_at)
+            self._tickets[ticket] = LiveSessionTicket(class_context, expires_at, mode)
         return ticket, expires_at
 
     async def consume(self, ticket: str) -> LiveSessionTicket | None:
@@ -137,7 +141,13 @@ class GeminiLiveSessionService:
         self._lean_limiter = lean_limiter
         self._lean_service = lean_service
 
-    async def run(self, websocket: WebSocket, class_context: str | None) -> None:
+    async def run(
+        self,
+        websocket: WebSocket,
+        class_context: str | None,
+        *,
+        mode: TutorMode = TutorMode.CONVERSATION,
+    ) -> None:
         request_id = secrets.token_hex(12)
         send_lock = asyncio.Lock()
         upstream_send_lock = asyncio.Lock()
@@ -152,6 +162,7 @@ class GeminiLiveSessionService:
         try:
             config = live_connect_config(
                 class_context,
+                mode=mode,
                 include_lean_tool=self._settings.lean_tool_enabled,
             )
             async with self._client.aio.live.connect(
