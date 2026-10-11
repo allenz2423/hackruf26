@@ -38,7 +38,8 @@ function place(el, x, y, w, hgt) {
 /** Fade and rise in from `start` over `d` seconds; scale pops with a little overshoot. */
 function appear(el, t, start, { d = 0.55, dy = 28, pop = false, out = Infinity, base = "" } = {}) {
   const p = seg(t, start, start + d);
-  const q = 1 - seg(t, out, out + 0.4);
+  // No fade-out by default (Infinity - Infinity would give NaN, an invalid opacity).
+  const q = Number.isFinite(out) ? 1 - seg(t, out, out + 0.4) : 1;
   el.style.opacity = String(ease.out(p) * q);
   el.style.transform = pop
     ? `${base} scale(${lerp(0.55, 1, ease.back(p))})`
@@ -101,7 +102,7 @@ function drawMark(mark, t, start, { out = Infinity } = {}) {
   const rect = mark.querySelector("rect");
   const label = mark.querySelector(".mark-label");
   const p = ease.inOut(seg(t, start, start + 0.8));
-  const fade = 1 - seg(t, out, out + 0.4);
+  const fade = Number.isFinite(out) ? 1 - seg(t, out, out + 0.4) : 1;
   rect.setAttribute("stroke-dashoffset", String(100 - p * 100));
   rect.style.fillOpacity = String(seg(t, start + 0.5, start + 0.9));
   mark.style.opacity = String(t >= start ? fade : 0);
@@ -252,7 +253,7 @@ const SCENES = {
       stage.append(sheet);
       win.append(btn, pills, stage);
       // The browser's own source picker.
-      const picker = place(h(`<div class="card" style="padding:30px;display:grid;gap:18px">
+      const picker = place(h(`<div class="card picker" style="padding:30px;display:grid;gap:18px">
         <div style="font-size:28px;font-weight:700">Choose what to share</div>
         <div style="display:flex;gap:18px">
           ${["Entire screen", "Window", "Chrome tab"].map((label, i) => `
@@ -278,7 +279,7 @@ const SCENES = {
       moveAlong(cursor, lt, [[0.6, 1500, 900], [1.4, 820, 368], [2.2, 820, 368], [2.7, 1170, 600], [3.4, 1170, 600]]);
       const pressed = lt > 1.4 && lt < 1.6;
       root.querySelector(".share-btn").style.transform = pressed ? "scale(.96)" : "";
-      const picker = root.querySelector(".card:not(.window)");
+      const picker = root.querySelector(".picker");
       appear(picker, lt, 1.55, { d: 0.35, pop: true, out: 3.1 });
       root.querySelectorAll(".pick").forEach((pick) => {
         pick.style.borderColor = pick.dataset.i === "1" && lt > 2.7 ? "var(--primary)" : "var(--line)";
@@ -493,10 +494,10 @@ const SCENES = {
       appear(root.querySelector(".window"), lt, 0.2, { dy: 40 });
       const p1 = root.querySelector(".p1");
       const p2 = root.querySelector(".p2");
-      p1.style.opacity = String(ease.out(seg(lt, 1.6, 2.1)));
+      p1.style.opacity = String(ease.out(seg(lt, 1.6, 2.1)) * (1 - ease.out(seg(lt, 4.6, 5.0))));
       p1.style.transform = `translateY(${(1 - ease.out(seg(lt, 1.6, 2.2))) * 40}px)`;
       const flip = ease.inOut(seg(lt, 4.4, 5.0));
-      p1.style.transform += ` translateX(${-flip * 620}px) rotate(${-flip * 6}deg)`;
+      p1.style.transform += ` translateX(${-flip * 1100}px) rotate(${-flip * 6}deg)`;
       p2.style.opacity = String(flip);
       p2.style.transform = `translateX(${(1 - flip) * 620}px)`;
       root.querySelector(".pg").textContent = lt > 4.7 ? "Page 2 of 10" : "Page 1 of 10";
@@ -510,11 +511,11 @@ const SCENES = {
     build() {
       const root = h(`<div></div>`);
       root.append(headline("Check my steps"));
-      root.append(place(h(`<div class="toggle"><span class="track"><span class="knob"></span></span>Check my steps</div>`), 660, 250));
+      root.append(place(h(`<div class="toggle" style="position:absolute"><span class="track"><span class="knob"></span></span>Check my steps</div>`), 660, 250));
       const sheet = place(worksheet(["3(x + 4) = 18", "<span class='wrong'>3x + 4 = 18</span><span class='fixed'>3x + 12 = 18</span>", "3x = 6"], "Solve for x"), 660, 340, 720);
       root.append(sheet);
       root.append(place(h(`<div class="bubble tutor hint">Careful: the 3 multiplies the 4 too.</div>`), 1240, 470));
-      root.append(place(h(`<div class="pill lang" style="font-size:26px">${ico("lock", 24)} Language lock: <strong class="lang-name">English</strong></div>`), 1250, 740));
+      root.append(place(h(`<div class="pill lang" style="position:absolute;font-size:26px">${ico("lock", 24)} Language lock: <strong class="lang-name">English</strong></div>`), 1250, 740));
       return root;
     },
     update(lt, root) {
@@ -535,7 +536,7 @@ const SCENES = {
       appear(root.querySelector(".hint"), lt, 2.8, { pop: true, out: 4.6 });
       appear(root.querySelector(".lang"), lt, 5.8, { pop: true });
       const names = ["English", "Español", "Français", "日本語"];
-      root.querySelector(".lang-name").textContent = names[Math.min(names.length - 1, Math.max(0, Math.floor((lt - 6.4) / 0.8)))];
+      root.querySelector(".lang-name").textContent = names[Math.min(names.length - 1, Math.max(0, Math.floor((lt - 6.2) / 0.55)))];
     }
   },
 
@@ -827,7 +828,7 @@ if (!params.has("render")) {
     button.hidden = false;
     button.addEventListener("click", () => {
       button.hidden = true;
-      const audio = new Audio("./out/narration.wav");
+      const audio = new Audio("./out/soundtrack.wav");
       audio.play();
       const tick = () => {
         seek(audio.currentTime);

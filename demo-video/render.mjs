@@ -1,8 +1,8 @@
-// Build the timeline from narration/*.wav, mix out/narration.wav, then either
+// Build the timeline from narration/*.wav, mix it with music/track.* into out/soundtrack.wav, then either
 //   node render.mjs                 render out/jot-demo.mp4 (1920x1080, 30 fps)
 //   node render.mjs --stills 2,9.5  save PNG stills at those times to out/stills/
 //   node render.mjs --preview       serve the film for live playback in a browser
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, extname, join, normalize, sep } from "node:path";
@@ -16,7 +16,8 @@ const OUT = join(HERE, "out");
 const FPS = 30;
 const LEAD_IN = 0.9; // seconds before the first line
 const SPEECH_DELAY = 0.45; // seconds from a scene's start to its line
-const GAP = 0.8; // seconds of quiet after each line
+const GAP = 1.0; // seconds between lines, where the music comes up
+const MUSIC_LEVEL = 0.32; // music volume before ducking under the voice
 const TAIL = 2.2; // hold on the last frame
 const CHROME = process.env.CHROME_PATH || "C:/Program Files/Google/Chrome/Application/chrome.exe";
 
@@ -146,9 +147,34 @@ function serve() {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
 }
 
+// ------------------------------------------------------------- soundtrack
+// Voice over music: the music sits low, ducks further whenever Jot speaks, and fades
+// out at the end; the mix is loudness-normalized. Without music/track.* it is voice only.
+function mixSoundtrack(duration) {
+  const voice = join(OUT, "narration.wav");
+  const output = join(OUT, "soundtrack.wav");
+  const music = ["mp3", "wav", "m4a"].map((ext) => join(HERE, "music", `track.${ext}`)).find(existsSync);
+  const stereo = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo";
+  const fadeAt = Math.max(0, duration - 3.5).toFixed(2);
+  const filter = music
+    ? [
+        `[0:a]${stereo},volume=1.15,asplit=2[voice][key]`,
+        `[1:a]${stereo},atrim=0:${duration.toFixed(2)},volume=${MUSIC_LEVEL},afade=t=in:d=0.6,afade=t=out:st=${fadeAt}:d=3.5[bed]`,
+        "[bed][key]sidechaincompress=threshold=0.02:ratio=8:attack=15:release=450:makeup=1[ducked]",
+        "[voice][ducked]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000[out]"
+      ].join(";")
+    : `[0:a]${stereo},loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000[out]`;
+  const inputs = music ? ["-i", voice, "-stream_loop", "-1", "-i", music] : ["-i", voice];
+  const result = spawnSync(ffmpegPath, ["-y", "-loglevel", "error", ...inputs, "-filter_complex", filter, "-map", "[out]", "-t", duration.toFixed(2), output], { stdio: "inherit" });
+  if (result.status !== 0) throw new Error("ffmpeg could not mix the soundtrack.");
+  console.log(`Soundtrack: ${music ? "voice + music" : "voice only"} -> ${output}`);
+  return output;
+}
+
 // ------------------------------------------------------------- main
 const timeline = buildTimeline();
 console.log(`Timeline: ${timeline.scenes.length} scenes, ${timeline.duration.toFixed(1)} s`);
+const soundtrack = mixSoundtrack(timeline.duration);
 const server = await serve();
 const base = `http://127.0.0.1:${server.address().port}/demo-video/index.html`;
 
@@ -178,7 +204,7 @@ if (flag("--preview")) {
     const ffmpeg = spawn(ffmpegPath, [
       "-y", "-loglevel", "error",
       "-f", "image2pipe", "-framerate", String(FPS), "-c:v", "mjpeg", "-i", "-",
-      "-i", join(OUT, "narration.wav"),
+      "-i", soundtrack,
       "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
       "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart",
       output

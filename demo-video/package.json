@@ -4,7 +4,9 @@
   "description": "Animated presentation video for Jot. Not part of the website build.",
   "type": "module",
   "scripts": {
-    "narration": "powershell -NoProfile -ExecutionPolicy Bypass -File make-narration.ps1",
+    "narration": "..\backend\.venv\Scripts\python -I make_narration_gemini.py",
+    "narration:offline": "powershell -NoProfile -ExecutionPolicy Bypass -File make-narration.ps1",
+    "music": "..\backend\.venv\Scripts\python -I make_music.py",
     "preview": "node render.mjs --preview",
     "render": "node render.mjs"
   },
