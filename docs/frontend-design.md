@@ -160,6 +160,8 @@ The browser-to-backend event contract is intentionally separate from provider pa
 - Accepts only known shapes (`pointer`, `rectangle`, `underline`, `note`) and finite coordinates in the `0..1` range.
 - Rejects unknown frames, old frame IDs, out-of-bounds regions, long labels, and excessive mark counts.
 - Maps normalized coordinates to the displayed video content area, accounting for `object-fit`, letterboxing, and resize. Prefer an SVG `viewBox` tied to the source frame dimensions so marks stay aligned.
+- Uses the captured frame dimensions for the SVG `viewBox` and centered aspect-preserving scaling to match the video preview. Discards marks if the shared source changes dimensions, and recalculates label sizing when the preview is resized.
+- Places each explanatory label inside its region, wraps long text, and reduces its font size to fit. Labels cannot spill outside the box. For regions too small for readable text, show an abbreviated label or omit it in the preview; the annotation list retains the complete explanation.
 - Renders marks as pointer-events-disabled UI elements; they must not intercept input to the video or conversation controls.
 - Gives each mark a dismiss button in an accessible list and expires marks automatically. If an annotation references a stale frame, return an error tool response and display the spoken explanation without a mark.
 
