@@ -1,0 +1,14 @@
+[
+  { "id": "intro", "text": "Hi! I'm Jot, a study buddy that can see what you're working on." },
+  { "id": "problem", "text": "When you're stuck on homework, a search engine has no idea what's on your screen. I do, because you can show me." },
+  { "id": "share", "text": "Share a window, a tab, or your whole screen. Then just ask, out loud or by typing, and I'll answer about exactly what you see." },
+  { "id": "marks", "text": "When it helps, I point. I can drop a quick mark right on your preview, like boxing the step where a sign flipped." },
+  { "id": "hints", "text": "And I start with hints, not answers, so you still get to do the thinking." },
+  { "id": "classes", "text": "Make a class for each course, then drop in your notes, slides, syllabus, old tests, or even lecture recordings." },
+  { "id": "study", "text": "I turn them into quizzes, flashcards, practice exams, and study guides, each one linked back to where it came from." },
+  { "id": "material", "text": "Inside a class, I read your notes first. You can even open a PDF right on the stage, flip through it, and work on it with me." },
+  { "id": "coach", "text": "Turn on Check my steps, and I'll follow along as you work and give a short hint when something slips. Language lock keeps me in your language." },
+  { "id": "privacy", "text": "You stay in control. I only see what you share, your screen and voice are never recorded, and I never click or type for you." },
+  { "id": "tech", "text": "Under the hood, I run on Gemini Live, with a FastAPI backend and a lightweight JavaScript front end." },
+  { "id": "outro", "text": "I'm Jot. Share your screen, ask anything, and actually understand it. Thanks for watching!" }
+]
