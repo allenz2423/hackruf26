@@ -148,6 +148,10 @@ Only the demo account (`is_demo` from the server) starts with the built-in sampl
 
 Log in accepts a username or an email. Anything cached for an account (classes, uploaded files) is cleared on log out, when the server ends the session, and when a different account logs in on the same browser.
 
+## Light and dark mode
+
+The theme is a choice, not just the system setting. `<html data-theme="light|dark">` selects the color tokens in `styles.css`. A small script in `index.html` applies the saved choice (`localStorage["jot-theme"]`) before first paint, so there is no flash; with no saved choice it follows `prefers-color-scheme`, including live changes, until the person picks one. `theme.js` owns the toggle: a sun/moon button in every header and floating in the corner of the welcome, login, and sign-up screens. It works if storage is blocked (the choice then lasts for the visit). Both themes keep text at 4.5:1 or better and control borders at 3:1 or better.
+
 ## Frontend modules
 
 - `app.js` — page initialization, event wiring, top-level session state, and user-facing errors.

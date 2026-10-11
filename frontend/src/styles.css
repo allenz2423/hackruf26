@@ -1,7 +1,7 @@
 /* Jot: a desk of paper index cards, inked in the mascot's slate blue,
    marked up with a highlighter. Paper is warm, ink is cool, one yellow. */
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
 
   --bg: #f4efe3;
   --surface: #fffdf7;
@@ -9,7 +9,7 @@
   --text: #1c2e37;
   --muted: #4d5f68;
   --line: #ddd5c2;
-  --line-strong: #968b73;
+  --line-strong: #8b8069;
   --edge: #d3cab4;
   --primary: #3f6577;
   --primary-hover: #2b4756;
@@ -51,34 +51,33 @@
   line-height: 1.5;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #121d24;
-    --surface: #1b2a33;
-    --surface-muted: #24363f;
-    --text: #efeadc;
-    --muted: #a9b6bb;
-    --line: #2e424c;
-    --line-strong: #5f7a85;
-    --edge: #2e424c;
-    --primary: #86c9e0;
-    --primary-hover: #aedaea;
-    --on-primary: #10202a;
-    --primary-soft: #223943;
-    --accent: #86c9e0;
-    --hl: #e9cb3a;
-    --hl-soft: #4a4318;
-    --on-hl: #1c2e37;
-    --success: #8fcf9a;
-    --success-soft: #1d3523;
-    --warning: #f1c262;
-    --warning-soft: #3a2f16;
-    --danger: #ff9b8f;
-    --danger-soft: #3c2320;
-    --stage: #0b1317;
-    --ring: rgba(134, 201, 224, 0.6);
-    --shadow-md: 0 12px 28px -10px rgba(0, 0, 0, 0.55), 0 2px 4px rgba(0, 0, 0, 0.3);
-  }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121d24;
+  --surface: #1b2a33;
+  --surface-muted: #24363f;
+  --text: #efeadc;
+  --muted: #a9b6bb;
+  --line: #2e424c;
+  --line-strong: #5f7a85;
+  --edge: #2e424c;
+  --primary: #86c9e0;
+  --primary-hover: #aedaea;
+  --on-primary: #10202a;
+  --primary-soft: #223943;
+  --accent: #86c9e0;
+  --hl: #e9cb3a;
+  --hl-soft: #4a4318;
+  --on-hl: #1c2e37;
+  --success: #8fcf9a;
+  --success-soft: #1d3523;
+  --warning: #f1c262;
+  --warning-soft: #3a2f16;
+  --danger: #ff9b8f;
+  --danger-soft: #3c2320;
+  --stage: #0b1317;
+  --ring: rgba(134, 201, 224, 0.6);
+  --shadow-md: 0 12px 28px -10px rgba(0, 0, 0, 0.55), 0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
 * {
@@ -2941,10 +2940,8 @@ main {
   scrollbar-color: var(--line-strong) transparent;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --mark: #5a4e14;
-  }
+:root[data-theme="dark"] {
+  --mark: #5a4e14;
 }
 
 ::selection {
@@ -3217,10 +3214,8 @@ p {
   color: var(--on-hl);
 }
 
-@media (prefers-color-scheme: dark) {
-  .new-class-card:hover {
-    color: var(--text);
-  }
+:root[data-theme="dark"] .new-class-card:hover {
+  color: var(--text);
 }
 
 /* Empty states: the mascot, cropped to its block */
@@ -3700,4 +3695,21 @@ p {
 
 .class-grid.is-empty {
   grid-template-columns: minmax(0, 1fr);
+}
+
+/* Theme toggle */
+
+.theme-toggle {
+  color: var(--muted);
+}
+
+.theme-toggle:hover {
+  color: var(--text);
+}
+
+.theme-toggle-floating {
+  position: fixed;
+  top: var(--space-4);
+  right: var(--space-4);
+  z-index: 15;
 }

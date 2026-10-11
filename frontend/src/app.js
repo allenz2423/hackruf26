@@ -22,6 +22,7 @@ import { renderLibraryTab } from "./library.js";
 import { createRouter } from "./router.js";
 import { ScreenCaptureController } from "./screen-capture.js";
 import { renderStudyTab } from "./study.js";
+import { initTheme, themeToggleMarkup } from "./theme.js";
 import { renderGuestStudy } from "./guest-study.js";
 import { clearUploadedFiles, deleteUploadedFile, deleteUploadedFiles } from "./file-store.js";
 import { escapeHtml, openDialog, toast } from "./ui.js";
@@ -36,6 +37,7 @@ import {
 } from "./api.js";
 
 const app = document.querySelector("#app");
+initTheme();
 
 let currentUser = null;
 let disposeTutor = null;
@@ -294,6 +296,7 @@ function shell(content, { section = "classes" } = {}) {
         `}
         <a href="#/tutor" ${section === "tutor" ? 'aria-current="page"' : ""}>Quick tutor</a>
       </nav>
+      ${themeToggleMarkup()}
       ${accountMenuMarkup()}
     </header>
     ${showSessionStatus ? `<div class="session-status-row">
@@ -330,6 +333,7 @@ function renderHome() {
 
   app.innerHTML = `
     <main id="main-content" class="home" tabindex="-1">
+      ${themeToggleMarkup({ floating: true })}
       <div class="home-inner">
         <div class="home-logo">
           <span class="home-mascot" aria-hidden="true"><img src="${jotMascot}" alt="" /></span>
@@ -909,6 +913,7 @@ function renderLogin({ mode = "signin" } = {}) {
 
   app.innerHTML = `
     <main id="main-content" class="home auth-screen" tabindex="-1">
+      ${themeToggleMarkup({ floating: true })}
       <div class="auth-screen-inner">
         <a class="brand" href="#/home">
           <span class="brand-mark" aria-hidden="true"><img src="${jotMascot}" alt="" /></span>
