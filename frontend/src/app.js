@@ -16,6 +16,7 @@ import {
   hasLocalClassData
 } from "./classes.js";
 import { LiveSessionController } from "./live-session.js";
+import { TutorMemoryPanel, tutorMemoryMarkup } from "./tutor-memory.js";
 import { getBackendClassId, prepareTutorSources } from "./course-sync.js";
 import { MaterialStage } from "./material-stage.js";
 import { readQuizTutorContext } from "./quiz-tutor-context.js";
@@ -49,6 +50,7 @@ initTheme();
 
 let currentUser = null;
 let disposeTutor = null;
+let tutorMemoryPanel = null;
 
 const state = {
   session: "idle",
@@ -93,13 +95,14 @@ function syncTutorControls() {
   const sharing = state.screen === "sharing" || state.screen === "selecting";
   const onStage = sharing || state.screen === "material";
   const inSession = !["idle", "ended", "error"].includes(state.session);
-  const starting = ["connecting", "reconnecting"].includes(state.session);
+  const starting = ["connecting", "reconnecting", "ending"].includes(state.session) || !!tutorMemoryPanel?.writing;
   // A material on the stage can be swapped for the screen and back without pausing.
   share.disabled = sharing || starting;
   const openMaterial = document.querySelector("#open-material");
   if (openMaterial) openMaterial.disabled = state.screen === "selecting" || starting;
   document.querySelector("#pause-screen").disabled = !onStage;
-  document.querySelector("#end-session").disabled = !inSession;
+  document.querySelector("#end-session").disabled = !inSession || state.session === "ending";
+  tutorMemoryPanel?.setLocked(inSession || ["connecting", "connected"].includes(state.connection));
   const sources = document.querySelector("#tutor-sources");
   if (sources) {
     const sourcesLocked = inSession || ["connecting", "connected"].includes(state.connection);
@@ -698,9 +701,9 @@ function renderTutor(klass = null) {
         <div class="conversation-head">
           <div class="conversation-title-row">
             <h2>Conversation</h2>
-            <button id="reset-tutor-memory" class="btn btn-ghost" type="button" disabled aria-label="Reset tutor memory" aria-describedby="reset-memory-description">${icon("refresh", { size: 16 })} Reset memory</button>
+            <button id="reset-tutor-memory" class="btn btn-ghost" type="button" disabled aria-label="Restart conversation" aria-describedby="reset-memory-description">${icon("refresh", { size: 16 })} Restart conversation</button>
           </div>
-          <p id="reset-memory-description" class="tutor-memory-hint">Clear the conversation and marks if the tutor refers to old work. Your screen stays shared; the microphone turns off.</p>
+          <p id="reset-memory-description" class="tutor-memory-hint">Start fresh without previous conversation or saved recaps. Your screen stays shared; the microphone turns off. Saved recaps remain available next time.</p>
           <div class="coaching-controls">
             <label class="check-steps-control" for="check-steps">
               <input id="check-steps" type="checkbox" aria-describedby="coaching-description" />
@@ -715,6 +718,7 @@ function renderTutor(klass = null) {
             </label>
             <p id="language-description" role="status" aria-live="polite"></p>
           </div>
+          ${tutorMemoryMarkup}
         </div>
         <ol id="conversation-list" class="conversation-list" data-empty-prompt="${escapeHtml(klass ? `Ask about your shared screen or ${klass.name}'s course materials.` : "Share your screen or ask a general question to get started.")}" aria-live="polite"></ol>
         <div id="mic-feedback" class="mic-feedback" data-mic="off">
@@ -784,6 +788,15 @@ function renderTutor(klass = null) {
     return klass ? getClassById(klass.id) || klass : null;
   }
 
+  const memoryPanel = new TutorMemoryPanel({
+    root: document.querySelector(".tutor-saved-memory"),
+    signedIn: !!currentUser,
+    getClassId: () => klass ? getBackendClassId(currentClass()) || undefined : null,
+    onChange: () => { if (!disposed) syncTutorControls(); }
+  });
+  tutorMemoryPanel = memoryPanel;
+  void memoryPanel.refresh();
+
   function refreshSourcesSummary() {
     const summary = document.querySelector("#tutor-sources-summary");
     if (summary) summary.textContent = sourcesSummary(currentClass(), selectedSources);
@@ -837,6 +850,7 @@ function renderTutor(klass = null) {
       }
     },
     onTutorText: (textSoFar) => buddy?.hear(textSoFar),
+    onMemoryState: (memory) => { if (!disposed) memoryPanel.report("loaded", memory.loaded_count, memory.enabled); },
     onAudioData: (data, mimeType) => {
       audioController?.playPcm(data, mimeType);
       buddy?.audioArrived();
@@ -903,19 +917,24 @@ function renderTutor(klass = null) {
   });
   buddy.setConnection(state.connection);
 
-  function stopSession() {
+  function stopSession({ saveMemory = false } = {}) {
     sessionRequestId += 1;
     classPreparation?.abort();
     classPreparation = null;
     stopStage();
     void audioController.close().catch(() => {});
-    live.close();
+    let finished;
+    if (saveMemory) finished = live.finish();
+    else { live.close(); finished = Promise.resolve("disabled"); }
     annotations.clear();
     emptyStage.hidden = false;
+    return finished;
   }
 
   disposeTutor = () => {
     disposed = true;
+    memoryPanel.dispose();
+    if (tutorMemoryPanel === memoryPanel) tutorMemoryPanel = null;
     buddy?.dispose();
     stopSession();
     annotations.destroy();
@@ -953,6 +972,7 @@ function renderTutor(klass = null) {
           classPreparation = null;
           live.classId = prepared.classId;
           live.uploadIds = prepared.uploadIds;
+          void memoryPanel.refresh();
         }
         await live.connect({ mode: state.tutorMode, language: state.tutorLanguage });
       }
@@ -1050,9 +1070,18 @@ function renderTutor(klass = null) {
   });
   refreshSourcesSummary();
 
-  document.querySelector("#end-session").addEventListener("click", () => {
-    stopSession();
+  document.querySelector("#end-session").addEventListener("click", async () => {
+    if (state.session === "ending") return;
+    const remember = live.memoryEnabled;
+    const finished = stopSession({ saveMemory: true });
+    const requestId = sessionRequestId;
+    setStatus({ session: "ending", screen: "not sharing", connection: "closing" });
+    if (remember) memoryPanel.report("saving");
+    const memoryStatus = await finished;
+    if (disposed || requestId !== sessionRequestId) return;
     setStatus({ session: "ended", screen: "not sharing", connection: "offline" });
+    memoryPanel.report(remember ? memoryStatus : "disabled");
+    void memoryPanel.refresh();
   });
 
   document.querySelector("#clear-marks").addEventListener("click", () => annotations.clear());
@@ -1071,7 +1100,7 @@ function renderTutor(klass = null) {
     try {
       await audioController.preparePlayback();
       if (disposed || requestId !== sessionRequestId) return;
-      await live.connect({ mode: state.tutorMode, language: state.tutorLanguage });
+      await live.connect({ mode: state.tutorMode, language: state.tutorLanguage, useSavedMemory: false });
       if (disposed || requestId !== sessionRequestId) return;
       if (capture.stream) {
         capture.sampleFrame();
@@ -1080,7 +1109,7 @@ function renderTutor(klass = null) {
         live.pauseScreen();
         setStatus({ session: "screen_paused", screen: "paused" });
       }
-      toast("Tutor memory reset. Turn on the microphone when you're ready to continue.");
+      toast("Conversation restarted without saved recaps. Turn on the microphone when you're ready to continue.");
     } catch (error) {
       if (disposed || requestId !== sessionRequestId) return;
       stopSession();

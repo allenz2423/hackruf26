@@ -232,3 +232,24 @@ CREATE TABLE IF NOT EXISTS user_sessions (
 
 CREATE INDEX IF NOT EXISTS user_sessions_user_idx ON user_sessions (user_id);
 CREATE INDEX IF NOT EXISTS user_sessions_expires_idx ON user_sessions (expires_at);
+
+-- Opted-in derived tutoring recaps. Raw conversations and media are never stored.
+CREATE TABLE IF NOT EXISTS tutor_memory_scopes (
+    id          TEXT PRIMARY KEY,
+    owner_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    class_id    TEXT REFERENCES course_classes(id) ON DELETE CASCADE,
+    scope_key   TEXT NOT NULL,
+    enabled     INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+    revision    INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (owner_id, scope_key),
+    CHECK (scope_key = coalesce(class_id, 'general'))
+);
+
+CREATE TABLE IF NOT EXISTS tutor_recaps (
+    id          TEXT PRIMARY KEY,
+    scope_id    TEXT NOT NULL REFERENCES tutor_memory_scopes(id) ON DELETE CASCADE,
+    session_id  TEXT NOT NULL UNIQUE,
+    content     TEXT NOT NULL CHECK (json_valid(content) AND json_type(content) = 'object'),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS tutor_recaps_scope_idx ON tutor_recaps (scope_id, created_at DESC);

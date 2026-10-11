@@ -19,6 +19,7 @@ from app.api.errors import ApiError
 from app.api.live import router as live_router
 from app.api.routes import router
 from app.api.schemas import ErrorResponse
+from app.api.tutor_memory import router as tutor_memory_router
 from app.api.upload_documents import router as upload_documents_router
 from app.config import Settings, get_settings
 from app.middleware.request_context import RequestContextMiddleware
@@ -30,6 +31,7 @@ from app.services.gemini_content import GeminiContentService
 from app.services.lean_proofs import LeanProofService, LeanRuntimeUnavailable
 from app.services.live_sessions import GeminiLiveSessionService, LiveSessionTicketStore
 from app.services.storage import LocalPrivateStorage
+from app.services.tutor_memory import TutorMemoryService
 
 logger = logging.getLogger("screen_tutor.errors")
 
@@ -91,13 +93,6 @@ def create_app(
 
         client = create_genai_client(settings, api_version=LIVE_API_VERSION)
         application.state.gemini_client = client
-        application.state.live_session_service = GeminiLiveSessionService(
-            client,
-            settings,
-            calculator_limiter=application.state.calculator_rate_limiter,
-            lean_limiter=application.state.lean_rate_limiter,
-            lean_service=application.state.lean_proof_service,
-        )
         content_client = create_genai_client(
             settings,
             timeout_seconds=settings.gemini_content_timeout_seconds,
@@ -106,6 +101,17 @@ def create_app(
         application.state.gemini_content_service = GeminiContentService(
             content_client,
             settings,
+        )
+        application.state.tutor_memory_service = TutorMemoryService(
+            application.state.database, content_client, settings.gemini_text_model,
+        )
+        application.state.live_session_service = GeminiLiveSessionService(
+            client,
+            settings,
+            calculator_limiter=application.state.calculator_rate_limiter,
+            lean_limiter=application.state.lean_rate_limiter,
+            lean_service=application.state.lean_proof_service,
+            memory_service=application.state.tutor_memory_service,
         )
 
         try:
@@ -131,6 +137,7 @@ def create_app(
     application.include_router(live_router)
     application.include_router(class_library_router)
     application.include_router(upload_documents_router)
+    application.include_router(tutor_memory_router)
 
     @application.exception_handler(ApiError)
     async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:

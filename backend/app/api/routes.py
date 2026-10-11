@@ -109,7 +109,16 @@ async def create_live_session_ticket(
     response.headers["Pragma"] = "no-cache"
 
     store: LiveSessionTicketStore = request.app.state.live_session_ticket_store
-    ticket, expires_at = await store.issue(class_context, mode=payload.mode, language=payload.language)
+    memory_target = None
+    user_id = getattr(request.state, "user_id", None)
+    memory_service = getattr(request.app.state, "tutor_memory_service", None)
+    if user_id is not None and memory_service is not None:
+        memory_target = await memory_service.target(
+            user_id, payload.class_id, use_saved_memory=payload.use_saved_memory,
+        )
+    ticket, expires_at = await store.issue(
+        class_context, mode=payload.mode, language=payload.language, memory_target=memory_target,
+    )
     return LiveSessionTicketResponse(ticket=ticket, expires_at=expires_at)
 
 

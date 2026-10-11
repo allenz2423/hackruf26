@@ -56,6 +56,7 @@ from app.services.live_config import (
     annotation_items_for_client,
     live_connect_config,
 )
+from app.services.tutor_memory import MemoryTarget, SessionTranscript, TutorMemoryService
 
 logger = logging.getLogger("screen_tutor.live")
 TICKET_TTL_SECONDS = 45
@@ -77,6 +78,7 @@ class LiveSessionTicket:
     expires_at: datetime
     mode: TutorMode = TutorMode.CONVERSATION
     language: TutorLanguage = TutorLanguage.AUTO
+    memory_target: MemoryTarget | None = None
 
 
 class LiveSessionTicketStore:
@@ -92,13 +94,14 @@ class LiveSessionTicketStore:
         *,
         mode: TutorMode = TutorMode.CONVERSATION,
         language: TutorLanguage = TutorLanguage.AUTO,
+        memory_target: MemoryTarget | None = None,
     ) -> tuple[str, datetime]:
         now = datetime.now(UTC)
         expires_at = now + timedelta(seconds=TICKET_TTL_SECONDS)
         ticket = secrets.token_urlsafe(32)
         async with self._lock:
             self._remove_expired(now)
-            self._tickets[ticket] = LiveSessionTicket(class_context, expires_at, mode, language)
+            self._tickets[ticket] = LiveSessionTicket(class_context, expires_at, mode, language, memory_target)
         return ticket, expires_at
 
     async def consume(self, ticket: str) -> LiveSessionTicket | None:
@@ -138,6 +141,10 @@ class _ScreenPausedEvent(_ClientEvent):
     type: Literal["screen_paused"]
 
 
+class _EndSessionEvent(_ClientEvent):
+    type: Literal["end_session"]
+
+
 class _FrameEvent(_ClientEvent):
     type: Literal["frame"]
     frame_id: UUID
@@ -159,6 +166,7 @@ _EVENT_ADAPTER = TypeAdapter(
     | _ScreenPausedEvent
     | _FrameEvent
     | _AnnotationResultEvent
+    | _EndSessionEvent
 )
 
 
@@ -173,12 +181,14 @@ class GeminiLiveSessionService:
         calculator_limiter: InMemoryRateLimiter,
         lean_limiter: InMemoryRateLimiter,
         lean_service: LeanProofService | None,
+        memory_service: TutorMemoryService | None = None,
     ) -> None:
         self._client = client
         self._settings = settings
         self._calculator_limiter = calculator_limiter
         self._lean_limiter = lean_limiter
         self._lean_service = lean_service
+        self._memory_service = memory_service
 
     async def run(
         self,
@@ -187,6 +197,7 @@ class GeminiLiveSessionService:
         *,
         mode: TutorMode = TutorMode.CONVERSATION,
         language: TutorLanguage = TutorLanguage.AUTO,
+        memory_target: MemoryTarget | None = None,
     ) -> None:
         request_id = secrets.token_hex(12)
         send_lock = asyncio.Lock()
@@ -197,6 +208,7 @@ class GeminiLiveSessionService:
         # check_steps sessions enable the automatic screen-review scheduler.
         coaching = _CoachingState()
         peer = websocket.client.host if websocket.client else "unknown"
+        transcript = SessionTranscript(enabled=False)
 
         async def send_client(payload: dict[str, Any], *, generation: int | None = None) -> None:
             async with send_lock:
@@ -205,17 +217,29 @@ class GeminiLiveSessionService:
                 await websocket.send_json(payload)
 
         try:
+            memory_context = None
+            memory_count = 0
+            if memory_target is not None and self._memory_service is not None:
+                enabled, memory_context, memory_count = await self._memory_service.context(memory_target)
+                if not enabled:
+                    memory_target = None
+            else:
+                memory_target = None
+            transcript.enabled = memory_target is not None
             config = live_connect_config(
                 class_context,
                 mode=mode,
                 language=language,
                 include_lean_tool=self._settings.lean_tool_enabled,
+                memory_context=memory_context,
             )
             async with self._client.aio.live.connect(
                 model=self._settings.gemini_model,
                 config=config,
             ) as session:
-                await send_client({"type": "ready"})
+                await send_client({
+                    "type": "ready", "memory": {"enabled": transcript.enabled, "loaded_count": memory_count},
+                })
                 input_task = asyncio.create_task(
                     self._read_client(
                         websocket,
@@ -226,6 +250,7 @@ class GeminiLiveSessionService:
                         peer,
                         send_client,
                         coaching=coaching,
+                        transcript=transcript,
                     )
                 )
                 output_task = asyncio.create_task(
@@ -237,6 +262,7 @@ class GeminiLiveSessionService:
                         peer,
                         send_client,
                         coaching=coaching,
+                        transcript=transcript,
                     )
                 )
                 tasks = [
@@ -259,7 +285,7 @@ class GeminiLiveSessionService:
                     )
                     for task in done:
                         task.result()
-                    if output_task in done:
+                    if output_task in done and not transcript.end_requested:
                         await send_client(
                             {
                                 "type": "error",
@@ -275,6 +301,19 @@ class GeminiLiveSessionService:
                         if not task.done():
                             task.cancel()
                     await asyncio.gather(*tasks, return_exceptions=True)
+            if transcript.end_requested:
+                # Media and provider tasks are released before recap generation.
+                frames.clear()
+                coaching.clear()
+                status = "disabled"
+                if memory_target is not None and self._memory_service is not None:
+                    status = await self._memory_service.finish(memory_target, request_id, transcript)
+                transcript.clear()
+                try:
+                    await send_client({"type": "session_ended", "memory_status": status})
+                    await websocket.close(code=1000)
+                except (WebSocketDisconnect, RuntimeError):
+                    pass
         except WebSocketDisconnect:
             return
         except Exception as exc:  # noqa: BLE001 - upstream content and credentials stay private
@@ -307,6 +346,7 @@ class GeminiLiveSessionService:
             except Exception:
                 pass
         finally:
+            transcript.clear()
             frames.clear()
             coaching.clear()
             for future in pending_annotations.values():
@@ -324,6 +364,7 @@ class GeminiLiveSessionService:
         send_client: Any,
         *,
         coaching: _CoachingState | None = None,
+        transcript: SessionTranscript | None = None,
     ) -> None:
         while True:
             try:
@@ -353,6 +394,10 @@ class GeminiLiveSessionService:
                 await websocket.close(code=1003)
                 return
 
+            if isinstance(event, _EndSessionEvent):
+                if transcript is not None:
+                    transcript.end_requested = True
+                return
             if isinstance(event, _TextEvent):
                 async with upstream_send_lock:
                     if coaching is not None:
@@ -382,6 +427,8 @@ class GeminiLiveSessionService:
                         ],
                         turn_complete=True,
                     )
+                    if transcript is not None:
+                        transcript.append("student", event.text + "\n")
                     del parts
             elif isinstance(event, _AudioEvent):
                 try:
@@ -551,6 +598,7 @@ class GeminiLiveSessionService:
         send_client: Any,
         *,
         coaching: _CoachingState | None = None,
+        transcript: SessionTranscript | None = None,
     ) -> None:
         state = coaching if coaching is not None else _CoachingState()
         try:
@@ -592,6 +640,8 @@ class GeminiLiveSessionService:
                     content = message.server_content
                     transcription = getattr(content, "input_transcription", None)
                     if getattr(transcription, "text", None):
+                        if transcript is not None:
+                            transcript.append("student", transcription.text)
                         now = time.monotonic()
                         if (
                             not state.student_speaking
@@ -693,6 +743,8 @@ class GeminiLiveSessionService:
                                 event["audio"] = []
                             if (has_output and audible) or event["turn_complete"]:
                                 await send_client(event, generation=state.generation)
+                                if transcript is not None and event["text"]:
+                                    transcript.append("tutor", event["text"])
                         elif state.review is not None and state.review.output_sent:
                             await send_client(interruption_event())
                             state.review.output_sent = False

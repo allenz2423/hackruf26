@@ -45,4 +45,5 @@ async def live_session(websocket: WebSocket) -> None:
         session_ticket.class_context,
         mode=session_ticket.mode,
         language=session_ticket.language,
+        memory_target=session_ticket.memory_target,
     )

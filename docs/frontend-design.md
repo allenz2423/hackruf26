@@ -52,7 +52,7 @@ On narrow viewports, stack the preview and conversation vertically. Keep the pre
 - **Annotation controls:** dismiss one mark and Clear marks. Marks expire automatically after a short interval.
 - **Class selector:** shows which class's materials the tutor is using, or “No class” for a general session.
 - **Check my steps:** an optional checkbox before Share. When enabled, the tutor gives short corrective hints at pauses while the student explains a solution. The control is locked during a session; End unlocks it for the next session.
-- **Reset tutor memory:** discard a connected tutor's prior conversation and marks, keep the shared screen, and open a fresh session with the selected mode and class. Stop microphone input and queued speech during reset; the student enables the microphone again afterward. Explain that the conversation will be cleared before the action.
+- **Restart conversation:** discard a connected tutor's prior conversation and marks, skip saved recaps, keep the shared screen, and open a fresh session with the selected mode and class. Stop microphone input and queued speech; the student enables the microphone again afterward. Saved recaps remain available to later sessions and are deleted separately.
 
 ## Class library and study pages
 
@@ -206,6 +206,16 @@ The tutor and generated study material sometimes write LaTeX (for example "the $
 - **Safe by construction:** all non-math text and all TeX are HTML-escaped, KaTeX runs with `trust: false` (no links, HTML, or images from TeX), expressions are capped at 2,000 characters and 200 per text, and anything KaTeX cannot parse stays as readable text.
 - **Tests:** `frontend/tests/math.test.js` covers the parser, escaping, and limits.
 
+## Saved tutoring recaps
+
+The student approved frontend integration for session memory on 2026-10-11. Signed-in tutors offer **Remember sessions**, off by default and persisted by the backend per account/class (general tutoring is separate). **Clear saved recaps** deletes that scope's history. Show recent recaps with their dates in an expandable list. Guests receive a sign-in explanation. Preference and deletion controls are locked during tutoring or saving.
+
+The account-scoped API is `GET|DELETE /api/tutor-memory?class_id=<optional backend UUID>` and `PATCH /api/tutor-memory` with `{class_id: null | UUID, enabled: boolean}`. Use cookie auth. Do not store recaps or preferences in browser persistence. Backend class IDs come from existing class mapping; API failures remain visible and do not block ordinary tutoring.
+
+End stops capture, input, playback, and marks immediately, then sends `end_session` over the existing WebSocket. Show saving progress while waiting at most 30 seconds for `session_ended.memory_status`, then close. Report failed/unconfirmed saves honestly. Navigation without End and failed sessions close without saving; a save already requested by End may finish after navigation. No screenshot, audio, or full transcript is persisted.
+
+The existing **Reset memory** control is renamed **Restart conversation** to distinguish ephemeral conversation reset from deleting saved recaps. It opens a fresh connection with `use_saved_memory: false`, keeping the preview and leaving the microphone off. Saved recaps remain available to later normal sessions. The restarted session can still save its own recap when ended if memory is enabled.
+
 ## Tutor language lock
 
 The tutor panel has a **Language lock** picker under *Check my steps*: *No lock (match me)* or one of 11 languages (English, Spanish, French, German, Portuguese, Italian, Mandarin Chinese, Japanese, Korean, Hindi, Arabic). With a lock, the tutor speaks and writes only in that language, even when the student asks in another language or the screen shows one. Like *Check my steps*, it is chosen before a session and disabled while one runs. The choice is remembered in the browser (`localStorage["jot-tutor-language"]`, validated on load) and sent as `language` when a session starts; with no lock nothing is sent. `tutor-language.js` holds the list, which must match the server's.
@@ -246,7 +256,7 @@ The browser-to-backend event contract is intentionally separate from provider pa
 
 The session ticket request may include `mode: "conversation"` or `mode: "check_steps"`, alongside an optional backend class UUID. The default is conversation. The browser sends only the selected mode, never coaching instructions or speech detection settings. Coaching uses the same audio, frame, annotation, and interruption events. Resuming a paused screen retains the selected mode and existing connection.
 
-When sharing is paused or the browser's track ends, send `{ "type": "screen_paused" }` through the existing gateway and clear local marks. The backend owns the context notice and invalidates its current frame. The browser contains no provider prompts. Reset tutor memory closes the old WebSocket, clears the in-memory frame map, transcript, and marks, and obtains a fresh ticket through the existing endpoint. It does not replay conversation history or old frames. On readiness, sample the still-authorized preview again; no new screen picker or microphone request is started automatically. End and navigation cancel a pending reset.
+When sharing is paused or the browser's track ends, send `{ "type": "screen_paused" }` through the existing gateway and clear local marks. The backend owns the context notice and invalidates its current frame. The browser contains no provider prompts. Restart conversation closes the old WebSocket, clears the in-memory frame map, transcript, and marks, and obtains a fresh ticket through the existing endpoint with `use_saved_memory: false`. It does not replay conversation history, saved recaps, or old frames. On readiness, sample the still-authorized preview again; no new screen picker or microphone request is started automatically. End and navigation cancel a pending restart.
 
 When Check my steps is enabled, show a reminder to turn on the microphone, explain one step at a time, and pause for feedback. Feedback is AI-generated and may miss errors. Microphone permission stays separate and explicit. The tutor does not promise to speak over uninterrupted student speech.
 
@@ -289,6 +299,7 @@ Represent the session with explicit states instead of inferring status from whet
 | `active` | Live session and selected inputs are available | Ask, mute, pause screen, end |
 | `screen_paused` | Screen track ended; text/audio may continue | Share screen again, end |
 | `reconnecting` | Live connection is recovering | End, retry if recovery fails |
+| `ending` | Capture and audio are stopped; waiting for recap acknowledgement | Navigation remains available; new sessions wait for completion |
 | `ended` | Tracks and Live session are closed | Start another session |
 | `error` | Permission, network, or setup failed | Retry, change browser/source |
 

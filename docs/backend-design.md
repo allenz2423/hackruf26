@@ -55,6 +55,7 @@ Class-library routes always scope reads and writes to the configured owner UUID.
 - `GET /healthz`
 - `POST /api/live-sessions` with `{}` or optional `class_id` (UUID), optional `upload_ids` (up to 100 upload UUIDs; requires `class_id`; only ready uploads in that class are used, and an empty list means no upload context), and `mode` (`conversation` or `check_steps`); returns a one-use connection ticket and expiry
 - `WS /api/live` using the ticket as a WebSocket subprotocol
+- `GET|PATCH|DELETE /api/tutor-memory` for opted-in saved recaps; optional `class_id` scopes GET/DELETE, PATCH supplies `class_id` and `enabled`
 - `POST /api/tools/calculate`
 - `POST /api/tools/verify-lean`
 - `GET|POST /api/classes` (create takes `name` and optional `color`/`icon`)
@@ -82,7 +83,7 @@ Errors use `{"code": "...", "message": "...", "request_id": "..."}` with user-sa
 2. The frontend calls `POST /api/live-sessions`; the backend checks origin, access policy, rate limit, and optional class ownership, then issues a random in-memory ticket that expires after 45 seconds and can be consumed once.
 3. The browser opens same-origin `WS /api/live` and presents the ticket as a WebSocket subprotocol. The backend checks the origin and consumes the ticket before opening the session.
 4. The backend opens a Live API connection with its server-only key and fixed server-owned model, instructions, class context, modalities, and tool declarations.
-5. The browser sends typed questions, JPEG frames (at most one per second), and enabled 16 kHz PCM audio. The backend forwards them in memory and streams audio/transcript events back. No media, transcript, or session history is logged or persisted.
+5. The browser sends typed questions, JPEG frames (at most one per second), and enabled 16 kHz PCM audio. The backend forwards them in memory and streams audio/transcript events back. No media or raw transcript is logged or persisted. Opted-in accounts may save a bounded session recap as described below.
 
 The SDK's `session.receive()` iterator ends after each completed model turn. The backend starts another receive iteration for the next turn, keeping the same Live connection open until the student ends it or a real disconnection occurs.
 
@@ -122,11 +123,11 @@ The Live configuration explicitly includes all incoming video between spoken tur
 
 The browser sends `screen_paused` whenever sharing stops while Live remains connected. The backend invalidates the current frame and adds a fixed server-owned context notice; on the next frame it signals that a new current screen is available. Annotation requests are rejected without a frame or when its age exceeds ten seconds.
 
-**Reset tutor memory** closes the existing gateway connection and requests a new one-use ticket for the same predefined mode and class. The new provider connection receives current class context but no old frames, turns, transcript, or resumption handle. Screen capture remains under the student's existing permission; a new frame is sampled after readiness. The browser clears its transcript and marks, stops queued speech, and turns off the microphone until the student enables it again. Normal ticket rate limits and failure cleanup still apply. Prompting improves grounding but cannot guarantee that a model will never make another error; reset provides an explicit way to discard the previous conversation.
+**Restart conversation** closes the existing gateway connection and requests a new one-use ticket for the same predefined mode and class with `use_saved_memory: false`. The new provider connection receives current class context but no saved recaps, old frames, turns, transcript, or resumption handle. Screen capture remains under the student's existing permission; a new frame is sampled after readiness. The browser clears its transcript and marks, stops queued speech, and turns off the microphone until the student enables it again. Normal ticket rate limits and failure cleanup still apply. Saved recaps remain available to later normal sessions and can be deleted separately through Clear saved recaps. Prompting improves grounding but cannot guarantee that a model will never make another error; restart provides an explicit way to discard the previous conversation.
 
 ### WebSocket events
 
-The browser may send only `text`, `audio`, `audio_end`, `frame`, `screen_paused` (no additional fields), and `annotation_result` events. Event payloads are size-limited and validated; frame payloads must be JPEG and are rate-limited. The backend emits `ready`, `assistant`, `annotation_request`, and sanitized `error` events. WebSocket media stays in active session memory only.
+The browser may send only `text`, `audio`, `audio_end`, `frame`, `screen_paused`, `end_session` (the last two have no additional fields), and `annotation_result` events. Event payloads are size-limited and validated; frame payloads must be JPEG and are rate-limited. The backend emits `ready` (with memory-enabled state and loaded recap count), `assistant`, `annotation_request`, `session_ended` (with recap outcome), and sanitized `error` events. WebSocket media stays in active session memory only.
 
 The frontend caps the longest JPEG frame dimension at 1920 pixels, initially at quality 0.85, reducing quality or dimensions to stay within the backend's 2,200,000-byte decoded frame limit. Pillow validates JPEGs before forwarding and enforces a 4096-pixel dimension and 4,194,304-pixel area limit before decoding. The backend retains only the latest compressed frame and tiny comparison signature. Original source dimensions and local grayscale comparison data stay in the browser's frame map for annotation alignment and source/content validation. The browser rejects annotation references older than ten seconds and caps active marks at eight across requests. The HTTP and WebSocket formats remain unchanged.
 
@@ -330,10 +331,22 @@ Existing local drafts remain labeled as local drafts; generate a new material fr
 - PDF readability checks count actual extracted page text rather than generated page markers. Scanned PDFs and mixed PDFs containing pages with less than 20 readable characters use Gemini file extraction. Readable PDFs retain native text and page boundaries. The existing 50 MiB vision-extraction limit remains in force.
 - Class tutoring prefers original extracted text, falling back to summaries only when source text is absent. A 40,000-character text budget is shared across readable selected uploads; study generation similarly shares its 250,000-character budget. Short sources release unused space. Large sources receive beginning/end excerpts with omission markers and explicit coverage metadata; the model must not claim coverage of omitted text. The browser surfaces the generation warning.
 
+## Saved tutoring recaps (approved product addition)
+
+The student approved session memory on 2026-10-11. Memory is off by default and available only to signed-in accounts. A separate scope belongs to each account/class pair; quick tutoring uses its own general scope. Only short structured recaps persist. Frames, audio, full conversations, and raw transcriptions remain temporary and are never written to storage or logs.
+
+- `GET /api/tutor-memory?class_id=<optional UUID>` returns `enabled`, `saved_count`, and up to five recent `items` (`id`, `created_at`, `content`). Omit `class_id` for general tutoring. Each content object has `summary`, `topics`, `observed_progress`, `practice_targets`, and `next_step`.
+- `PATCH /api/tutor-memory` accepts `{ "class_id": null | UUID, "enabled": boolean }` and returns the same state. Disabling prevents new saving/loading but preserves existing recaps.
+- `DELETE /api/tutor-memory?class_id=<optional UUID>` clears all recaps in that scope and preserves its preference. Clear and preference changes increment a revision, invalidating previously issued tickets and in-flight recap writes. Ownership, cookie authentication, browser origin checks, and private/no-store responses apply to all endpoints. Class deletion cascades memory.
+- Live tickets bind any enabled memory scope and revision on the server. New connections receive up to three recent recaps as untrusted historical reference, separate from course source material. The tutor must check relevance, never infer mastery from a recap, and keep the existing answer-withholding policy. `use_saved_memory: false` in the ticket request skips loading for a fresh conversation; opted-in saving of that new conversation remains available.
+- The browser explicitly sends `{ "type": "end_session" }` when the student presses End. Input/capture/playback stop immediately. The backend stops provider tasks and releases frames before generating a recap from at most 40,000 characters of in-memory text and voice transcription plus audible tutor text. At least one student utterance is required. Automated screen observations without student input are not saved.
+- The text model returns a locally validated, bounded JSON recap describing observed work and tentative next steps. It must not copy full solutions, code, private credentials, emotional assessments, or unsupported learner characteristics. Summary generation has a 25-second deadline and bounded concurrency. No fallback invents a recap after failure.
+- A terminal `{ "type": "session_ended", "memory_status": "saved" | "disabled" | "empty" | "failed" }` acknowledges completion. Provider failures and unexpected disconnects before End do not save. Once explicit End has been received, closing the browser does not cancel that requested save. Saving is idempotent for one session; at most ten recaps per scope persist. The browser waits at most 30 seconds for acknowledgement, then closes and reports that saving could not be confirmed.
+
 ## Security Boundaries
 - Keep `GEMINI_API_KEY` server-side only.
 - Do not log tickets, authorization headers, API keys, uploaded content, extracted text, transcripts, screen media, or submitted proof text.
-- Live media and transcripts may transit the backend only in active session memory; do not record, buffer to disk, or persist them.
+- Live media and raw transcripts may transit the backend only in session memory; do not record, buffer to disk, or persist them. Only explicitly enabled derived tutoring recaps may persist.
 - Apply origin checks, request-size limits, and rate limits.
 - Keep uploaded files outside the static web root.
 - Use HTTPS outside localhost.
