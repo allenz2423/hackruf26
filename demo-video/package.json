@@ -1,0 +1,15 @@
+{
+  "name": "jot-demo-video",
+  "private": true,
+  "description": "Animated presentation video for Jot. Not part of the website build.",
+  "type": "module",
+  "scripts": {
+    "narration": "powershell -NoProfile -ExecutionPolicy Bypass -File make-narration.ps1",
+    "preview": "node render.mjs --preview",
+    "render": "node render.mjs"
+  },
+  "devDependencies": {
+    "ffmpeg-static": "5.2.0",
+    "playwright-core": "1.49.1"
+  }
+}
