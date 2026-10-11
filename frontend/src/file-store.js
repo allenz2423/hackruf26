@@ -55,3 +55,9 @@ export async function deleteUploadedFile(id) {
 export async function deleteUploadedFiles(ids) {
   await Promise.all(ids.map((id) => deleteUploadedFile(id)));
 }
+
+export async function clearUploadedFiles() {
+  const database = await openDatabase();
+  fallbackFiles.clear();
+  if (database) await transact(database, "readwrite", (store) => store.clear());
+}

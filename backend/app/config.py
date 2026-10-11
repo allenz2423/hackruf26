@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     generation_rate_window_seconds: int = 3600
     study_pdf_executable: str = "tectonic"
     study_pdf_timeout_seconds: float = 60.0
+    auth_rate_limit: int = 10
+    auth_rate_window_seconds: int = 300
+    session_ttl_days: int = 30
     request_body_max_bytes: int = 1024
     library_json_body_max_bytes: int = 1_100_000
     frontend_dist: str = "frontend/dist"

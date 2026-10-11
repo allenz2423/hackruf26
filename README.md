@@ -6,7 +6,9 @@ Screen Tutor is a HackRU Fall 2026 project concept. In the web UI, the student c
 
 Students can also upload their own course materials (notes, documents, syllabi, lecture slides, and video/audio lectures) and organize them by class (Math, Science, and so on). Each class gets its own tutor that uses that class's materials, and the app can generate quizzes, study guides, practice tests, and flashcards from them.
 
-For spoken solution walkthroughs, enable **Check my steps** before Share screen, then turn on the microphone. Explain a step and pause for a short corrective hint. The tutor can mark a visible mistake and lets you interrupt its speech. End the session to change modes. Feedback can miss errors and is given at pauses, rather than guaranteed during uninterrupted speech.
+For automatic spoken corrections, enable **Check my steps** before **Share screen**. The tutor checks changed screen content without needing a question or microphone input, and speaks a short hint when it identifies a clear mistake. Leave a completed step visible briefly so it can review it. It skips unchanged views and leaves time between corrections. Optionally turn on the microphone to explain your steps; speaking interrupts the tutor, and checks wait for a pause. End the session to change modes. Feedback can miss errors.
+
+If the tutor keeps referring to erased or outdated work, use **Reset memory** in the Conversation panel. It clears the conversation and marks and opens a fresh tutor connection while keeping your screen shared. Turn the microphone on again afterward.
 
 ## Design
 

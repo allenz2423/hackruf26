@@ -503,3 +503,69 @@ class ErrorResponse(BaseModel):
     request_id: str | None = None
 
 
+
+
+class SignupRequest(BaseModel):
+    """Create an account with a username, optional email, and a password."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")
+    password: str = Field(min_length=8, max_length=128, strict=True)
+    email: str | None = Field(default=None, max_length=254)
+    display_name: str | None = Field(default=None, max_length=60)
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def strip_username(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("email", "display_name", mode="before")
+    @classmethod
+    def blank_to_none(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return value
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str | None) -> str | None:
+        from app.services.auth import EMAIL_PATTERN
+
+        if value is not None and not EMAIL_PATTERN.match(value):
+            raise ValueError("Enter a valid email address.")
+        return value
+
+
+class LoginRequest(BaseModel):
+    """Log in with a username or an email address."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    identifier: str = Field(min_length=1, max_length=254)
+    password: str = Field(min_length=1, max_length=128, strict=True)
+
+    @field_validator("identifier", mode="before")
+    @classmethod
+    def strip_identifier(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+class AuthUser(BaseModel):
+    """The account fields the browser may see; never a password or hash."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: UUID
+    username: str
+    display_name: str
+    email: str | None = None
+
+
+class MeResponse(BaseModel):
+    """The signed-in account, or null for a guest."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    user: AuthUser | None = None

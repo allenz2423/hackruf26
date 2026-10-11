@@ -52,6 +52,7 @@ On narrow viewports, stack the preview and conversation vertically. Keep the pre
 - **Annotation controls:** dismiss one mark and Clear marks. Marks expire automatically after a short interval.
 - **Class selector:** shows which class's materials the tutor is using, or “No class” for a general session.
 - **Check my steps:** an optional checkbox before Share. When enabled, the tutor gives short corrective hints at pauses while the student explains a solution. The control is locked during a session; End unlocks it for the next session.
+- **Reset tutor memory:** discard a connected tutor's prior conversation and marks, keep the shared screen, and open a fresh session with the selected mode and class. Stop microphone input and queued speech during reset; the student enables the microphone again afterward. Explain that the conversation will be cleared before the action.
 
 ## Class library and study pages
 
@@ -125,6 +126,26 @@ Remote quiz detail omits answer keys. Submit choice IDs, true/false values, and 
 
 The screen-sharing workspace described above, with the class selected. The page tells the backend the class ID when starting the session so the tutor gets that class's materials. Tutor answers that rely on an upload show a source chip linking to it.
 
+## Accounts, guests, and access
+
+Guests and logged-in users never share a screen or a cache. The backend enforces this; the client only mirrors it.
+
+| Route | Who | Behavior |
+| --- | --- | --- |
+| `#/home` | Everyone | Welcome page. Guests see Log in and Continue as guest; logged-in users see Welcome back and Go to your classes. |
+| `#/login`, `#/signup` | Guests | Standalone Log in and Join Jot screens with no app header. They always ask for credentials, show "Checking your details..." while the server answers, and show inline errors for wrong or missing details. Only a successful server response logs anyone in. A visitor who is already logged in sees who they are logged in as, with Go to your classes and Log out, instead of being redirected. |
+| `#/account` | Logged-in only | Profile details and Log out. A guest is sent to `#/login`. |
+| `#/classes`, `#/classes/:id/:tab` | Logged-in only | Class library, study, and class tutor. A guest is sent to `#/login`. |
+| `#/study` | Guests only | Local quick study. A logged-in visitor is sent to their classes. |
+| `#/tutor` | Everyone | Quick tutor without class materials. |
+
+The header's top-right control depends on who is looking:
+
+- **Guest:** a **Join Jot** menu with only *Log in* and *Create account*.
+- **Logged in:** the account name with a menu of *Account*, *Your classes*, and *Log out*.
+
+Log in accepts a username or an email. Anything cached for an account (classes, uploaded files) is cleared on log out, when the server ends the session, and when a different account logs in on the same browser.
+
 ## Frontend modules
 
 - `app.js` — page initialization, event wiring, top-level session state, and user-facing errors.
@@ -156,6 +177,8 @@ Keep the backend session in one controller so capture, audio, transcript, and an
 The browser-to-backend event contract is intentionally separate from provider payloads. The backend owns all provider connections, model configuration, instructions, and tool execution.
 
 The session ticket request may include `mode: "conversation"` or `mode: "check_steps"`, alongside an optional backend class UUID. The default is conversation. The browser sends only the selected mode, never coaching instructions or speech detection settings. Coaching uses the same audio, frame, annotation, and interruption events. Resuming a paused screen retains the selected mode and existing connection.
+
+When sharing is paused or the browser's track ends, send `{ "type": "screen_paused" }` through the existing gateway and clear local marks. The backend owns the context notice and invalidates its current frame. The browser contains no provider prompts. Reset tutor memory closes the old WebSocket, clears the in-memory frame map, transcript, and marks, and obtains a fresh ticket through the existing endpoint. It does not replay conversation history or old frames. On readiness, sample the still-authorized preview again; no new screen picker or microphone request is started automatically. End and navigation cancel a pending reset.
 
 When Check my steps is enabled, show a reminder to turn on the microphone, explain one step at a time, and pause for feedback. Feedback is AI-generated and may miss errors. Microphone permission stays separate and explicit. The tutor does not promise to speak over uninterrupted student speech.
 

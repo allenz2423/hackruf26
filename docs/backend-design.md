@@ -8,7 +8,7 @@
 
 The backend owns all model-provider integration: it protects the long-lived Gemini API key, selects models, defines instructions and tools, and maintains each Live session. The browser captures and previews media locally, then relays sampled frames and enabled microphone audio through a same-origin WebSocket. The backend forwards them in memory and does not record live media, transcripts, or conversations.
 
-The class library stores classes, uploaded course materials, extracted text, lecture transcripts, generated study materials, quiz attempts, and flags in SQLite. Original uploaded files live in private local storage outside the static web root. Local/demo row ownership is scoped by `LOCAL_OWNER_ID`, a stable UUID configured through the environment.
+The class library stores classes, uploaded course materials, extracted text, lecture transcripts, generated study materials, quiz attempts, and flags in SQLite. Original uploaded files live in private local storage outside the static web root. Rows are owned by the logged-in account (see [Accounts and sessions](#accounts-and-sessions)). `LOCAL_OWNER_ID` is only the legacy owner that `seed_user --adopt-local-data` can migrate.
 
 ## Stack
 
@@ -33,7 +33,9 @@ The class library stores classes, uploaded course materials, extracted text, lec
 | `APP_ORIGINS` | Deployment-dependent | Allowed browser origins |
 | `DEMO_GATE_TOKEN` | Production | Optional private bearer token gate for session-ticket/tool endpoints; required in production |
 | `LIVE_SESSION_RATE_LIMIT`, `LIVE_SESSION_RATE_WINDOW_SECONDS` | No | Session-ticket issuance limits |
-| `LOCAL_OWNER_ID` | No | UUID owner namespace for SQLite rows |
+| `LOCAL_OWNER_ID` | No | Legacy owner UUID; only used to migrate pre-account data |
+| `AUTH_RATE_LIMIT` / `AUTH_RATE_WINDOW_SECONDS` | No | Sign-up and login attempts per client and window (default 10 per 300 s) |
+| `SESSION_TTL_DAYS` | No | Login session lifetime (default 30) |
 | `SQLITE_PATH` | No | SQLite database path, defaults to `backend/.local/screen_tutor.sqlite3` |
 | `STORAGE_DIR` | No | Private upload storage path |
 | `FILE_URL_SIGNING_SECRET` | Yes | HMAC secret for short-lived private file links |
@@ -43,7 +45,7 @@ The class library stores classes, uploaded course materials, extracted text, lec
 
 ## Request Policy
 
-Development API and WebSocket requests are origin-checked and use `LOCAL_OWNER_ID` for class-library ownership. Production must configure a high-entropy `DEMO_GATE_TOKEN` for session-ticket and tool endpoints. The backend never accepts `owner_id` from the client.
+API and WebSocket requests are origin-checked. Class-library requests require a logged-in account. Production must configure a high-entropy `DEMO_GATE_TOKEN` for session-ticket and tool endpoints. The backend never accepts `owner_id` from the client.
 
 Class-library routes always scope reads and writes to the configured owner UUID. This keeps the SQLite schema ready for future multi-owner deployments without depending on an external account service in the hackathon build.
 
@@ -89,17 +91,31 @@ If `class_id` is supplied, the backend checks ownership in SQLite and builds cla
 
 The browser may select `mode: "check_steps"` when requesting a ticket. Omitted mode defaults to `conversation`. This selects a predefined backend coaching policy; it accepts no client instructions or additional permissions. The mode is bound to the one-use ticket and fixed for that connection. End the session before changing it.
 
-In coaching mode, the tutor follows the student's spoken steps and available screen frames, using ready class materials when supplied. At a speech pause it identifies a clear error, gives one short corrective hint, and requests a mark only when the affected step is visible. It asks for clarification when the speech, screen, or notes are ambiguous, avoids solving the remaining problem, and lets the student continue. It does not guarantee error detection or interruption during uninterrupted speech.
+In coaching mode, the tutor checks the shared screen automatically, including when the microphone is off and the student has not asked a question. A server task submits the latest stable snapshot for review through the same Live connection at most once every five seconds. It skips unchanged snapshots, stale or paused sharing, active student speech, and an unfinished model turn. After feedback, it waits ten seconds before another automatic review. A bounded set of image hashes suppresses duplicate reviews; images and hashes remain in active session memory only.
 
-Automatic speech detection uses a 900 ms silence window in this mode to allow short thinking pauses. Student speech can still interrupt tutor output; the existing `interrupted` event clears browser playback. Coaching adds no recordings, stored transcripts, extra model connections, or new tools. Normal conversation retains its existing speech detection configuration. See [Live speech detection configuration](https://ai.google.dev/gemini-api/docs/live-api/capabilities#automatic-vad-configuration).
+The fixed review instruction permits a brief spoken hint only for a clear mistake in a completed, readable step. Correct, incomplete, or ambiguous work should produce silence. The tutor avoids repeating an earlier warning or solving the remaining problem. Check my steps enables the Live provider's proactive-audio configuration so it can abstain from responding. The Live SDK client uses the documented `v1beta` endpoint; the separate content-generation client retains its existing configuration. No Flash evaluator or additional model connection is used for screen checks.
+
+Student questions take priority over automatic checks. Student speech can interrupt playback, and automatic reviews wait for a pause rather than speaking over uninterrupted speech. If a reviewed image changes or sharing stops before feedback finishes, the backend suppresses remaining automatic feedback and rejects its visual marks. Review annotations reference the exact reviewed frame. An unfinished review blocks further checks until completion; all review tasks and memory are cleared on disconnect or Reset memory. Error detection and silence remain model judgments, not guarantees.
+
+Automatic speech detection uses a 900 ms silence window in this mode to allow short thinking pauses. Provider voice-activity events and a bounded PCM energy check prevent automatic reviews during speech; microphone silence alone does not block screen checks. The existing `interrupted` event clears browser playback. Coaching adds no browser protocol events, recordings, stored transcripts, extra model connections, or new tools. Normal conversation retains its existing speech detection configuration. See [Live speech detection and proactive audio](https://ai.google.dev/gemini-api/docs/live-api/capabilities).
 
 ### Class Tutor integration
 
 The class Tutor sends the backend class UUID from the persisted `backendId` mapping, resolved by `getBackendClassId(klass)`, to `POST /api/live-sessions`. Its browser route slug is not a backend ID. Before opening Live, `prepareTutorClass()` reconciles the class and actual source files through the existing class/upload APIs and waits for processing to finish. Empty classes are created without requiring an upload. Navigation or End cancels client preparation and prevents a late connection. Quick Tutor omits `class_id` and works without a class. Both paths send the selected predefined mode. The backend retains UUID validation and ownership checks.
 
+### Changing screen content and corrections
+
+Screen frames are changing snapshots, not permanent facts. The backend instructions require the newest readable frame and the student's latest correction to take precedence over older visual observations and assistant claims. Erased, replaced, or corrected work must not remain a current error. Class reference material supplies methods and definitions; it is not evidence that an old equation still appears on screen.
+
+The Live configuration explicitly includes all incoming video between spoken turns, including screen changes made during silence. For a typed question, the backend includes its latest JPEG snapshot with the question in one ordered content update when the frame is at most ten seconds old. Only one bounded JPEG is retained in active session memory; it is replaced on the next frame and cleared on screen pause or disconnect. No images, corrections, or conversations are saved or logged.
+
+The browser sends `screen_paused` whenever sharing stops while Live remains connected. The backend invalidates the current frame and adds a fixed server-owned context notice; on the next frame it signals that a new current screen is available. Annotation requests are rejected without a frame or when its age exceeds ten seconds.
+
+**Reset tutor memory** closes the existing gateway connection and requests a new one-use ticket for the same predefined mode and class. The new provider connection receives current class context but no old frames, turns, transcript, or resumption handle. Screen capture remains under the student's existing permission; a new frame is sampled after readiness. The browser clears its transcript and marks, stops queued speech, and turns off the microphone until the student enables it again. Normal ticket rate limits and failure cleanup still apply. Prompting improves grounding but cannot guarantee that a model will never make another error; reset provides an explicit way to discard the previous conversation.
+
 ### WebSocket events
 
-The browser may send only `text`, `audio`, `audio_end`, `frame`, and `annotation_result` events. Event payloads are size-limited and validated; frame payloads must be JPEG and are rate-limited. The backend emits `ready`, `assistant`, `annotation_request`, and sanitized `error` events. WebSocket media stays in active session memory only.
+The browser may send only `text`, `audio`, `audio_end`, `frame`, `screen_paused` (no additional fields), and `annotation_result` events. Event payloads are size-limited and validated; frame payloads must be JPEG and are rate-limited. The backend emits `ready`, `assistant`, `annotation_request`, and sanitized `error` events. WebSocket media stays in active session memory only.
 
 The frontend caps the longest JPEG frame dimension at 1280 pixels to stay within the backend's 2,200,000-byte decoded frame limit, including detailed 4K displays. Original source dimensions stay in the browser's frame map for annotation alignment and source-resize validation. The browser rejects annotation references older than ten seconds and caps active marks at eight across requests. The HTTP and WebSocket formats remain unchanged.
 
@@ -162,7 +178,7 @@ Upload detail additionally includes balanced `document` state. The Library previ
 
 ### SQLite access and existing browser data
 
-Class-library APIs do **not** require an authentication token in the current local SQLite mode. Call them through the same-origin HTTP client even when `getAccessToken()` returns an empty string. Browser mutations must carry an allowed `Origin`; a normal same-origin browser `fetch` supplies it. The backend assigns `LOCAL_OWNER_ID` and never accepts a client-supplied owner.
+Class-library APIs require a logged-in account: the browser sends the HttpOnly `jot_session` cookie automatically on same-origin requests, and a missing or ended session returns `401 authentication_required`. Browser mutations must carry an allowed `Origin`; a normal same-origin browser `fetch` supplies it. The backend derives the owner from the session and never accepts a client-supplied owner.
 
 The earlier browser implementation gated study generation on a nonempty token and called `createLocalMaterial()` instead. Its three generic question strings produced the reported “Quick check on New class workspace” local draft, without calling Gemini. That fallback has been removed. Generation, remote material loading/deletion, scoring, and remote flags now call the SQLite APIs without a token prerequisite.
 
@@ -248,7 +264,20 @@ Existing local drafts remain labeled as local drafts; generate a new material fr
 
 - The frontend can request and consume a one-use session ticket without receiving a provider credential, model name, or provider SDK configuration.
 - The backend owns the Live connection, model, instructions, class context, approved tools, and tool execution.
-- The backend initializes SQLite automatically and scopes class-library data to `LOCAL_OWNER_ID`.
+- The backend initializes SQLite automatically and scopes class-library data to the logged-in account.
 - A student can create classes, upload notes, generate study materials, and submit attempts through the FastAPI API.
 - Screen/audio streams transit the backend only in active session memory and are never stored by it.
 - Uploaded files and generated study materials can be deleted by the student.
+
+## Accounts and sessions
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/auth/signup` | Create an account (`username`, `password`, optional `email` and `display_name`) and log in. `409 username_taken` / `email_taken` if already used. |
+| `POST /api/auth/login` | Log in with `identifier` (username or email) and `password`. Always `401 invalid_credentials` with one generic message on failure. |
+| `POST /api/auth/logout` | End the session and clear the cookie. Safe when already logged out. |
+| `GET /api/auth/me` | `{"user": {...}}` for a logged-in account, `{"user": null}` for a guest. |
+
+- Usernames are 3 to 32 characters (letters, numbers, `.`, `_`, `-`) and unique ignoring case. Passwords are 8 to 128 characters and stored only as salted scrypt hashes.
+- The session cookie is `jot_session` (HttpOnly, SameSite=Lax, `Secure` in production). The database stores only a SHA-256 hash of the token. Logout deletes the server-side session, so a copied cookie stops working.
+- **Guest boundary:** with no session, `POST /api/live-sessions` works only without `class_id`; with `class_id` it returns `401`. A `class_id` owned by another account returns `404`. All `/api/classes`, upload, study-material, and attempt endpoints return `401`.

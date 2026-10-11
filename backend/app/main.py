@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.auth import router as auth_router
 from app.api.class_library import router as class_library_router
 from app.api.errors import ApiError
 from app.api.live import router as live_router
@@ -24,7 +25,7 @@ from app.middleware.request_context import RequestContextMiddleware
 from app.middleware.request_size import RequestSizeLimitMiddleware
 from app.security.rate_limit import InMemoryRateLimiter
 from app.services.database import create_database, recover_interrupted_jobs
-from app.services.gemini_client import create_genai_client
+from app.services.gemini_client import LIVE_API_VERSION, create_genai_client
 from app.services.gemini_content import GeminiContentService
 from app.services.lean_proofs import LeanProofService, LeanRuntimeUnavailable
 from app.services.live_sessions import GeminiLiveSessionService, LiveSessionTicketStore
@@ -57,6 +58,10 @@ def create_app(
             settings.lean_rate_limit,
             settings.lean_rate_window_seconds,
         )
+        application.state.auth_rate_limiter = InMemoryRateLimiter(
+            settings.auth_rate_limit,
+            settings.auth_rate_window_seconds,
+        )
         application.state.upload_rate_limiter = InMemoryRateLimiter(
             settings.upload_rate_limit,
             settings.upload_rate_window_seconds,
@@ -84,7 +89,7 @@ def create_app(
         application.state.private_storage = LocalPrivateStorage(settings)
         application.state.live_session_ticket_store = LiveSessionTicketStore()
 
-        client = create_genai_client(settings)
+        client = create_genai_client(settings, api_version=LIVE_API_VERSION)
         application.state.gemini_client = client
         application.state.live_session_service = GeminiLiveSessionService(
             client,
@@ -122,6 +127,7 @@ def create_app(
         lifespan=lifespan,
     )
     application.include_router(router)
+    application.include_router(auth_router)
     application.include_router(live_router)
     application.include_router(class_library_router)
     application.include_router(upload_documents_router)

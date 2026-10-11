@@ -84,6 +84,12 @@ export class ScreenCaptureController {
     return this.frames;
   }
 
+  clearFrames() {
+    this.frames.clear();
+    this.canvas.width = 0;
+    this.canvas.height = 0;
+  }
+
   stop() {
     this.requestId += 1;
     if (this.frameTimer) {
@@ -99,10 +105,8 @@ export class ScreenCaptureController {
 
     this.trackEndedHandler = null;
     this.stream = null;
-    this.frames.clear();
     // Releasing the canvas removes the final screen image from memory at stop.
-    this.canvas.width = 0;
-    this.canvas.height = 0;
+    this.clearFrames();
     this.video.srcObject = null;
   }
 }

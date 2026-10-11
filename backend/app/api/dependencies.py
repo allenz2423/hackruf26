@@ -12,6 +12,7 @@ from fastapi import Request
 from app.api.errors import ApiError
 from app.config import Settings
 from app.security.rate_limit import InMemoryRateLimiter
+from app.services.auth import SESSION_COOKIE, user_for_token
 from app.services.database import SQLiteDatabase
 from app.services.storage import LocalPrivateStorage
 
@@ -64,10 +65,27 @@ async def enforce_origin_policy(request: Request, settings: Settings, *, require
         raise ApiError(403, "origin_not_allowed", "This request origin is not allowed.")
 
 
+def session_token(request: Request) -> str | None:
+    """The raw login-session cookie, if the browser sent one."""
+    return request.cookies.get(SESSION_COOKIE) or None
+
+
+async def session_user(request: Request) -> dict | None:
+    """Resolve the login cookie to an account; None means the visitor is a guest."""
+    token = session_token(request)
+    connection: SQLiteDatabase | None = getattr(request.app.state, "database", None)
+    if token is None or connection is None:
+        return None
+    return await user_for_token(connection, token)
+
+
 async def enforce_sqlite_api_policy(request: Request, settings: Settings) -> UUID:
-    """Apply the browser-origin policy and use the configured local SQLite owner."""
+    """Apply the browser-origin policy and require a logged-in account."""
     await enforce_origin_policy(request, settings, required=request.method not in {"GET", "HEAD"})
-    user_id = settings.local_owner_id
+    user = await session_user(request)
+    if user is None:
+        raise ApiError(401, "authentication_required", "Please log in to use your class library.")
+    user_id = UUID(str(user["id"]))
     request.state.user_id = user_id
     return user_id
 
@@ -92,7 +110,10 @@ async def enforce_app_request_policy(request: Request, settings: Settings) -> No
     """Apply origin checks and optional demo-gate authorization."""
     await enforce_origin_policy(request, settings, required=True)
     request_id = getattr(request.state, "request_id", "unknown")
-    request.state.user_id = settings.local_owner_id
+    # Guests may use the shared tools; only a logged-in account has a user id,
+    # which is what unlocks class materials.
+    user = await session_user(request)
+    request.state.user_id = UUID(str(user["id"])) if user else None
 
     if settings.demo_gate_token is not None:
         authorization = request.headers.get("authorization", "")

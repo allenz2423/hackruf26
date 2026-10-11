@@ -254,7 +254,7 @@ export function renderGuestStudy(root) {
             <p class="muted">Add class notes, then turn them into a study set you can use right away.</p>
           </div>
           <div class="page-actions">
-            <a href="#/auth" class="btn btn-secondary">
+            <a href="#/login" class="btn btn-secondary">
               ${icon("user", { size: 16 })} Sign in to save work
             </a>
           </div>
@@ -264,7 +264,7 @@ export function renderGuestStudy(root) {
           ${icon("alert", { size: 20 })}
           <div>
             <strong>Temporary guest session</strong>
-            <span>Files and study sets stay in this browser session and are not saved to the SQLite database. <a class="auth-link" href="#/auth">Sign in to save your work permanently.</a></span>
+            <span>Files and study sets stay in this browser session and are not saved to the SQLite database. <a class="auth-link" href="#/login">Sign in to save your work permanently.</a></span>
           </div>
         </div>
 

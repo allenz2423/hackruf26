@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import json
 import logging
 import secrets
+import struct
 import time
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
@@ -31,14 +34,28 @@ from app.services.lean_proofs import (
     LeanProofService,
     LeanRuntimeUnavailable,
 )
-from app.services.live_config import live_connect_config
+from app.services.live_config import (
+    AUTOMATIC_SCREEN_REVIEW,
+    CURRENT_SCREEN_CONTEXT,
+    NO_CURRENT_SCREEN_CONTEXT,
+    SCREEN_PAUSED_CONTEXT,
+    SCREEN_RESUMED_CONTEXT,
+    live_connect_config,
+)
 
 logger = logging.getLogger("screen_tutor.live")
 TICKET_TTL_SECONDS = 45
 MAX_CLIENT_MESSAGE_BYTES = 3_200_000
 MAX_FRAME_BYTES = 2_200_000
 FRAME_INTERVAL_SECONDS = 1.0
+MAX_FRAME_AGE_SECONDS = 10.0
 ANNOTATION_REPLY_TIMEOUT_SECONDS = 15
+SCREEN_REVIEW_INTERVAL_SECONDS = 5.0
+SCREEN_REVIEW_STABLE_SECONDS = 1.5
+SCREEN_REVIEW_MAX_AGE_SECONDS = 2.5
+COACHING_INPUT_PAUSE_SECONDS = 2.0
+COACHING_FEEDBACK_PAUSE_SECONDS = 10.0
+PCM_ACTIVITY_THRESHOLD = 600
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +116,10 @@ class _AudioEndEvent(_ClientEvent):
     type: Literal["audio_end"]
 
 
+class _ScreenPausedEvent(_ClientEvent):
+    type: Literal["screen_paused"]
+
+
 class _FrameEvent(_ClientEvent):
     type: Literal["frame"]
     frame_id: UUID
@@ -114,7 +135,12 @@ class _AnnotationResultEvent(_ClientEvent):
 
 
 _EVENT_ADAPTER = TypeAdapter(
-    _TextEvent | _AudioEvent | _AudioEndEvent | _FrameEvent | _AnnotationResultEvent
+    _TextEvent
+    | _AudioEvent
+    | _AudioEndEvent
+    | _ScreenPausedEvent
+    | _FrameEvent
+    | _AnnotationResultEvent
 )
 
 
@@ -122,6 +148,77 @@ _EVENT_ADAPTER = TypeAdapter(
 class _FrameState:
     latest_frame_id: str | None = None
     last_frame_at: float = 0.0
+    latest_image: bytes | None = None
+    latest_digest: bytes | None = None
+    last_change_at: float = 0.0
+    paused: bool = False
+
+    def is_current(self) -> bool:
+        return bool(
+            self.latest_frame_id
+            and not self.paused
+            and time.monotonic() - self.last_frame_at <= MAX_FRAME_AGE_SECONDS
+        )
+
+    def clear(self) -> None:
+        self.latest_frame_id = None
+        self.latest_image = None
+        self.latest_digest = None
+
+
+@dataclass(slots=True)
+class _CoachingState:
+    """Coordinate automatic checks without retaining past images or audio."""
+
+    model_busy: bool = False
+    student_speaking: bool = False
+    last_user_activity_at: float = 0.0
+    last_model_activity_at: float = 0.0
+    last_review_at: float = 0.0
+    review_digest: bytes | None = None
+    review_frame_id: str | None = None
+    review_stale: bool = False
+    review_output_sent: bool = False
+    reviewed_digests: deque[bytes] = field(default_factory=lambda: deque(maxlen=16))
+
+    def clear_review(self) -> None:
+        self.review_digest = None
+        self.review_frame_id = None
+        self.review_stale = False
+        self.review_output_sent = False
+
+    def user_turn(self) -> None:
+        self.clear_review()
+        self.model_busy = True
+        self.last_user_activity_at = time.monotonic()
+
+    def finish_turn(self) -> None:
+        self.model_busy = False
+        if self.review_digest is None or self.review_output_sent:
+            self.last_model_activity_at = time.monotonic()
+        self.clear_review()
+
+    def review_is_stale(self, frames: _FrameState) -> bool:
+        if self.review_digest is not None:
+            self.review_stale = self.review_stale or (
+                not frames.is_current() or self.review_digest != frames.latest_digest
+            )
+        return self.review_stale
+
+    def can_review(self, frames: _FrameState, now: float) -> bool:
+        return bool(
+            not self.model_busy
+            and not self.student_speaking
+            and frames.is_current()
+            and frames.latest_image is not None
+            and frames.latest_digest is not None
+            and now - frames.last_frame_at <= SCREEN_REVIEW_MAX_AGE_SECONDS
+            and now - frames.last_change_at >= SCREEN_REVIEW_STABLE_SECONDS
+            and now - self.last_user_activity_at >= COACHING_INPUT_PAUSE_SECONDS
+            and now - self.last_model_activity_at >= COACHING_FEEDBACK_PAUSE_SECONDS
+            and now - self.last_review_at >= SCREEN_REVIEW_INTERVAL_SECONDS
+            and frames.latest_digest not in self.reviewed_digests
+        )
 
 
 class GeminiLiveSessionService:
@@ -154,6 +251,7 @@ class GeminiLiveSessionService:
         upstream_send_lock = asyncio.Lock()
         pending_annotations: dict[str, asyncio.Future[dict[str, Any]]] = {}
         frames = _FrameState()
+        coaching = _CoachingState() if mode == TutorMode.CHECK_STEPS else None
         peer = websocket.client.host if websocket.client else "unknown"
 
         async def send_client(payload: dict[str, Any]) -> None:
@@ -180,6 +278,7 @@ class GeminiLiveSessionService:
                         upstream_send_lock,
                         peer,
                         send_client,
+                        coaching=coaching,
                     )
                 )
                 output_task = asyncio.create_task(
@@ -190,11 +289,19 @@ class GeminiLiveSessionService:
                         upstream_send_lock,
                         peer,
                         send_client,
+                        coaching=coaching,
                     )
                 )
+                tasks = [input_task, output_task]
+                if coaching is not None:
+                    tasks.append(
+                        asyncio.create_task(
+                            self._review_screen(session, frames, coaching, upstream_send_lock)
+                        )
+                    )
                 try:
                     done, _ = await asyncio.wait(
-                        (input_task, output_task),
+                        tasks,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     for task in done:
@@ -211,7 +318,6 @@ class GeminiLiveSessionService:
                         )
                         await websocket.close(code=1011)
                 finally:
-                    tasks = (input_task, output_task)
                     for task in tasks:
                         if not task.done():
                             task.cancel()
@@ -240,6 +346,10 @@ class GeminiLiveSessionService:
             except Exception:
                 pass
         finally:
+            frames.clear()
+            if coaching is not None:
+                coaching.clear_review()
+                coaching.reviewed_digests.clear()
             for future in pending_annotations.values():
                 if not future.done():
                     future.cancel()
@@ -253,6 +363,8 @@ class GeminiLiveSessionService:
         upstream_send_lock: asyncio.Lock,
         peer: str,
         send_client: Any,
+        *,
+        coaching: _CoachingState | None = None,
     ) -> None:
         while True:
             try:
@@ -284,15 +396,31 @@ class GeminiLiveSessionService:
 
             if isinstance(event, _TextEvent):
                 async with upstream_send_lock:
+                    if coaching is not None:
+                        coaching.user_turn()
+                    # Keep the latest image and the student's correction in one
+                    # ordered update, without replaying any older screen frames.
+                    parts = [types.Part(text=NO_CURRENT_SCREEN_CONTEXT)]
+                    if frames.is_current() and frames.latest_image is not None:
+                        parts = [
+                            types.Part(text=CURRENT_SCREEN_CONTEXT),
+                            types.Part(
+                                inline_data=types.Blob(
+                                    data=frames.latest_image, mime_type="image/jpeg"
+                                )
+                            ),
+                        ]
+                    parts.append(types.Part(text=event.text))
                     await session.send_client_content(
                         turns=[
                             types.Content(
                                 role="user",
-                                parts=[types.Part(text=event.text)],
+                                parts=parts,
                             )
                         ],
                         turn_complete=True,
                     )
+                    del parts
             elif isinstance(event, _AudioEvent):
                 try:
                     data = _decode_base64(event.data, max_bytes=24_000)
@@ -307,12 +435,33 @@ class GeminiLiveSessionService:
                     await websocket.close(code=1003)
                     return
                 async with upstream_send_lock:
+                    if coaching is not None and _has_audio_activity(data):
+                        # Silent microphone chunks must not disable screen-only
+                        # checks. Provider VAD remains responsible for speech turns.
+                        coaching.last_user_activity_at = time.monotonic()
                     await session.send_realtime_input(
                         audio=types.Blob(data=data, mime_type="audio/pcm;rate=16000")
                     )
             elif isinstance(event, _AudioEndEvent):
                 async with upstream_send_lock:
+                    if coaching is not None:
+                        coaching.student_speaking = False
+                        coaching.last_user_activity_at = time.monotonic()
                     await session.send_realtime_input(audio_stream_end=True)
+            elif isinstance(event, _ScreenPausedEvent):
+                frames.clear()
+                if frames.paused:
+                    continue
+                frames.paused = True
+                async with upstream_send_lock:
+                    await session.send_client_content(
+                        turns=[
+                            types.Content(
+                                role="user", parts=[types.Part(text=SCREEN_PAUSED_CONTEXT)]
+                            )
+                        ],
+                        turn_complete=False,
+                    )
             elif isinstance(event, _FrameEvent):
                 now = time.monotonic()
                 if now - frames.last_frame_at < FRAME_INTERVAL_SECONDS:
@@ -340,11 +489,27 @@ class GeminiLiveSessionService:
                     await websocket.close(code=1003)
                     return
                 async with upstream_send_lock:
+                    if frames.paused:
+                        await session.send_client_content(
+                            turns=[
+                                types.Content(
+                                    role="user", parts=[types.Part(text=SCREEN_RESUMED_CONTEXT)]
+                                )
+                            ],
+                            turn_complete=False,
+                        )
+                    frames.latest_frame_id = str(event.frame_id)
+                    frames.latest_image = data
+                    frames.last_frame_at = time.monotonic()
+                    digest = hashlib.sha256(data).digest()
+                    if digest != frames.latest_digest:
+                        frames.last_change_at = frames.last_frame_at
+                    frames.latest_digest = digest
+                    frames.paused = False
                     await session.send_realtime_input(
                         video=types.Blob(data=data, mime_type="image/jpeg")
                     )
-                frames.latest_frame_id = str(event.frame_id)
-                frames.last_frame_at = now
+                    del data
             elif isinstance(event, _AnnotationResultEvent):
                 future = pending_annotations.get(event.call_id)
                 if future is not None and not future.done():
@@ -356,6 +521,45 @@ class GeminiLiveSessionService:
                         }
                     )
 
+    async def _review_screen(
+        self,
+        session: Any,
+        frames: _FrameState,
+        coaching: _CoachingState,
+        upstream_send_lock: asyncio.Lock,
+    ) -> None:
+        while True:
+            await asyncio.sleep(1.0)
+            async with upstream_send_lock:
+                now = time.monotonic()
+                if not coaching.can_review(frames, now):
+                    continue
+                coaching.model_busy = True
+                coaching.last_review_at = now
+                coaching.review_digest = frames.latest_digest
+                coaching.review_frame_id = frames.latest_frame_id
+                coaching.review_stale = False
+                coaching.review_output_sent = False
+                coaching.reviewed_digests.append(frames.latest_digest)
+                # Completing this server-owned turn triggers Live output without
+                # a user question. Only the current bounded snapshot is included.
+                await session.send_client_content(
+                    turns=[
+                        types.Content(
+                            role="user",
+                            parts=[
+                                types.Part(text=AUTOMATIC_SCREEN_REVIEW),
+                                types.Part(
+                                    inline_data=types.Blob(
+                                        data=frames.latest_image, mime_type="image/jpeg"
+                                    )
+                                ),
+                            ],
+                        )
+                    ],
+                    turn_complete=True,
+                )
+
     async def _read_upstream(
         self,
         session: Any,
@@ -364,14 +568,28 @@ class GeminiLiveSessionService:
         upstream_send_lock: asyncio.Lock,
         peer: str,
         send_client: Any,
+        *,
+        coaching: _CoachingState | None = None,
     ) -> None:
         # receive() ends after one model turn; keep listening until disconnection.
         while True:
             received_message = False
             async for message in session.receive():
                 received_message = True
+                voice_activity = getattr(message, "voice_activity", None)
+                if coaching is not None and voice_activity is not None:
+                    activity = voice_activity.voice_activity_type
+                    if activity == types.VoiceActivityType.ACTIVITY_START:
+                        coaching.student_speaking = True
+                        coaching.user_turn()
+                    elif activity == types.VoiceActivityType.ACTIVITY_END:
+                        coaching.student_speaking = False
+                        coaching.last_user_activity_at = time.monotonic()
                 content = message.server_content
                 if content is not None:
+                    if coaching is not None and content.model_turn is not None:
+                        coaching.model_busy = True
+                        coaching.last_model_activity_at = time.monotonic()
                     event: dict[str, Any] = {
                         "type": "assistant",
                         "interrupted": bool(content.interrupted),
@@ -397,7 +615,26 @@ class GeminiLiveSessionService:
                         or event["text"]
                         or event["audio"]
                     ):
-                        await send_client(event)
+                        if coaching is None or not coaching.review_is_stale(frames):
+                            await send_client(event)
+                            if (
+                                coaching is not None
+                                and coaching.review_digest is not None
+                                and (event["text"] or event["audio"])
+                            ):
+                                coaching.review_output_sent = True
+                        elif coaching.review_output_sent:
+                            # Cancel queued speech from an obsolete automatic check.
+                            await send_client(
+                                {
+                                    "type": "assistant",
+                                    "interrupted": True,
+                                    "turn_complete": False,
+                                    "text": None,
+                                    "audio": [],
+                                }
+                            )
+                            coaching.review_output_sent = False
 
                 tool_call = message.tool_call
                 calls = list(getattr(tool_call, "function_calls", None) or [])
@@ -410,6 +647,8 @@ class GeminiLiveSessionService:
                         if function_call.id:
                             known_ids.add(function_call.id)
                 if calls:
+                    if coaching is not None:
+                        coaching.model_busy = True
                     responses = []
                     for call in calls:
                         response = await self._handle_function_call(
@@ -419,10 +658,16 @@ class GeminiLiveSessionService:
                             pending_annotations,
                             peer,
                             send_client,
+                            coaching=coaching,
                         )
                         responses.append(response)
                     async with upstream_send_lock:
                         await session.send_tool_response(function_responses=responses)
+                if coaching is not None and content is not None:
+                    if content.turn_complete or (
+                        content.waiting_for_input and not calls and not coaching.student_speaking
+                    ):
+                        coaching.finish_turn()
             if not received_message:
                 return
 
@@ -434,6 +679,8 @@ class GeminiLiveSessionService:
         pending_annotations: dict[str, asyncio.Future[dict[str, Any]]],
         peer: str,
         send_client: Any,
+        *,
+        coaching: _CoachingState | None = None,
     ) -> types.FunctionResponse:
         name = str(call.name or "")
         call_id = str(call.id or "")
@@ -441,10 +688,28 @@ class GeminiLiveSessionService:
         result: dict[str, Any]
 
         if name == "add_annotations":
-            frame_id = frames.latest_frame_id
-            if not frame_id:
+            frame_id = (
+                coaching.review_frame_id
+                if coaching is not None and coaching.review_digest is not None
+                else frames.latest_frame_id
+            )
+            if coaching is not None and coaching.review_is_stale(frames):
                 result = {
-                    "error": {"code": "no_frame", "message": "No recent screen frame is available."}
+                    "error": {
+                        "code": "stale_review",
+                        "message": (
+                            "The reviewed screen changed. Do not mark or repeat the old step."
+                        ),
+                    }
+                }
+            elif not frames.is_current():
+                result = {
+                    "error": {
+                        "code": "no_frame",
+                        "message": (
+                            "No current screen frame is available. Do not mark remembered work."
+                        ),
+                    }
                 }
             elif not call_id:
                 result = {
@@ -546,6 +811,15 @@ class GeminiLiveSessionService:
             }
 
         return types.FunctionResponse(id=call_id, name=name, response=result)
+
+
+def _has_audio_activity(data: bytes) -> bool:
+    """Bounded energy guard; this is not speech recognition or a recording."""
+    if len(data) < 2 or len(data) % 2:
+        return False
+    samples = len(data) // 2
+    energy = sum(value * value for (value,) in struct.iter_unpack("<h", data))
+    return energy > samples * PCM_ACTIVITY_THRESHOLD**2
 
 
 def _decode_base64(value: str, *, max_bytes: int) -> bytes:
