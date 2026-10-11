@@ -11,6 +11,7 @@ import {
   resetSampleData,
   syncClassesFromApi,
   claimLocalClassData,
+  setDemoContent,
   clearLocalClassData,
   hasLocalClassData
 } from "./classes.js";
@@ -29,6 +30,8 @@ import {
   signIn,
   signUp,
   signOut,
+  updateProfile,
+  changePassword,
   onAuthStateChange
 } from "./api.js";
 
@@ -136,6 +139,7 @@ const displayName = (user) => user?.display_name || user?.username || "";
 // account is removed the moment that account is no longer the one signed in.
 async function applyAuth(user) {
   currentUser = user;
+  setDemoContent(user?.is_demo);
   if (user) {
     claimLocalClassData(user.id);
     await syncClassesFromApi();
@@ -366,7 +370,7 @@ async function renderClasses() {
           <p class="desk-summary">${classes.length} ${classes.length === 1 ? "class" : "classes"} · ${totalUploads} ${totalUploads === 1 ? "upload" : "uploads"} · ${totalMaterials} study ${totalMaterials === 1 ? "set" : "sets"}</p>
         </div>
         <div class="page-actions">
-          <button id="restore-sample-data" class="btn btn-secondary" type="button">${icon("sparkles", { size: 18 })} Restore sample data</button>
+          ${currentUser.is_demo ? `<button id="restore-sample-data" class="btn btn-secondary" type="button">${icon("sparkles", { size: 18 })} Restore sample data</button>` : ""}
           <button id="new-class" class="btn btn-primary" type="button">${icon("plus", { size: 18 })} New class</button>
         </div>
       </div>
@@ -375,7 +379,16 @@ async function renderClasses() {
   `, { section: "classes" });
 
   const grid = document.querySelector("#class-grid");
-  grid.innerHTML = classes.map((klass) => `
+  if (!classes.length) {
+    grid.classList.add("is-empty");
+    grid.innerHTML = `
+      <div class="panel empty-state">
+        <span class="empty-icon">${icon("book", { size: 26 })}</span>
+        <strong>No classes yet</strong>
+        <span>Create your first class, then add notes, a syllabus, or lectures to study from.</span>
+        <button class="btn btn-primary" type="button" data-new-class>${icon("plus", { size: 18 })} Create your first class</button>
+      </div>`;
+  } else grid.innerHTML = classes.map((klass) => `
     <article class="class-card" style="--class-color: ${escapeHtml(klass.color || "#3f6577")}">
       <a href="#/classes/${encodeURIComponent(klass.id)}/library" class="class-card-main">
         <span class="class-icon" aria-hidden="true">${escapeHtml(klass.icon || "C")}</span>
@@ -407,7 +420,7 @@ async function renderClasses() {
   }
 
   document.querySelector("#new-class").addEventListener("click", addClass);
-  document.querySelector("#restore-sample-data").addEventListener("click", async () => {
+  document.querySelector("#restore-sample-data")?.addEventListener("click", async () => {
     const confirmed = await openDialog({
       title: "Restore sample data?",
       message: "Restore the built-in sample content. Your classes and uploaded files will stay in place.",
@@ -998,7 +1011,28 @@ function renderLogin({ mode = "signin" } = {}) {
   identifier.focus();
 }
 
-// The account page is for logged-in users only; it is where they log out.
+// Inline field messages shared by the account forms. Each field has a small
+// ".field-hint" under it; an error replaces the hint until the field is edited.
+function showFieldError(input, message) {
+  input.setAttribute("aria-invalid", "true");
+  const hint = input.closest(".field").querySelector(".field-hint");
+  hint.dataset.default ??= hint.textContent;
+  hint.textContent = message;
+  hint.classList.add("is-error");
+  input.focus();
+}
+
+function clearFieldError(input) {
+  input.removeAttribute("aria-invalid");
+  const hint = input.closest(".field").querySelector(".field-hint");
+  if (hint.dataset.default !== undefined) hint.textContent = hint.dataset.default;
+  hint.classList.remove("is-error");
+}
+
+const EMAIL_RULE = /^[^@\s]+@[^@\s]+\.[^@\s.]{2,}$/;
+
+// The account page is for logged-in users only. It is where they change their
+// details and password, and where they log out.
 function renderAccount() {
   const user = currentUser;
 
@@ -1007,25 +1041,145 @@ function renderAccount() {
       <div class="page-heading">
         <div>
           <h1>Account</h1>
-          <p class="muted">Your Jot profile.</p>
+          <p class="muted">Signed in as <strong>${escapeHtml(user.username)}</strong>${user.is_demo ? ' <span class="pill no-dot">Demo account</span>' : ""}</p>
         </div>
-      </div>
-      <div class="panel account-card">
-        <dl class="account-details">
-          <div><dt>Display name</dt><dd>${escapeHtml(user.display_name)}</dd></div>
-          <div><dt>Username</dt><dd>${escapeHtml(user.username)}</dd></div>
-          <div><dt>Email</dt><dd>${user.email ? escapeHtml(user.email) : '<span class="muted">Not provided</span>'}</dd></div>
-        </dl>
-        <div class="account-actions">
+        <div class="page-actions">
           <a class="btn btn-secondary" href="#/classes">${icon("book", { size: 18 })} Your classes</a>
           <button id="account-logout" class="btn btn-danger-ghost" type="button">${icon("logOut", { size: 18 })} Log out</button>
         </div>
       </div>
+
+      <div class="account-grid">
+        <form id="profile-form" class="panel account-section" novalidate>
+          <div>
+            <h2>Your details</h2>
+            <p class="muted">Change the username or email you log in with.</p>
+          </div>
+          <div class="field">
+            <label for="profile-username">Username</label>
+            <input id="profile-username" name="username" type="text" required autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32" value="${escapeHtml(user.username)}" />
+            <small class="field-hint">3 to 32 letters, numbers, dots, dashes, or underscores.</small>
+          </div>
+          <div class="field">
+            <label for="profile-email">Email <span class="muted">(optional)</span></label>
+            <input id="profile-email" name="email" type="email" autocomplete="email" value="${escapeHtml(user.email || "")}" />
+            <small class="field-hint">Clear this to remove your email.</small>
+          </div>
+          <p class="form-error" role="alert" hidden></p>
+          <button class="btn btn-primary" type="submit">Save changes</button>
+        </form>
+
+        <form id="password-form" class="panel account-section" novalidate>
+          <div>
+            <h2>Change password</h2>
+            <p class="muted">You'll stay logged in here. Your other devices will be logged out.</p>
+          </div>
+          <div class="field">
+            <label for="password-current">Current password</label>
+            <input id="password-current" name="current" type="password" required autocomplete="current-password" />
+            <small class="field-hint"></small>
+          </div>
+          <div class="field">
+            <label for="password-new">New password</label>
+            <input id="password-new" name="next" type="password" required autocomplete="new-password" />
+            <small class="field-hint">At least 8 characters.</small>
+          </div>
+          <div class="field">
+            <label for="password-confirm">Confirm new password</label>
+            <input id="password-confirm" name="confirm" type="password" required autocomplete="new-password" />
+            <small class="field-hint"></small>
+          </div>
+          <p class="form-error" role="alert" hidden></p>
+          <button class="btn btn-primary" type="submit">Change password</button>
+        </form>
+      </div>
+
       <p class="field-hint">Your classes, uploads, and study sets are saved to this account.</p>
     </section>
   `, { section: "account" });
 
   document.querySelector("#account-logout").addEventListener("click", logOut);
+
+  for (const input of document.querySelectorAll("#profile-form input, #password-form input")) {
+    input.addEventListener("input", () => clearFieldError(input));
+  }
+
+  // --- Username and email -------------------------------------------------
+  const profileForm = document.querySelector("#profile-form");
+  const profileError = profileForm.querySelector(".form-error");
+  const profileSave = profileForm.querySelector('button[type="submit"]');
+
+  profileForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    profileError.hidden = true;
+    profileForm.querySelectorAll("input").forEach(clearFieldError);
+    const { username, email } = profileForm.elements;
+    const nextName = username.value.trim();
+    const nextEmail = email.value.trim();
+
+    if (!USERNAME_RULE.test(nextName)) {
+      return showFieldError(username, "Usernames are 3 to 32 characters: letters, numbers, dots, dashes, or underscores.");
+    }
+    if (nextEmail && !EMAIL_RULE.test(nextEmail)) return showFieldError(email, "Enter a valid email address.");
+
+    const changes = {};
+    if (nextName !== user.username) changes.username = nextName;
+    if (nextEmail !== (user.email || "")) changes.email = nextEmail || null;
+    if (!Object.keys(changes).length) {
+      toast("Nothing to save. Your details are already up to date.");
+      return;
+    }
+
+    profileSave.disabled = true;
+    profileSave.textContent = "Saving...";
+    try {
+      currentUser = await updateProfile(changes);
+      toast("Your details were updated.");
+      renderAccount();
+    } catch (error) {
+      profileSave.disabled = false;
+      profileSave.textContent = "Save changes";
+      if (error.code === "username_taken") return showFieldError(username, "That username is taken.");
+      if (error.code === "email_taken") return showFieldError(email, "That email is already used by another account.");
+      profileError.textContent = error.message || "Could not save your details. Please try again.";
+      profileError.hidden = false;
+    }
+  });
+
+  // --- Password -------------------------------------------------------------
+  const passwordForm = document.querySelector("#password-form");
+  const passwordError = passwordForm.querySelector(".form-error");
+  const passwordSave = passwordForm.querySelector('button[type="submit"]');
+
+  passwordForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    passwordError.hidden = true;
+    passwordForm.querySelectorAll("input").forEach(clearFieldError);
+    const { current, next, confirm } = passwordForm.elements;
+
+    if (!current.value) return showFieldError(current, "Enter your current password.");
+    if (next.value.length < 8) return showFieldError(next, "Use at least 8 characters.");
+    if (next.value === current.value) return showFieldError(next, "Choose a password that is different from your current one.");
+    if (confirm.value !== next.value) return showFieldError(confirm, "The passwords don't match.");
+
+    passwordSave.disabled = true;
+    passwordSave.textContent = "Changing...";
+    try {
+      await changePassword(current.value, next.value);
+      passwordForm.reset();
+      toast("Password changed. Your other devices were logged out.");
+    } catch (error) {
+      if (error.code === "incorrect_password") {
+        showFieldError(current, "That isn't your current password.");
+      } else {
+        passwordError.textContent = error.message || "Could not change your password. Please try again.";
+        passwordError.hidden = false;
+      }
+    } finally {
+      passwordSave.disabled = false;
+      passwordSave.textContent = "Change password";
+    }
+  });
 }
 
 // Who may open what. The server enforces the same rules; these only keep the UI honest.

@@ -36,6 +36,21 @@ export async function signUp({ username, password, email = "", displayName = "" 
   return payload.user;
 }
 
+export async function updateProfile(changes) {
+  const payload = await apiFetch("/api/auth/me", {
+    method: "PATCH",
+    body: JSON.stringify(changes)
+  });
+  return payload.user;
+}
+
+export async function changePassword(currentPassword, newPassword) {
+  await apiFetch("/api/auth/password", {
+    method: "POST",
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
+  });
+}
+
 export async function signOut() {
   await apiFetch("/api/auth/logout", { method: "POST" });
 }

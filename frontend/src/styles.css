@@ -3609,3 +3609,22 @@ p {
   border-color: var(--danger);
   box-shadow: inset 0 0 0 1px var(--danger);
 }
+
+/* Account details and password */
+
+.account-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.account-section {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-5);
+}
+
+.class-grid.is-empty {
+  grid-template-columns: minmax(0, 1fr);
+}

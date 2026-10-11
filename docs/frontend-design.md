@@ -125,7 +125,7 @@ Guests and logged-in users never share a screen or a cache. The backend enforces
 | --- | --- | --- |
 | `#/home` | Everyone | Welcome page. Guests see Log in and Continue as guest; logged-in users see Welcome back and Go to your classes. |
 | `#/login`, `#/signup` | Guests | Standalone Log in and Join Jot screens with no app header. They always ask for credentials, show "Checking your details..." while the server answers, and show inline errors for wrong or missing details. Only a successful server response logs anyone in. A visitor who is already logged in sees who they are logged in as, with Go to your classes and Log out, instead of being redirected. |
-| `#/account` | Logged-in only | Profile details and Log out. A guest is sent to `#/login`. |
+| `#/account` | Logged-in only | Change username and email, change password (current password required; other devices are logged out), and Log out. A guest is sent to `#/login`. |
 | `#/classes`, `#/classes/:id/:tab` | Logged-in only | Class library, study, and class tutor. A guest is sent to `#/login`. |
 | `#/study` | Guests only | Local quick study. A logged-in visitor is sent to their classes. |
 | `#/tutor` | Everyone | Quick tutor without class materials. |
@@ -134,6 +134,8 @@ The header's top-right control depends on who is looking:
 
 - **Guest:** a **Join Jot** menu with only *Log in* and *Create account*.
 - **Logged in:** the account name with a menu of *Account*, *Your classes*, and *Log out*.
+
+Only the demo account (`is_demo` from the server) starts with the built-in sample classes and study sets and sees *Restore sample data*. Every other account starts with an empty class list and a *Create your first class* empty state; any sample classes cached by earlier builds are removed from their view.
 
 Log in accepts a username or an email. Anything cached for an account (classes, uploaded files) is cleared on log out, when the server ends the session, and when a different account logs in on the same browser.
 

@@ -91,12 +91,32 @@ function addAlgebraExamples(classes) {
   return nextClasses;
 }
 
+// Only the demo account starts with the built-in sample classes and study sets.
+let demoContent = false;
+
+export function setDemoContent(enabled) {
+  demoContent = Boolean(enabled);
+}
+
+// Everyone else keeps just their own classes. Sample classes that were never
+// synced, and sample files and study sets inside the rest, are removed.
+function withoutDemoContent(classes) {
+  const starterIds = new Set(starterClasses.map((item) => item.id));
+  return classes
+    .filter((klass) => !(starterIds.has(klass.id) && !klass.backendId))
+    .map((klass) => ({
+      ...klass,
+      uploads: klass.uploads.filter((upload) => !upload.isSample),
+      materials: klass.materials.filter((material) => !material.isSample)
+    }));
+}
+
 function saveClasses(classes) {
   localStorage.setItem(STORE_KEY, JSON.stringify(classes));
 }
 
 function seedClasses() {
-  const seeded = addAlgebraExamples(cloneData(starterClasses));
+  const seeded = demoContent ? addAlgebraExamples(cloneData(starterClasses)) : [];
   saveClasses(seeded);
   localStorage.setItem(VERSION_KEY, String(SAMPLE_VERSION));
   localStorage.setItem(SAMPLE_SEED_KEY, "1");
@@ -112,9 +132,15 @@ function readClasses() {
     if (!Array.isArray(parsed)) return seedClasses();
 
     const version = Number(localStorage.getItem(VERSION_KEY) || 0);
-    let classes = parsed.map((klass) => version < SAMPLE_VERSION
+    let classes = parsed.map((klass) => demoContent && version < SAMPLE_VERSION
       ? migrateSampleClass(klass)
       : normalizeClass(klass));
+
+    if (!demoContent) {
+      const own = withoutDemoContent(classes);
+      if (JSON.stringify(own) !== JSON.stringify(classes)) saveClasses(own);
+      return own;
+    }
 
     if (version < SAMPLE_VERSION || localStorage.getItem(SAMPLE_SEED_KEY) !== "1") {
       classes = addAlgebraExamples(classes);
@@ -265,6 +291,7 @@ export async function deleteClass(classId) {
 }
 
 export function resetSampleData() {
+  if (!demoContent) return readClasses();
   const current = readClasses();
   const samples = addAlgebraExamples(cloneData(starterClasses));
   const sampleIds = new Set(samples.map((item) => item.id));
