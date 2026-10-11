@@ -1,3 +1,5 @@
+const MAX_FRAME_DIMENSION = 1280;
+
 export class ScreenCaptureController {
   constructor({ video, onEnded, onFrame } = {}) {
     this.video = video;
@@ -46,10 +48,13 @@ export class ScreenCaptureController {
   }
 
   sampleFrame() {
-    if (!this.video.videoWidth || !this.video.videoHeight || !this.context) return;
+    if (!this.stream || !this.video.videoWidth || !this.video.videoHeight || !this.context) return;
 
-    this.canvas.width = this.video.videoWidth;
-    this.canvas.height = this.video.videoHeight;
+    const sourceWidth = this.video.videoWidth;
+    const sourceHeight = this.video.videoHeight;
+    const scale = Math.min(1, MAX_FRAME_DIMENSION / Math.max(sourceWidth, sourceHeight));
+    this.canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+    this.canvas.height = Math.max(1, Math.round(sourceHeight * scale));
     this.context.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
 
     const frame = {
@@ -63,6 +68,8 @@ export class ScreenCaptureController {
     this.frames.set(frame.frame_id, {
       width: frame.width,
       height: frame.height,
+      sourceWidth,
+      sourceHeight,
       capturedAt: frame.captured_at
     });
 
@@ -93,6 +100,9 @@ export class ScreenCaptureController {
     this.trackEndedHandler = null;
     this.stream = null;
     this.frames.clear();
+    // Releasing the canvas removes the final screen image from memory at stop.
+    this.canvas.width = 0;
+    this.canvas.height = 0;
     this.video.srcObject = null;
   }
 }

@@ -1,10 +1,9 @@
 import { icon } from "./icons.js";
 import { escapeHtml, formatBytes, openDialog, toast } from "./ui.js";
 import { saveUploadedFile } from "./file-store.js";
-import { getBackendUploadId, waitForUpload } from "./course-sync.js";
+import { getBackendClassId, getBackendUploadId, waitForUpload } from "./course-sync.js";
 import { updateClass } from "./classes.js";
 import {
-  getAccessToken,
   getUploadsApi,
   uploadFileApi,
   uploadTextApi,
@@ -97,19 +96,22 @@ export function createLocalUpload(file) {
 }
 
 export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRemoved }) {
-  // Sync remote uploads from backend if authenticated
+  // SQLite APIs use the local workspace owner and do not require a bearer token.
   let syllabusData = null;
-  const token = await getAccessToken();
-  if (token) {
+  const backendClassId = getBackendClassId(klass);
+  if (backendClassId) {
     try {
       const [remoteUploads, remoteSyllabus] = await Promise.allSettled([
-        getUploadsApi(klass.id),
-        getSyllabusApi(klass.id)
+        getUploadsApi(backendClassId),
+        getSyllabusApi(backendClassId)
       ]);
 
       if (remoteUploads.status === "fulfilled" && Array.isArray(remoteUploads.value)) {
+        const localByBackendId = new Map(klass.uploads.map((item) => [getBackendUploadId(item), item]));
         const remoteList = remoteUploads.value.map((item) => ({
-          id: item.id,
+          ...localByBackendId.get(item.id),
+          id: localByBackendId.get(item.id)?.id || item.id,
+          backendId: item.id,
           name: item.title || item.original_filename || "Document",
           kind: fromApiKind(item.kind),
           size: item.file_size_bytes || 0,
@@ -118,9 +120,9 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
           createdAt: item.created_at || new Date().toISOString(),
           isRemote: true
         }));
-        if (remoteList.length > 0) {
-          klass.uploads = remoteList;
-        }
+        const mappedIds = new Set(remoteList.map((item) => item.id));
+        klass.uploads = [...remoteList, ...klass.uploads.filter((item) => !mappedIds.has(item.id))];
+        await updateClass(klass.id, { uploads: klass.uploads });
       }
 
       if (remoteSyllabus.status === "fulfilled" && remoteSyllabus.value?.topics?.length) {
@@ -199,12 +201,12 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
           </button>
         </div>
       </div>
-      ${!token ? `
+      ${!backendClassId ? `
         <div class="account-status-banner guest-banner">
           ${icon("alert", { size: 20 })}
           <div>
-            <strong>Guest Mode · Files Stored Locally Only</strong>
-            <span>Uploaded files, notes, and transcripts are stored only in this browser and will not be saved to the backend database. If you clear cache or reload, these files will be lost. <a class="auth-link" href="#/auth">Sign in or create an account</a> to keep your course library permanently saved in the SQLite database.</span>
+            <strong>Files waiting to sync</strong>
+            <span>These files are saved in this browser. Starting class tutoring or generating a study set will synchronize the original files with your class library.</span>
           </div>
         </div>
       ` : `
@@ -212,7 +214,7 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
           ${icon("check", { size: 20 })}
           <div>
             <strong>SQLite Database Sync Active</strong>
-            <span>All uploads and extracted transcripts are securely saved to the backend SQLite database and private storage.</span>
+            <span>New uploads are saved to your class library. Any older browser-only files synchronize when you start class tutoring or generate a study set.</span>
           </div>
         </div>
       `}
@@ -289,16 +291,15 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
 
     if (!candidates.length) return;
 
-    const token = await getAccessToken();
     const nextUploads = [];
 
     for (const file of candidates) {
       const uiKind = guessKind(file);
       const apiKind = toApiKind(uiKind, file.name);
 
-      if (token) {
+      if (backendClassId) {
         try {
-          const res = await uploadFileApi(klass.id, file, apiKind, file.name);
+          const res = await uploadFileApi(backendClassId, file, apiKind, file.name);
           const uploadEntry = {
             id: res.id,
             name: file.name,
@@ -361,18 +362,17 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
     const text = await openDialog({
       title: "Paste notes or text",
       message: "Add lecture notes, reading excerpts, or a syllabus outline.",
-      input: { label: "Pasted text content", placeholder: "Paste your notes here..." },
+      input: { label: "Pasted text content", placeholder: "Paste your notes here...", multiline: true, maxLength: 1_000_000 },
       confirmLabel: "Upload text"
     });
 
     if (!text || !text.trim()) return;
 
-    const token = await getAccessToken();
     const title = text.trim().slice(0, 40) + "...";
 
-    if (token) {
+    if (backendClassId) {
       try {
-        const res = await uploadTextApi(klass.id, text, "notes", title);
+        const res = await uploadTextApi(backendClassId, text, "notes", title);
         const uploadEntry = {
           id: res.id,
           name: title,

@@ -12,6 +12,7 @@ import {
   syncClassesFromApi
 } from "./classes.js";
 import { LiveSessionController } from "./live-session.js";
+import { getBackendClassId, prepareTutorClass } from "./course-sync.js";
 import { icon } from "./icons.js";
 import { renderLibraryTab } from "./library.js";
 import { createRouter } from "./router.js";
@@ -271,8 +272,12 @@ async function renderClasses() {
       const klass = getClassById(renameId);
       const name = await openDialog({ title: "Rename class", input: { label: "Class name", value: klass.name } });
       if (name) {
-        await updateClass(renameId, { name, icon: name.charAt(0).toUpperCase() });
-        renderClasses();
+        try {
+          await updateClass(renameId, { name, icon: name.charAt(0).toUpperCase() });
+          renderClasses();
+        } catch (error) {
+          toast(`Could not rename this class: ${error.message}`, { tone: "error" });
+        }
       }
     }
 
@@ -285,10 +290,14 @@ async function renderClasses() {
         danger: true
       });
       if (confirmed) {
-        await Promise.allSettled([deleteUploadedFiles((klass.uploads || []).map((u) => u.id))]);
-        await deleteClass(deleteId);
-        toast(`Deleted ${klass.name}.`);
-        renderClasses();
+        try {
+          await deleteClass(deleteId);
+          await Promise.allSettled([deleteUploadedFiles((klass.uploads || []).map((u) => u.id))]);
+          toast(`Deleted ${klass.name}.`);
+          renderClasses();
+        } catch (error) {
+          toast(`Could not delete this class: ${error.message}`, { tone: "error" });
+        }
       }
     }
   });
@@ -473,8 +482,9 @@ function renderTutor(klass = null) {
   let disposed = false;
   let sessionRequestId = 0;
   let audioController = null;
+  let classPreparation = null;
   const live = new LiveSessionController({
-    classId: klass?.id || null,
+    classId: klass ? getBackendClassId(klass) : null,
     onMessage: (message) => appendMessage(message.role, message.text),
     onStatusChange: (connection, errorMessage) => {
       if (disposed) return;
@@ -536,6 +546,8 @@ function renderTutor(klass = null) {
 
   function stopSession() {
     sessionRequestId += 1;
+    classPreparation?.abort();
+    classPreparation = null;
     capture.stop();
     void audioController.close().catch(() => {});
     live.close();
@@ -564,7 +576,15 @@ function renderTutor(klass = null) {
       if (disposed || requestId !== sessionRequestId || !stream) return;
       emptyStage.hidden = true;
       setStatus({ session: "connecting", screen: "sharing" });
-      if (state.connection !== "connected") await live.connect();
+      if (state.connection !== "connected") {
+        if (klass) {
+          classPreparation = new AbortController();
+          live.classId = await prepareTutorClass(klass, { signal: classPreparation.signal });
+          if (disposed || requestId !== sessionRequestId) return;
+          classPreparation = null;
+        }
+        await live.connect();
+      }
       if (disposed || requestId !== sessionRequestId) return;
       setStatus({ session: "active" });
     } catch (error) {

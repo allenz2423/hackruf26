@@ -823,6 +823,7 @@ async def _process_upload_job(application: Any, upload_id: UUID) -> None:
     storage: LocalPrivateStorage | None = getattr(application.state, "private_storage", None)
     if database is None or content_service is None or storage is None:
         return
+    row = None
     try:
         row = await database.fetchrow(
             "UPDATE course_notes SET processing_progress = 10, "
@@ -858,12 +859,15 @@ async def _process_upload_job(application: Any, upload_id: UUID) -> None:
             upload_id,
             type(exc).__name__,
         )
+        if row is None:
+            return
         try:
             await database.execute(
                 "UPDATE course_notes SET status = 'failed', failure_code = 'processing_failed', "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-                "WHERE id = ?1 AND status = 'processing'",
+                "WHERE id = ?1 AND status = 'processing' AND updated_at = ?2",
                 upload_id,
+                row["updated_at"],
             )
         except Exception:
             logger.error("upload_failure_state_update_failed upload_id=%s", upload_id)
@@ -1024,6 +1028,7 @@ async def _reprocess_upload_job(application: Any, upload_id: UUID, use_extracted
     storage: LocalPrivateStorage | None = getattr(application.state, "private_storage", None)
     if database is None or content_service is None or storage is None:
         return
+    row = None
     try:
         row = await database.fetchrow(
             "UPDATE course_notes SET processing_progress = 10, "
@@ -1063,12 +1068,15 @@ async def _reprocess_upload_job(application: Any, upload_id: UUID, use_extracted
             upload_id,
             type(exc).__name__,
         )
+        if row is None:
+            return
         try:
             await database.execute(
                 "UPDATE course_notes SET status = 'failed', failure_code = 'processing_failed', "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-                "WHERE id = ?1 AND status = 'processing'",
+                "WHERE id = ?1 AND status = 'processing' AND updated_at = ?2",
                 upload_id,
+                row["updated_at"],
             )
         except Exception:
             logger.error("upload_failure_state_update_failed upload_id=%s", upload_id)
@@ -1203,7 +1211,7 @@ async def _create_material_job(
         material = await database.fetchrow(
             "SELECT m.id, m.class_id, m.kind, m.scope, m.options, c.name AS class_name "
             "FROM study_materials m JOIN course_classes c ON c.id = m.class_id "
-            "WHERE m.id = ?1",
+            "WHERE m.id = ?1 AND m.status = 'generating'",
             material_id,
         )
         if material is None:
@@ -1225,8 +1233,9 @@ async def _create_material_job(
         )
         await database.execute(
             "UPDATE study_materials SET title = ?2, content = ?3, status = 'ready', "
-        "failure_code = NULL, generated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
-        "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
+            "failure_code = NULL, generated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+            "WHERE id = ?1 AND status = 'generating'",
             material_id,
             title,
             json.dumps(content),
@@ -1360,8 +1369,9 @@ async def delete_study_material(material_id: UUID, request: Request) -> Response
 
 
 def _normalize_answer(value: str) -> str:
+    """Normalize text without erasing signs, decimal points, or math operators."""
     normalized = unicodedata.normalize("NFKC", value).casefold().strip()
-    return re.sub(r"[^\w]+", "", normalized, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", normalized)
 
 
 @router.post("/api/study-materials/{material_id}/attempts")
@@ -1398,8 +1408,10 @@ async def submit_attempt(
         if submitted is None:
             correct = False
         elif question["kind"] == "short_answer":
-            accepted = question.get("accepted_answers") or [answer]
+            accepted = [answer, *(question.get("accepted_answers") or [])]
             correct = _normalize_answer(submitted) in {_normalize_answer(str(value)) for value in accepted}
+        elif question["kind"] == "multiple_choice":
+            correct = submitted.strip() == answer
         else:
             correct = _normalize_answer(submitted) == _normalize_answer(answer)
         correct_count += int(correct)

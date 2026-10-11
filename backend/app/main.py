@@ -22,7 +22,7 @@ from app.config import Settings, get_settings
 from app.middleware.request_context import RequestContextMiddleware
 from app.middleware.request_size import RequestSizeLimitMiddleware
 from app.security.rate_limit import InMemoryRateLimiter
-from app.services.database import create_database
+from app.services.database import create_database, recover_interrupted_jobs
 from app.services.gemini_client import create_genai_client
 from app.services.gemini_content import GeminiContentService
 from app.services.lean_proofs import LeanProofService, LeanRuntimeUnavailable
@@ -79,6 +79,7 @@ def create_app(
             application.state.lean_proof_service = None
 
         application.state.database = await create_database(settings)
+        await recover_interrupted_jobs(application.state.database)
         application.state.private_storage = LocalPrivateStorage(settings)
         application.state.live_session_ticket_store = LiveSessionTicketStore()
 

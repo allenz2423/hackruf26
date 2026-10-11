@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     lean_tool_enabled: bool = True
     lean_rate_limit: int = 3
     lean_rate_window_seconds: int = 60
-    lean_timeout_seconds: float = 12.0
+    lean_timeout_seconds: float = 30.0
     lean_request_max_bytes: int = 65_536
     lean_project_dir: str = "backend/lean"
     lean_lake_executable: str = "lake"
