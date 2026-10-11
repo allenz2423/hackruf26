@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -128,6 +129,56 @@ class AccountBoundaryTests(unittest.TestCase):
                 response = getattr(guest, method)(path, **({"json": {"name": "x"}} if method == "post" else {}))
                 self.assertEqual(response.status_code, 401)
                 self.assertEqual(response.json()["code"], "authentication_required")
+
+    def test_no_class_library_route_answers_a_guest(self) -> None:
+        """Every /api route outside the open ones must turn guests away, including new ones."""
+        open_prefixes = ("/api/auth/", "/api/live", "/api/tools/")
+        guest = self.other_client()
+        some_id = "11111111-1111-4111-8111-111111111111"
+
+        # Original-file downloads use short-lived signed links minted by a logged-in endpoint,
+        # so they need no session. A guest still cannot use a missing or forged link.
+        signed_link = "/api/uploads/{upload_id}/file"
+        forged = guest.get(
+            signed_link.format(upload_id=some_id), params={"expires": 1, "signature": "forged"}
+        )
+        self.assertEqual(forged.status_code, 403)
+        self.assertEqual(guest.get(signed_link.format(upload_id=some_id)).status_code, 400)
+
+        checked = []
+        for path, operations in self.client.app.openapi()["paths"].items():
+            if not path.startswith("/api/") or path.startswith(open_prefixes) or path == signed_link:
+                continue
+            for method, spec in operations.items():
+                # Fill in each parameter with a value the API accepts, so a request is only
+                # stopped by the login check and not by input validation.
+                url, query = path, {}
+                for parameter in spec.get("parameters", []):
+                    schema = parameter.get("schema", {})
+                    if "enum" in schema:
+                        value = schema["enum"][0]
+                    elif schema.get("type") == "integer":
+                        value = 1
+                    else:
+                        value = some_id
+                    if parameter["in"] == "path":
+                        url = url.replace("{" + parameter["name"] + "}", str(value))
+                    elif parameter.get("required"):
+                        query[parameter["name"]] = value
+
+                has_body = method.upper() in {"POST", "PUT", "PATCH"}
+                response = guest.request(
+                    method.upper(), url, params=query, json={} if has_body else None
+                )
+                # A malformed body may be rejected as invalid before the login check runs; what
+                # must never happen is a guest getting data or a lookup result.
+                allowed = {401, 400, 413, 422} if has_body else {401}
+                self.assertIn(
+                    response.status_code, allowed, f"{method.upper()} {path} answered a guest"
+                )
+                checked.append(f"{method.upper()} {path}")
+
+        self.assertGreater(len(checked), 10, checked)
 
     def test_users_only_see_their_own_classes(self) -> None:
         ada, grace = self.other_client(), self.other_client()

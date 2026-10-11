@@ -29,6 +29,7 @@ from app.api.upload_documents import (
     download_upload_document,
 )
 from app.config import Settings
+from app.services.auth import SESSION_COOKIE, create_session, create_user
 from app.services.database import create_database, recover_interrupted_jobs
 from app.services.gemini_content import ContentGenerationFailure, GeminiContentService
 from app.services.study_files import (
@@ -234,12 +235,14 @@ class SavedDocumentTests(unittest.IsolatedAsyncioTestCase):
         self.settings = settings()
         self.db = await create_database(self.settings)
         self.addAsyncCleanup(self.db.close)
+        self.user = await create_user(self.db, username="doc_student", password="fixture-password")
+        self.token, _ = await create_session(self.db, self.user["id"], 1)
         self.class_id, self.upload_id, self.material_id = uuid4(), uuid4(), uuid4()
         self.original = "Glucose is a monosaccharide. Original data = 170.5 mg."
         await self.db.execute(
             "INSERT INTO course_classes (id, owner_id, name) VALUES (?1, ?2, 'BIO 170')",
             self.class_id,
-            self.settings.local_owner_id,
+            self.user["id"],
         )
         await self.db.execute(
             "INSERT INTO course_notes (id, class_id, kind, title, source_type, "
@@ -264,14 +267,17 @@ class SavedDocumentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.files = {"pdf": b"%PDF-test-persistent-bytes", "latex": b"saved latex"}
 
-    def request(self) -> Request:
+    def request(self, token: str | None = None) -> Request:
         return Request(
             {
                 "type": "http",
                 "method": "GET",
                 "path": "/api",
                 "scheme": "http",
-                "headers": [(b"origin", b"http://localhost:5173")],
+                "headers": [
+                    (b"origin", b"http://localhost:5173"),
+                    (b"cookie", f"{SESSION_COOKIE}={token or self.token}".encode()),
+                ],
                 "client": ("127.0.0.1", 12345),
                 "server": ("localhost", 8000),
                 "app": self.application,
@@ -320,14 +326,10 @@ class SavedDocumentTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ApiError) as not_ready:
             await download_study_file(self.material_id, "pdf", self.request())
         self.assertEqual(not_ready.exception.status_code, 409)
-        self.application.state.settings = Settings(
-            _env_file=None,
-            sqlite_path=":memory:",
-            local_owner_id=uuid4(),
-            file_url_signing_secret="test-signing-secret-with-at-least-32-characters",
-        )
+        other = await create_user(self.db, username="other_student", password="fixture-password")
+        other_token, _ = await create_session(self.db, other["id"], 1)
         with self.assertRaises(ApiError) as wrong_owner:
-            await download_study_file(self.material_id, "pdf", self.request())
+            await download_study_file(self.material_id, "pdf", self.request(other_token))
         self.assertEqual(wrong_owner.exception.status_code, 404)
 
     async def test_companion_preserves_original_and_caches_detail_variants(self) -> None:
