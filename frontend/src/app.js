@@ -1,4 +1,5 @@
 import "./styles.css";
+import jotMascot from "./assets/jot-mascot.png";
 import { AnnotationController } from "./annotations.js";
 import { AudioController } from "./audio.js";
 import {
@@ -94,8 +95,8 @@ function shell(content, { section = "classes" } = {}) {
     <a class="skip-link" href="#main-content">Skip to content</a>
     <header class="app-header">
       <a class="brand" href="${brandHref}">
-        <span class="brand-mark">${icon("monitor", { size: 18 })}</span>
-        Screen Tutor
+        <span class="brand-mark" aria-hidden="true"><img src="${jotMascot}" alt="" /></span>
+        Jot
       </a>
       <nav class="primary-nav" aria-label="Primary">
         ${isGuest ? `
@@ -355,7 +356,7 @@ function renderTutor(klass = null) {
             <button id="end-session" class="btn btn-danger-ghost" type="button" disabled aria-label="End session" title="End session">${icon("stop", { size: 18 })}<span class="btn-label">End</span></button>
           </div>
         </div>
-        <p class="tutor-privacy-note">${icon("monitor", { size: 16 })}<span>Screen frames and enabled microphone audio pass through Screen Tutor's server for tutoring. They are not saved.</span></p>
+        <p class="tutor-privacy-note">${icon("monitor", { size: 16 })}<span>Screen frames and enabled microphone audio pass through Jot's server for tutoring. They are not saved.</span></p>
         <div class="screen-stage">
           <video id="screen-preview" autoplay muted playsinline aria-label="Shared screen preview"></video>
           <svg id="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg>
@@ -541,7 +542,7 @@ async function renderAuth() {
           ${icon("alert", { size: 20 })}
           <div>
             <strong>Guest Mode Active · Files Are Not Saved to Database</strong>
-            <span>You are currently using Screen Tutor as a guest. Any uploaded notes, slides, or study sets are stored <strong>only in this browser's temporary storage</strong> and will not be saved to the SQLite database. Sign in or create an account to save your files permanently to the database.</span>
+            <span>You are currently using Jot as a guest. Any uploaded notes, slides, or study sets are stored <strong>only in this browser's temporary storage</strong> and will not be saved to the SQLite database. Sign in or create an account to save your files permanently to the database.</span>
           </div>
         </div>
       `}
