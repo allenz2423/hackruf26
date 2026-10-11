@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.auth import router as auth_router
 from app.api.class_library import router as class_library_router
 from app.api.errors import ApiError
 from app.api.live import router as live_router
@@ -55,6 +56,10 @@ def create_app(
         application.state.lean_rate_limiter = InMemoryRateLimiter(
             settings.lean_rate_limit,
             settings.lean_rate_window_seconds,
+        )
+        application.state.auth_rate_limiter = InMemoryRateLimiter(
+            settings.auth_rate_limit,
+            settings.auth_rate_window_seconds,
         )
         application.state.upload_rate_limiter = InMemoryRateLimiter(
             settings.upload_rate_limit,
@@ -121,6 +126,7 @@ def create_app(
         lifespan=lifespan,
     )
     application.include_router(router)
+    application.include_router(auth_router)
     application.include_router(live_router)
     application.include_router(class_library_router)
 

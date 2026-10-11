@@ -9,7 +9,10 @@ import {
   updateClass,
   deleteClass,
   resetSampleData,
-  syncClassesFromApi
+  syncClassesFromApi,
+  claimLocalClassData,
+  clearLocalClassData,
+  hasLocalClassData
 } from "./classes.js";
 import { LiveSessionController } from "./live-session.js";
 import { getBackendClassId, prepareTutorClass } from "./course-sync.js";
@@ -19,16 +22,14 @@ import { createRouter } from "./router.js";
 import { ScreenCaptureController } from "./screen-capture.js";
 import { renderStudyTab } from "./study.js";
 import { renderGuestStudy } from "./guest-study.js";
-import { deleteUploadedFile, deleteUploadedFiles } from "./file-store.js";
+import { clearUploadedFiles, deleteUploadedFile, deleteUploadedFiles } from "./file-store.js";
 import { escapeHtml, openDialog, toast } from "./ui.js";
 import {
   getCurrentUser,
-  getAccessToken,
-  signInWithEmail,
-  signUpWithEmail,
+  signIn,
+  signUp,
   signOut,
-  onAuthStateChange,
-  checkBackendHealth
+  onAuthStateChange
 } from "./api.js";
 
 const app = document.querySelector("#app");
@@ -129,9 +130,148 @@ function syncTutorControls() {
   if (sendButton) sendButton.disabled = state.connection !== "connected";
 }
 
+const displayName = (user) => user?.display_name || user?.username || "";
+
+// Make the browser reflect exactly who is logged in. Anything cached for an
+// account is removed the moment that account is no longer the one signed in.
+async function applyAuth(user) {
+  currentUser = user;
+  if (user) {
+    claimLocalClassData(user.id);
+    await syncClassesFromApi();
+  } else if (hasLocalClassData()) {
+    clearLocalClassData();
+    // Files in browser storage are cleaned up too, but never wait on it for long.
+    await Promise.race([
+      clearUploadedFiles().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 1500))
+    ]);
+  }
+}
+
+function redirect(hash, message) {
+  if (message) toast(message);
+  if (window.location.hash === hash) {
+    router.render();
+  } else {
+    window.location.hash = hash;
+  }
+}
+
+async function logOut() {
+  try {
+    await signOut();
+  } catch (error) {
+    toast(error.message || "Could not log out. Please try again.", { tone: "error" });
+    return;
+  }
+  // The account is gone from the page right away; cleanup of browser-stored
+  // files continues in the background and can never keep you on a signed-in page.
+  const cleanup = applyAuth(null);
+  toast("You're logged out.");
+  redirect("#/home");
+  await cleanup;
+}
+
+function accountMenuMarkup() {
+  const chevron = icon("chevronDown", { size: 16 });
+
+  if (!currentUser) {
+    return `
+      <div class="account-menu" data-account-menu>
+        <button class="btn btn-secondary account-trigger" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu-list">
+          Join Jot ${chevron}
+        </button>
+        <div class="account-menu-list" id="account-menu-list" role="menu" aria-label="Join Jot" hidden>
+          <a role="menuitem" href="#/login">${icon("user", { size: 16 })} Log in</a>
+          <a role="menuitem" href="#/signup">${icon("plus", { size: 16 })} Create account</a>
+        </div>
+      </div>
+    `;
+  }
+
+  const name = displayName(currentUser);
+  return `
+    <div class="account-menu" data-account-menu>
+      <button class="btn btn-secondary account-trigger" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu-list">
+        <span class="account-initial" aria-hidden="true">${escapeHtml(name.charAt(0).toUpperCase())}</span>
+        <span class="account-name">${escapeHtml(name)}</span>
+        ${chevron}
+      </button>
+      <div class="account-menu-list" id="account-menu-list" role="menu" aria-label="Account" hidden>
+        <a role="menuitem" href="#/account">${icon("user", { size: 16 })} Account</a>
+        <a role="menuitem" href="#/classes">${icon("book", { size: 16 })} Your classes</a>
+        <button role="menuitem" type="button" data-logout>${icon("logOut", { size: 16 })} Log out</button>
+      </div>
+    </div>
+  `;
+}
+
+let accountMenuAbort = null;
+
+function wireAccountMenu() {
+  accountMenuAbort?.abort();
+  const menu = document.querySelector("[data-account-menu]");
+  if (!menu) return;
+
+  accountMenuAbort = new AbortController();
+  const { signal } = accountMenuAbort;
+  const trigger = menu.querySelector(".account-trigger");
+  const list = menu.querySelector(".account-menu-list");
+  const items = () => [...list.querySelectorAll('[role="menuitem"]')];
+
+  const open = (focusFirst) => {
+    list.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    if (focusFirst) items()[0]?.focus();
+  };
+  const close = ({ restoreFocus = false } = {}) => {
+    list.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    if (restoreFocus) trigger.focus();
+  };
+
+  trigger.addEventListener("click", () => (list.hidden ? open(false) : close()));
+  trigger.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      open(true);
+    }
+  });
+
+  menu.addEventListener("keydown", (event) => {
+    if (list.hidden) return;
+    const all = items();
+    const index = all.indexOf(document.activeElement);
+
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      close({ restoreFocus: true });
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      all[(index + 1) % all.length].focus();
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      all[(index - 1 + all.length) % all.length].focus();
+    } else if (event.key === "Tab") {
+      close();
+    }
+  });
+
+  list.addEventListener("click", (event) => {
+    const target = event.target.closest("a, button");
+    if (!target) return;
+    close();
+    if (target.matches("[data-logout]")) logOut();
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!menu.contains(event.target)) close();
+  }, { signal });
+}
+
 function shell(content, { section = "classes" } = {}) {
-  const isGuest = !currentUser?.email;
-  const userLabel = currentUser?.email ? currentUser.email.split("@")[0] : "Guest";
+  const isGuest = !currentUser;
   const brandHref = "#/home";
   const showSessionStatus = section === "tutor" || !["idle", "ended"].includes(state.session);
 
@@ -149,11 +289,8 @@ function shell(content, { section = "classes" } = {}) {
           <a href="#/classes" ${section === "classes" ? 'aria-current="page"' : ""}>Classes</a>
         `}
         <a href="#/tutor" ${section === "tutor" ? 'aria-current="page"' : ""}>Quick tutor</a>
-        <a href="#/auth" ${section === "auth" ? 'aria-current="page"' : ""} class="nav-account-link">
-          ${icon("user", { size: 16 })}
-          ${isGuest ? `<span class="nav-account-name">Guest</span>` : `<span class="nav-account-name">${escapeHtml(userLabel)}</span><span class="tier-badge badge-cloud">SQLite</span>`}
-        </a>
       </nav>
+      ${accountMenuMarkup()}
     </header>
     ${showSessionStatus ? `<div class="session-status-row">
       <div class="status-strip" role="status" aria-live="polite" aria-label="Session status">
@@ -167,20 +304,22 @@ function shell(content, { section = "classes" } = {}) {
     event.preventDefault();
     document.querySelector("#main-content")?.focus();
   });
+
+  wireAccountMenu();
 }
 
 function renderHome() {
-  const name = currentUser?.email ? currentUser.email.split("@")[0] : "";
+  const name = displayName(currentUser);
 
   const copy = currentUser
     ? `<p class="home-greeting">Welcome back, ${escapeHtml(name)}! Pick up where you left off, or open a class to study or get tutoring from its materials.</p>
         <div class="home-actions">
           <a class="btn btn-primary btn-large" href="#/classes">Go to your classes</a>
-          <a class="home-guest" href="#/auth">Account</a>
+          <a class="home-guest" href="#/account">Account</a>
         </div>`
     : `<p class="home-greeting">Welcome! Share your screen and ask me anything out loud, or drop in your notes and lectures and I'll turn them into quizzes, flashcards, and study guides.</p>
         <div class="home-actions">
-          <a class="btn btn-primary btn-large" href="#/auth">Log in</a>
+          <a class="btn btn-primary btn-large" href="#/login">Log in</a>
           <a class="home-guest" href="#/study">Continue as guest</a>
           <p class="home-note">Guests can try everything, but nothing is saved.</p>
         </div>`;
@@ -703,246 +842,212 @@ function renderTutor(klass = null) {
   });
 }
 
-async function renderAuth() {
-  const user = await getCurrentUser();
-  const health = await checkBackendHealth();
-  const backendReady = health.status === "ok";
+const USERNAME_RULE = /^[A-Za-z0-9_.-]{3,32}$/;
+
+// Log in and Join Jot are full-screen pages of their own. They always ask for
+// credentials and let the server decide whether they are valid; nothing here
+// ever signs anyone in without a successful answer from the backend.
+function renderLogin({ mode = "signin" } = {}) {
+  const signup = mode === "signup";
+  accountMenuAbort?.abort();
+
+  const alreadyIn = `
+    <div class="login-heading">
+      <h1>You're already logged in</h1>
+      <p class="muted">You're logged in as <strong>${escapeHtml(displayName(currentUser))}</strong>. Log out first if you want to ${signup ? "create a different account" : "use another account"}.</p>
+    </div>
+    <div class="account-actions">
+      <a class="btn btn-primary" href="#/classes">Go to your classes</a>
+      <button id="login-logout" class="btn btn-danger-ghost" type="button">${icon("logOut", { size: 18 })} Log out</button>
+    </div>
+  `;
+
+  const form = `
+    <div class="login-heading">
+      <h1>${signup ? "Join Jot" : "Log in"}</h1>
+      <p class="muted">${signup ? "Create an account to keep your classes, uploads, and study sets." : "Enter your details to open your classes."}</p>
+    </div>
+    <form id="login-form" class="login-form" novalidate>
+      <div class="field">
+        <label for="login-identifier">${signup ? "Username" : "Username or email"}</label>
+        <input id="login-identifier" name="identifier" type="text" required autocomplete="username" autocapitalize="none" spellcheck="false" aria-describedby="login-identifier-msg"${signup ? ' maxlength="32"' : ""} />
+        <small id="login-identifier-msg" class="field-hint">${signup ? "3 to 32 letters, numbers, dots, dashes, or underscores." : ""}</small>
+      </div>
+      ${signup ? `
+        <div class="field">
+          <label for="login-email">Email <span class="muted">(optional)</span></label>
+          <input id="login-email" name="email" type="email" autocomplete="email" />
+        </div>
+      ` : ""}
+      <div class="field">
+        <label for="login-password">Password</label>
+        <div class="password-row">
+          <input id="login-password" name="password" type="password" required autocomplete="${signup ? "new-password" : "current-password"}" aria-describedby="login-password-msg" />
+          <button id="login-toggle" class="btn btn-secondary password-toggle" type="button" aria-controls="login-password" aria-pressed="false">Show</button>
+        </div>
+        <small id="login-password-msg" class="field-hint">${signup ? "At least 8 characters." : ""}</small>
+      </div>
+      <p id="login-error" class="form-error" role="alert" hidden></p>
+      <button class="btn btn-primary btn-large" type="submit">${signup ? "Create account" : "Log in"}</button>
+    </form>
+    <p class="login-switch">${signup ? 'Already have an account? <a href="#/login">Log in</a>' : 'New to Jot? <a href="#/signup">Create an account</a>'}</p>
+    <a class="home-guest" href="#/study">Continue as guest</a>
+  `;
+
+  app.innerHTML = `
+    <main id="main-content" class="home auth-screen" tabindex="-1">
+      <div class="auth-screen-inner">
+        <a class="brand" href="#/home">
+          <span class="brand-mark" aria-hidden="true"><img src="${jotMascot}" alt="" /></span>
+          Jot
+        </a>
+        <div class="panel login-card">${currentUser ? alreadyIn : form}</div>
+        <a class="auth-back" href="#/home">${icon("arrowLeft", { size: 16 })} Back to welcome</a>
+      </div>
+    </main>
+  `;
+
+  if (currentUser) {
+    document.querySelector("#login-logout").addEventListener("click", logOut);
+    return;
+  }
+
+  const formEl = document.querySelector("#login-form");
+  const errorBox = document.querySelector("#login-error");
+  const submit = formEl.querySelector('button[type="submit"]');
+  const idleLabel = submit.textContent;
+  const { identifier, password } = formEl.elements;
+
+  const hints = new Map([
+    [identifier, document.querySelector("#login-identifier-msg")],
+    [password, document.querySelector("#login-password-msg")]
+  ]);
+  const defaultHints = new Map([...hints].map(([field, hint]) => [field, hint.textContent]));
+
+  const markInvalid = (field, message) => {
+    field.setAttribute("aria-invalid", "true");
+    const hint = hints.get(field);
+    hint.textContent = message;
+    hint.classList.add("is-error");
+    field.focus();
+  };
+  const clearInvalid = (field) => {
+    field.removeAttribute("aria-invalid");
+    const hint = hints.get(field);
+    hint.textContent = defaultHints.get(field);
+    hint.classList.remove("is-error");
+  };
+  const clearAll = () => {
+    errorBox.hidden = true;
+    clearInvalid(identifier);
+    clearInvalid(password);
+  };
+  identifier.addEventListener("input", () => clearInvalid(identifier));
+  password.addEventListener("input", () => clearInvalid(password));
+
+  const toggle = document.querySelector("#login-toggle");
+  toggle.addEventListener("click", () => {
+    const show = password.type === "password";
+    password.type = show ? "text" : "password";
+    toggle.textContent = show ? "Hide" : "Show";
+    toggle.setAttribute("aria-pressed", String(show));
+  });
+
+  const setBusy = (busy) => {
+    for (const element of formEl.elements) element.disabled = busy;
+    submit.textContent = busy ? (signup ? "Creating your account..." : "Checking your details...") : idleLabel;
+  };
+
+  formEl.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    clearAll();
+
+    const name = identifier.value.trim();
+    if (!name) return markInvalid(identifier, signup ? "Choose a username." : "Enter your username or email.");
+    if (signup && !USERNAME_RULE.test(name)) {
+      return markInvalid(identifier, "Usernames are 3 to 32 characters: letters, numbers, dots, dashes, or underscores.");
+    }
+    if (!password.value) return markInvalid(password, "Enter your password.");
+    if (signup && password.value.length < 8) return markInvalid(password, "Use at least 8 characters.");
+
+    setBusy(true);
+    try {
+      // The server checks the details. Only a successful answer logs anyone in.
+      const user = signup
+        ? await signUp({ username: name, password: password.value, email: formEl.elements.email.value.trim() })
+        : await signIn(name, password.value);
+      await applyAuth(user);
+      toast(signup ? `Welcome to Jot, ${displayName(user)}!` : `Welcome back, ${displayName(user)}!`);
+      redirect("#/classes");
+    } catch (error) {
+      setBusy(false);
+      password.value = "";
+      errorBox.textContent = error.message || "Something went wrong. Please try again.";
+      errorBox.hidden = false;
+      if (error.code === "username_taken") {
+        markInvalid(identifier, "That username is taken.");
+      } else if (error.code === "invalid_credentials") {
+        identifier.setAttribute("aria-invalid", "true");
+        markInvalid(password, "Check your password and try again.");
+      } else {
+        password.focus();
+      }
+    }
+  });
+
+  identifier.focus();
+}
+
+// The account page is for logged-in users only; it is where they log out.
+function renderAccount() {
+  const user = currentUser;
 
   shell(`
     <section class="account-page section-stack">
-      <div class="page-heading account-heading">
+      <div class="page-heading">
         <div>
           <h1>Account</h1>
-          <p class="muted">Save classes, uploads, and study history across browser sessions.</p>
+          <p class="muted">Your Jot profile.</p>
         </div>
       </div>
-
-      ${user ? `
-        <div class="account-status-banner signed-in-banner">
-          ${icon("check", { size: 20 })}
-          <div>
-            <strong>Signed in as ${escapeHtml(user.email)} · SQLite Database Sync Active</strong>
-            <span>Your classes, uploaded course documents, syllabus roadmap, and generated study sets are automatically saved to the backend SQLite database (<code>screen_tutor.sqlite3</code>).</span>
-          </div>
-        </div>
-      ` : `
-        <div class="account-status-banner guest-banner">
-          ${icon("alert", { size: 20 })}
-          <div>
-            <strong>Guest Mode Active · Files Are Not Saved to Database</strong>
-            <span>You are currently using Jot as a guest. Any uploaded notes, slides, or study sets are stored <strong>only in this browser's temporary storage</strong> and will not be saved to the SQLite database. Sign in or create an account to save your files permanently to the database.</span>
-          </div>
-        </div>
-      `}
-
-      <div class="auth-comparison-grid">
-        <div class="auth-tier-card tier-guest">
-          <div class="auth-tier-header">
-            <h3>Guest Mode</h3>
-            <span class="tier-badge badge-guest">Local Only</span>
-          </div>
-          <p class="auth-tier-desc">Quick, zero-setup study sessions without an account. Best for exploring features.</p>
-          <ul class="auth-tier-features">
-            <li><span class="feature-check">✓</span> Live voice and screen tutoring</li>
-            <li><span class="feature-check">✓</span> Interactive flashcards and quiz players</li>
-            <li><span class="feature-check">✓</span> Built-in scratchpad & scientific calculator</li>
-            <li><span class="feature-check">✓</span> Sample study sets and quick review</li>
-            <li><span class="feature-warn">✕</span> <strong>Files NOT saved to database</strong></li>
-            <li><span class="feature-warn">✕</span> <strong>Lost on browser cache clear or reload</strong></li>
-            <li><span class="feature-warn">✕</span> No persistent multi-class library</li>
-          </ul>
-          <a href="#/study" class="btn btn-secondary" style="justify-content: center; width: 100%;">
-            Continue as Guest
-          </a>
-        </div>
-
-        <div class="auth-tier-card tier-cloud">
-          <div class="auth-tier-header">
-            <h3>Signed-in Account</h3>
-            <span class="tier-badge badge-cloud">SQLite Saved</span>
-          </div>
-          <p class="auth-tier-desc">Full persistence powered by backend SQLite database (<code>screen_tutor.sqlite3</code>) and local private file storage.</p>
-          <ul class="auth-tier-features">
-            <li><span class="feature-check">✓</span> <strong>Permanent SQLite database storage</strong> for all course files</li>
-            <li><span class="feature-check">✓</span> Sync classes & syllabus maps automatically via FastAPI</li>
-            <li><span class="feature-check">✓</span> Background lecture transcription & extraction</li>
-            <li><span class="feature-check">✓</span> Study sets, practice tests & score history preserved in SQLite</li>
-            <li><span class="feature-check">✓</span> Voice and screen tutoring grounded in course files</li>
-            <li><span class="feature-check">✓</span> High performance local WAL-mode storage</li>
-          </ul>
-          ${user ? `
-            <button id="auth-signout-btn" class="btn btn-danger-ghost" type="button" style="justify-content: center; width: 100%;">
-              ${icon("stop", { size: 16 })} Sign out (${escapeHtml(user.email.split("@")[0])})
-            </button>
-          ` : `
-            <button id="account-focus-auth" class="btn btn-primary account-jump-action" type="button">
-              Sign in or create account
-            </button>
-          `}
+      <div class="panel account-card">
+        <dl class="account-details">
+          <div><dt>Display name</dt><dd>${escapeHtml(user.display_name)}</dd></div>
+          <div><dt>Username</dt><dd>${escapeHtml(user.username)}</dd></div>
+          <div><dt>Email</dt><dd>${user.email ? escapeHtml(user.email) : '<span class="muted">Not provided</span>'}</dd></div>
+        </dl>
+        <div class="account-actions">
+          <a class="btn btn-secondary" href="#/classes">${icon("book", { size: 18 })} Your classes</a>
+          <button id="account-logout" class="btn btn-danger-ghost" type="button">${icon("logOut", { size: 18 })} Log out</button>
         </div>
       </div>
-
-      <div class="panel overview-card" style="margin-bottom: 1.5rem;">
-        <span class="kind-icon">${icon("monitor", { size: 22 })}</span>
-        <div>
-          <strong>Backend & SQLite Database: <span class="pill" data-tone="${backendReady ? 'good' : 'busy'}">${backendReady ? 'Connected (SQLite)' : health.status}</span></strong>
-            <span class="row-meta">FastAPI server connected to SQLite (<code>screen_tutor.sqlite3</code>), runs live tutoring sessions, and processes course materials.</span>
-        </div>
-      </div>
-
-      ${user ? `
-        <div class="panel">
-          <h2>Active Database Session</h2>
-          <p class="muted">Your classes and study sets are synced to the backend SQLite database.</p>
-          <div class="metric-strip" style="margin: 1.25rem 0;">
-            <div class="metric">
-              <strong>${escapeHtml(user.email)}</strong>
-              <span>User ID: ${escapeHtml(user.id.slice(0, 8))}...</span>
-            </div>
-            <div class="metric">
-              <strong>SQLite Database</strong>
-              <span>Persistence active · Local WAL storage</span>
-            </div>
-          </div>
-          <div style="display: flex; gap: 0.75rem;">
-            <a href="#/classes" class="btn btn-primary">
-              Go to my classes
-            </a>
-            <button id="auth-signout-btn-2" class="btn btn-secondary" type="button">
-              ${icon("stop", { size: 16 })} Sign out
-            </button>
-          </div>
-        </div>
-      ` : `
-        <div class="panel auth-panel">
-          <div class="tabs" style="margin-bottom: 1.5rem; justify-content: center; display: flex; gap: 0.5rem;">
-            <button id="auth-tab-signin" class="btn btn-secondary" type="button" aria-pressed="true">Sign in</button>
-            <button id="auth-tab-signup" class="btn btn-ghost" type="button" aria-pressed="false">Create account</button>
-          </div>
-
-          <form id="auth-form" class="section-stack" action="" novalidate>
-            <div class="field-block" id="auth-name-block" hidden>
-              <label for="auth-name">Full name or nickname</label>
-              <input id="auth-name" name="name" type="text" autocomplete="name" placeholder="Ada Lovelace" />
-            </div>
-            <div class="field-block">
-              <label for="auth-email">Email address</label>
-              <input id="auth-email" name="email" type="email" required autocomplete="email" placeholder="student@example.com" />
-            </div>
-            <div class="field-block">
-              <label for="auth-password">Password</label>
-              <input id="auth-password" name="password" type="password" required minlength="6" autocomplete="current-password" placeholder="At least 6 characters" />
-            </div>
-            <button id="auth-submit-btn" class="btn btn-primary" type="submit" style="width: 100%; justify-content: center; margin-top: 1rem;">
-              Sign in
-            </button>
-          </form>
-          <p class="field-hint" style="text-align: center; margin-top: 1.25rem;">
-            Local workspace mode · Database storage powered by backend SQLite (<code>screen_tutor.sqlite3</code>)
-          </p>
-        </div>
-      `}
+      <p class="field-hint">Your classes, uploads, and study sets are saved to this account.</p>
     </section>
-  `, { section: "auth" });
+  `, { section: "account" });
 
-  if (user) {
-    const handleSignOut = async () => {
-      try {
-        await signOut();
-        currentUser = null;
-        toast("Signed out successfully.");
-        renderAuth();
-      } catch (err) {
-        toast(`Sign out failed: ${err.message}`, { tone: "error" });
-      }
-    };
-    document.querySelector("#auth-signout-btn")?.addEventListener("click", handleSignOut);
-    document.querySelector("#auth-signout-btn-2")?.addEventListener("click", handleSignOut);
-  } else {
-    let mode = "signin";
-    const tabSignin = document.querySelector("#auth-tab-signin");
-    const tabSignup = document.querySelector("#auth-tab-signup");
-    const nameBlock = document.querySelector("#auth-name-block");
-    const submitBtn = document.querySelector("#auth-submit-btn");
-    const form = document.querySelector("#auth-form");
-    document.querySelector("#account-focus-auth")?.addEventListener("click", () => {
-      form.scrollIntoView({ block: "center", behavior: "smooth" });
-      document.querySelector("#auth-email")?.focus();
-    });
-
-    tabSignin.addEventListener("click", () => {
-      mode = "signin";
-      tabSignin.className = "btn btn-secondary";
-      tabSignup.className = "btn btn-ghost";
-      tabSignin.setAttribute("aria-pressed", "true");
-      tabSignup.setAttribute("aria-pressed", "false");
-      nameBlock.hidden = true;
-      submitBtn.textContent = "Sign in";
-      document.querySelector("#auth-password").autocomplete = "current-password";
-    });
-
-    tabSignup.addEventListener("click", () => {
-      mode = "signup";
-      tabSignup.className = "btn btn-secondary";
-      tabSignin.className = "btn btn-ghost";
-      tabSignup.setAttribute("aria-pressed", "true");
-      tabSignin.setAttribute("aria-pressed", "false");
-      nameBlock.hidden = false;
-      submitBtn.textContent = "Create account";
-      document.querySelector("#auth-password").autocomplete = "new-password";
-    });
-
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (!form.reportValidity()) return;
-
-      const email = document.querySelector("#auth-email").value.trim();
-      const password = document.querySelector("#auth-password").value;
-      const name = document.querySelector("#auth-name")?.value.trim() || "";
-
-      submitBtn.disabled = true;
-      submitBtn.textContent = "Connecting...";
-
-      try {
-        if (mode === "signin") {
-          await signInWithEmail(email, password);
-          toast("Signed in successfully!");
-        } else {
-          await signUpWithEmail(email, password, name);
-          toast("Account created and signed in!");
-        }
-        currentUser = await getCurrentUser();
-        await syncClassesFromApi();
-        window.location.hash = "#/classes";
-      } catch (err) {
-        toast(err.message, { tone: "error" });
-        submitBtn.disabled = false;
-        submitBtn.textContent = mode === "signin" ? "Sign in" : "Create account";
-      }
-    });
-  }
+  document.querySelector("#account-logout").addEventListener("click", logOut);
 }
+
+// Who may open what. The server enforces the same rules; these only keep the UI honest.
+const requireUser = (render, notice = "Log in to see your classes.") => (params) =>
+  currentUser ? render(params) : redirect("#/login", notice);
+const requireGuest = (render) => (params) =>
+  currentUser ? redirect("#/classes") : render(params);
 
 const router = createRouter(
   [
     { path: "/home", render: renderHome },
-    { path: "/study", render: renderGuestWorkspace },
-    { path: "/guest", render: renderGuestWorkspace },
-    { path: "/classes", render: renderClasses },
-    { path: "/classes/:id/:tab", render: renderClassTab },
+    { path: "/study", render: requireGuest(renderGuestWorkspace) },
+    { path: "/guest", render: requireGuest(renderGuestWorkspace) },
+    { path: "/login", render: () => renderLogin({ mode: "signin" }) },
+    { path: "/signup", render: () => renderLogin({ mode: "signup" }) },
+    { path: "/classes", render: requireUser(renderClasses) },
+    { path: "/classes/:id/:tab", render: requireUser(renderClassTab) },
+    { path: "/account", render: requireUser(renderAccount, "Log in to see your account.") },
     { path: "/tutor", render: () => renderTutor() },
-    { path: "/auth", render: renderAuth }
+    { path: "/auth", render: () => redirect(currentUser ? "#/account" : "#/login") }
   ],
-  {
-    render: () => {
-      if (currentUser) {
-        renderClasses();
-      } else {
-        renderHome();
-      }
-    }
-  },
+  { render: () => (currentUser ? renderClasses() : renderHome()) },
   { beforeRender: () => disposeTutor?.() }
 );
 
@@ -951,32 +1056,20 @@ window.addEventListener("pageshow", (event) => {
   if (event.persisted) router.render();
 });
 
-// Initialize authentication and startup sync
+// Find out who is logged in before showing anything.
 (async () => {
   try {
-    currentUser = await getCurrentUser();
-    if (currentUser) {
-      await syncClassesFromApi();
-    }
+    await applyAuth(await getCurrentUser());
   } catch (err) {
-    console.warn("Initial auth/sync check:", err);
+    console.warn("Initial auth check:", err);
   }
 
-  onAuthStateChange(async (event, session) => {
-    const wasGuest = !currentUser;
-    currentUser = session?.user || null;
-    if (currentUser) {
-      await syncClassesFromApi();
-      if (wasGuest && (window.location.hash.includes("/study") || window.location.hash.includes("/guest"))) {
-        window.location.hash = "#/classes";
-      }
-    }
-    router.render();
+  // The server ended the session while the page was open (for example it expired).
+  onAuthStateChange(async () => {
+    if (!currentUser) return;
+    await applyAuth(null);
+    redirect("#/login", "Your session ended. Please log in again.");
   });
 
-  if (!currentUser && window.location.hash === "#/classes") {
-    window.location.hash = "#/study";
-  } else {
-    router.render();
-  }
+  router.render();
 })();

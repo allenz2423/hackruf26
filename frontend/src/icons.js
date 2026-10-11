@@ -28,7 +28,9 @@ const PATHS = {
   refresh: '<path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>',
   alert: '<circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
-  user: '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'
+  user: '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  chevronDown: '<path d="m6 9 6 6 6-6"/>',
+  logOut: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>'
 };
 
 export function icon(name, { size = 20, label = "" } = {}) {

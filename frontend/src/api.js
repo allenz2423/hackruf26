@@ -1,46 +1,49 @@
-const LOCAL_USER = {
-  id: "00000000-0000-4000-8000-000000000001",
-  email: "local@student"
-};
-
 const authListeners = new Set();
 
-// Local workspace helpers
+// The login session lives in an HttpOnly cookie, so scripts never see or store a token.
 export async function getAccessToken() {
   return "";
 }
 
+// Who is logged in? Resolves to the account, or null for a guest.
 export async function getCurrentUser() {
-  return LOCAL_USER;
+  try {
+    const payload = await apiFetch("/api/auth/me");
+    return payload.user || null;
+  } catch {
+    return null;
+  }
 }
 
-export async function signInWithEmail(email, password) {
-  void email;
-  void password;
-  return { user: LOCAL_USER, session: null };
+export async function signIn(identifier, password) {
+  const payload = await apiFetch("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ identifier, password })
+  });
+  return payload.user;
 }
 
-export async function signUpWithEmail(email, password, displayName = "") {
-  void email;
-  void password;
-  void displayName;
-  return { user: LOCAL_USER, session: null };
+export async function signUp({ username, password, email = "", displayName = "" }) {
+  const payload = await apiFetch("/api/auth/signup", {
+    method: "POST",
+    body: JSON.stringify({
+      username,
+      password,
+      email: email || null,
+      display_name: displayName || null
+    })
+  });
+  return payload.user;
 }
 
 export async function signOut() {
-  return undefined;
+  await apiFetch("/api/auth/logout", { method: "POST" });
 }
 
+// Called when the server says the session ended (for example it expired) mid-use.
 export function onAuthStateChange(callback) {
   authListeners.add(callback);
-  queueMicrotask(() => callback("LOCAL_READY", { user: LOCAL_USER }));
-  return {
-    data: {
-      subscription: {
-        unsubscribe: () => authListeners.delete(callback)
-      }
-    }
-  };
+  return () => authListeners.delete(callback);
 }
 
 // Internal HTTP client
@@ -52,6 +55,13 @@ async function readJson(response) {
   } catch {
     throw new Error("The server returned an unreadable response.");
   }
+}
+
+function unreachableError(status) {
+  const error = new Error("Can't reach the Jot server right now. Make sure the backend is running, then try again.");
+  error.code = "server_unreachable";
+  error.status = status;
+  return error;
 }
 
 export async function apiFetch(path, options = {}) {
@@ -68,15 +78,25 @@ export async function apiFetch(path, options = {}) {
     headers["Content-Type"] = "application/json";
   }
 
-  const response = await fetch(path, {
-    ...options,
-    headers
-  });
+  let response;
+  try {
+    response = await fetch(path, {
+      ...options,
+      headers
+    });
+  } catch {
+    throw unreachableError();
+  }
 
   const payload = await readJson(response);
 
   if (!response.ok) {
+    // The dev proxy answers 5xx with no body when the backend is not running.
+    if (response.status >= 500 && !payload?.code) throw unreachableError(response.status);
     const message = payload?.message || payload?.detail || payload?.error || `Request failed with status ${response.status}`;
+    if (response.status === 401 && payload?.code === "authentication_required") {
+      for (const listener of authListeners) listener("SESSION_ENDED");
+    }
     const error = new Error(message);
     error.code = payload?.code || "request_failed";
     error.status = response.status;

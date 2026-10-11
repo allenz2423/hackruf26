@@ -43,7 +43,22 @@ These tests use in-memory SQLite and a fake Lean runner; they do not call Gemini
 
 ## Authentication and ownership
 
-Class-library rows are scoped to `LOCAL_OWNER_ID` in SQLite. In development, same-origin or allowed-origin API requests can use that local owner directly. In production, configure a strong `DEMO_GATE_TOKEN` to protect session-ticket and tool endpoints.
+Accounts live in SQLite (`users`, `user_sessions`). Passwords are stored as salted scrypt hashes. A login sets an HttpOnly, SameSite=Lax `jot_session` cookie; only a hash of the session token is stored. Every class-library row belongs to the logged-in account, and the backend never accepts an owner from the client.
+
+- **Guests** (no session) may use quick tutoring (`POST /api/live-sessions` without `class_id`), the calculator, and the Lean checker. They cannot read or write class-library data, and cannot start a class tutor session.
+- **Logged-in accounts** get their own class library. Another account's classes return 404, and class-library endpoints return 401 without a session.
+- `POST /api/auth/signup`, `POST /api/auth/login`, and `POST /api/auth/logout` need an allowed `Origin` and are rate limited (`AUTH_RATE_LIMIT` per `AUTH_RATE_WINDOW_SECONDS`). `GET /api/auth/me` returns `{"user": null}` for a guest.
+
+Create a local test account (refused when `APP_ENV=production`):
+
+```bash
+cd backend
+python -m app.scripts.seed_user USERNAME PASSWORD [--display-name NAME] [--adopt-local-data]
+```
+
+`--adopt-local-data` gives that account any classes saved under the old `LOCAL_OWNER_ID` before accounts existed.
+
+In production, also configure a strong `DEMO_GATE_TOKEN` to protect session-ticket and tool endpoints, and serve over HTTPS so the session cookie is sent with the `Secure` flag.
 
 ## API
 

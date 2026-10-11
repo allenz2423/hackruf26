@@ -8,7 +8,7 @@
 
 The backend owns all model-provider integration: it protects the long-lived Gemini API key, selects models, defines instructions and tools, and maintains each Live session. The browser captures and previews media locally, then relays sampled frames and enabled microphone audio through a same-origin WebSocket. The backend forwards them in memory and does not record live media, transcripts, or conversations.
 
-The class library stores classes, uploaded course materials, extracted text, lecture transcripts, generated study materials, quiz attempts, and flags in SQLite. Original uploaded files live in private local storage outside the static web root. Local/demo row ownership is scoped by `LOCAL_OWNER_ID`, a stable UUID configured through the environment.
+The class library stores classes, uploaded course materials, extracted text, lecture transcripts, generated study materials, quiz attempts, and flags in SQLite. Original uploaded files live in private local storage outside the static web root. Rows are owned by the logged-in account (see [Accounts and sessions](#accounts-and-sessions)). `LOCAL_OWNER_ID` is only the legacy owner that `seed_user --adopt-local-data` can migrate.
 
 ## Stack
 
@@ -31,7 +31,9 @@ The class library stores classes, uploaded course materials, extracted text, lec
 | `APP_ORIGINS` | Deployment-dependent | Allowed browser origins |
 | `DEMO_GATE_TOKEN` | Production | Optional private bearer token gate for session-ticket/tool endpoints; required in production |
 | `LIVE_SESSION_RATE_LIMIT`, `LIVE_SESSION_RATE_WINDOW_SECONDS` | No | Session-ticket issuance limits |
-| `LOCAL_OWNER_ID` | No | UUID owner namespace for SQLite rows |
+| `LOCAL_OWNER_ID` | No | Legacy owner UUID; only used to migrate pre-account data |
+| `AUTH_RATE_LIMIT` / `AUTH_RATE_WINDOW_SECONDS` | No | Sign-up and login attempts per client and window (default 10 per 300 s) |
+| `SESSION_TTL_DAYS` | No | Login session lifetime (default 30) |
 | `SQLITE_PATH` | No | SQLite database path, defaults to `backend/.local/screen_tutor.sqlite3` |
 | `STORAGE_DIR` | No | Private upload storage path |
 | `FILE_URL_SIGNING_SECRET` | Yes | HMAC secret for short-lived private file links |
@@ -41,7 +43,7 @@ The class library stores classes, uploaded course materials, extracted text, lec
 
 ## Request Policy
 
-Development API and WebSocket requests are origin-checked and use `LOCAL_OWNER_ID` for class-library ownership. Production must configure a high-entropy `DEMO_GATE_TOKEN` for session-ticket and tool endpoints. The backend never accepts `owner_id` from the client.
+API and WebSocket requests are origin-checked. Class-library requests require a logged-in account. Production must configure a high-entropy `DEMO_GATE_TOKEN` for session-ticket and tool endpoints. The backend never accepts `owner_id` from the client.
 
 Class-library routes always scope reads and writes to the configured owner UUID. This keeps the SQLite schema ready for future multi-owner deployments without depending on an external account service in the hackathon build.
 
@@ -151,7 +153,7 @@ Background jobs are in-process for the hackathon build. On startup, the single b
 
 ### SQLite access and existing browser data
 
-Class-library APIs do **not** require an authentication token in the current local SQLite mode. Call them through the same-origin HTTP client even when `getAccessToken()` returns an empty string. Browser mutations must carry an allowed `Origin`; a normal same-origin browser `fetch` supplies it. The backend assigns `LOCAL_OWNER_ID` and never accepts a client-supplied owner.
+Class-library APIs require a logged-in account: the browser sends the HttpOnly `jot_session` cookie automatically on same-origin requests, and a missing or ended session returns `401 authentication_required`. Browser mutations must carry an allowed `Origin`; a normal same-origin browser `fetch` supplies it. The backend derives the owner from the session and never accepts a client-supplied owner.
 
 The earlier browser implementation gated study generation on a nonempty token and called `createLocalMaterial()` instead. Its three generic question strings produced the reported “Quick check on New class workspace” local draft, without calling Gemini. That fallback has been removed. Generation, remote material loading/deletion, scoring, and remote flags now call the SQLite APIs without a token prerequisite.
 
@@ -235,7 +237,20 @@ Existing local drafts remain labeled as local drafts; generate a new material fr
 
 - The frontend can request and consume a one-use session ticket without receiving a provider credential, model name, or provider SDK configuration.
 - The backend owns the Live connection, model, instructions, class context, approved tools, and tool execution.
-- The backend initializes SQLite automatically and scopes class-library data to `LOCAL_OWNER_ID`.
+- The backend initializes SQLite automatically and scopes class-library data to the logged-in account.
 - A student can create classes, upload notes, generate study materials, and submit attempts through the FastAPI API.
 - Screen/audio streams transit the backend only in active session memory and are never stored by it.
 - Uploaded files and generated study materials can be deleted by the student.
+
+## Accounts and sessions
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/auth/signup` | Create an account (`username`, `password`, optional `email` and `display_name`) and log in. `409 username_taken` / `email_taken` if already used. |
+| `POST /api/auth/login` | Log in with `identifier` (username or email) and `password`. Always `401 invalid_credentials` with one generic message on failure. |
+| `POST /api/auth/logout` | End the session and clear the cookie. Safe when already logged out. |
+| `GET /api/auth/me` | `{"user": {...}}` for a logged-in account, `{"user": null}` for a guest. |
+
+- Usernames are 3 to 32 characters (letters, numbers, `.`, `_`, `-`) and unique ignoring case. Passwords are 8 to 128 characters and stored only as salted scrypt hashes.
+- The session cookie is `jot_session` (HttpOnly, SameSite=Lax, `Secure` in production). The database stores only a SHA-256 hash of the token. Logout deletes the server-side session, so a copied cookie stops working.
+- **Guest boundary:** with no session, `POST /api/live-sessions` works only without `class_id`; with `class_id` it returns `401`. A `class_id` owned by another account returns `404`. All `/api/classes`, upload, study-material, and attempt endpoints return `401`.

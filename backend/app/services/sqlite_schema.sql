@@ -178,3 +178,24 @@ BEGIN
     DELETE FROM study_materials
     WHERE id IN (SELECT material_id FROM study_material_sources WHERE note_id = OLD.id);
 END;
+
+-- Accounts and cookie-backed login sessions. Class rows keep a plain TEXT
+-- owner_id so existing local data can be adopted by an account.
+CREATE TABLE IF NOT EXISTS users (
+    id            TEXT PRIMARY KEY,
+    username      TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    email         TEXT COLLATE NOCASE UNIQUE,
+    display_name  TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    expires_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS user_sessions_user_idx ON user_sessions (user_id);
+CREATE INDEX IF NOT EXISTS user_sessions_expires_idx ON user_sessions (expires_at);

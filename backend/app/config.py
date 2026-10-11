@@ -74,6 +74,9 @@ class Settings(BaseSettings):
     upload_rate_window_seconds: int = 3600
     generation_rate_limit: int = 10
     generation_rate_window_seconds: int = 3600
+    auth_rate_limit: int = 10
+    auth_rate_window_seconds: int = 300
+    session_ttl_days: int = 30
     request_body_max_bytes: int = 1024
     library_json_body_max_bytes: int = 1_100_000
     frontend_dist: str = "frontend/dist"

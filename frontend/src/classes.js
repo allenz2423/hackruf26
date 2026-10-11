@@ -10,6 +10,7 @@ import {
 const STORE_KEY = "screen-tutor-classes";
 const VERSION_KEY = "screen-tutor-sample-version";
 const SAMPLE_SEED_KEY = `${STORE_KEY}-algebra-examples-v1`;
+const OWNER_KEY = `${STORE_KEY}-owner`;
 
 // Earlier builds saved saturated defaults; map them to the current ink palette.
 const LEGACY_CLASS_COLORS = {
@@ -285,4 +286,28 @@ export function resetSampleData() {
   localStorage.setItem(VERSION_KEY, String(SAMPLE_VERSION));
   localStorage.setItem(SAMPLE_SEED_KEY, "1");
   return next;
+}
+
+export function hasLocalClassData() {
+  return localStorage.getItem(STORE_KEY) !== null || localStorage.getItem(OWNER_KEY) !== null;
+}
+
+// Remove everything cached for the previous account or session.
+export function clearLocalClassData() {
+  for (const key of [STORE_KEY, VERSION_KEY, SAMPLE_SEED_KEY, OWNER_KEY]) {
+    localStorage.removeItem(key);
+  }
+  sessionStorage.removeItem("tutor_initial_question");
+}
+
+// Record who the cached classes belong to. A cache that belongs to someone else is wiped first.
+// A cache with no recorded owner predates accounts, so the first account to log in keeps it.
+export function claimLocalClassData(userId) {
+  const owner = localStorage.getItem(OWNER_KEY);
+  if (owner && owner !== userId) {
+    clearLocalClassData();
+    return true;
+  }
+  localStorage.setItem(OWNER_KEY, userId);
+  return false;
 }
