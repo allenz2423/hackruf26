@@ -3,8 +3,9 @@ import { renderQuizPlayer } from "./quiz-player.js";
 import { renderFlashcards } from "./flashcards.js";
 import { escapeHtml, toast } from "./ui.js";
 import { openMaterialViewer } from "./material-viewer.js";
+import { updateClass } from "./classes.js";
+import { getBackendClassId, prepareStudySources, waitForStudyMaterial } from "./course-sync.js";
 import {
-  getAccessToken,
   getStudyMaterialsApi,
   createStudyMaterialApi,
   getStudyMaterialDetailApi,
@@ -131,90 +132,19 @@ function scoreableQuestions(material) {
   });
 }
 
-function sampleQuestions(type, klass) {
-  const subject = klass.focus || klass.name;
-  if (type === "Flashcards") return [`Key term from ${subject}`, "Common misconception", "Source-backed definition"];
-  if (type === "Study guide") return [`Core concepts in ${subject}`, "Important examples", "What to review next"];
-  if (type === "Practice test") return [`Timed free response on ${subject}`, "Explain your reasoning", "Mixed review problem"];
-  return [`Quick check on ${subject}`, "Multiple choice concept check", "Short answer with explanation"];
-}
-
-function createLocalMaterial(type, klass, requestedCount) {
-  const bank = klass.materials.flatMap((material) => material.items || []);
-  const sources = klass.uploads.slice(0, 2).map((upload) => upload.name);
-  const content = klass.materials.find((material) => material.type === "Study guide")?.content
-    || klass.uploads.map((upload) => upload.content || upload.summary).filter(Boolean).join("\n\n");
-  const base = {
-    id: crypto.randomUUID(),
-    classId: klass.id,
-    type,
-    scope: "Whole class",
-    difficulty: "Mixed",
-    status: "ready",
-    createdAt: new Date().toISOString(),
-    sources,
-    isSample: false
-  };
-
-  if (type === "Flashcards") {
-    const cards = klass.materials.flatMap((material) => material.cards || []).slice(0, 12);
-    const usableCards = cards.length ? cards : sampleQuestions(type, klass).map((front, index) => ({
-      front,
-      back: bank[index]?.answer || bank[index]?.explanation || `Review this concept in ${sources[0] || klass.name}.`
-    }));
-    return { ...base, cards: usableCards, questions: usableCards.map((card) => card.front), count: usableCards.length };
-  }
-
-  if (type === "Study guide") {
-    const items = bank.slice(0, 12);
-    return {
-      ...base,
-      content: content || `Review focus: ${klass.focus || klass.name}\n\nUse the questions below to guide your review of the class material.`,
-      items,
-      questions: items.map((item) => item.prompt),
-      count: items.length || 1
-    };
-  }
-
-  const items = bank.filter((item) => item.prompt && Array.isArray(item.choices)).slice(0, Math.max(1, requestedCount));
-  const questions = items.length
-    ? scoreableQuestions({ id: base.id, items })
-    : sampleQuestions(type, klass);
-  return {
-    ...base,
-    ...(type === "Practice test" ? { timeLimitMinutes: 10 } : {}),
-    items,
-    questions,
-    count: questions.length
-  };
-}
-
 export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCompleted }) {
-  // Sync remote study materials from backend if authenticated
-  const token = await getAccessToken();
-  if (token) {
+  const backendClassId = getBackendClassId(klass);
+  if (backendClassId) {
     try {
-      const remoteMaterials = await getStudyMaterialsApi(klass.id);
-      if (Array.isArray(remoteMaterials) && remoteMaterials.length > 0) {
-        const merged = remoteMaterials.map((rm) => {
-          const uiType = fromApiKind(rm.kind);
-          return {
-            id: rm.id,
-            classId: klass.id,
-            title: rm.title,
-            type: uiType,
-            scope: rm.scope?.kind === "all" ? "Whole class" : "Class material",
-            status: rm.status,
-            count: rm.item_count || 10,
-            createdAt: rm.created_at,
-            timeLimitMinutes: rm.options?.time_limit_minutes || (uiType === "Practice test" ? 15 : undefined),
-            isRemote: true,
-            attempts: rm.latest_attempt ? [{ scorePercent: Math.round(rm.latest_attempt.score_percent) }] : []
-          };
-        });
-        const localSamples = klass.materials.filter((m) => m.isSample);
-        klass.materials = [...localSamples, ...merged];
-      }
+      const remoteMaterials = await getStudyMaterialsApi(backendClassId);
+      const existing = new Map(klass.materials.map((material) => [material.id, material]));
+      const merged = remoteMaterials.map((summary) => {
+        const cached = existing.get(summary.id);
+        return formatRemoteMaterial({ ...summary, content: cached?.status === "ready" ? cached : null }, klass.id);
+      });
+      const localMaterials = klass.materials.filter((material) => !material.isRemote);
+      klass.materials = [...localMaterials, ...merged];
+      await updateClass(klass.id, { materials: klass.materials });
     } catch (e) {
       console.warn("Could not sync remote study materials:", e);
     }
@@ -254,7 +184,7 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
                 <select id="generate-scope" name="scope">
                   <option value="all">Whole class (${klass.uploads.length} materials)</option>
                   <option value="notes">Notes only</option>
-                  <option value="syllabus">Syllabus outline topics</option>
+                  <option value="syllabus">Syllabus only</option>
                 </select>
               </div>
               <div class="field-block">
@@ -279,6 +209,7 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
           <button id="generate-btn" class="btn btn-primary generate-submit" type="submit" ${hasUploads ? "" : "disabled"}>
             ${icon("sparkles", { size: 18 })} Generate study set
           </button>
+          <p id="generation-status" class="field-hint" role="status" aria-live="polite"></p>
           ${hasUploads ? "" : `<p class="field-hint">Add course material in the Library tab first.</p>`}
         </form>
         <div class="section-stack">
@@ -286,23 +217,13 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
             <h2>Saved materials</h2>
             <p class="muted">Open study guides and flashcards, or start a quiz to see explanations and saved scores.</p>
           </div>
-          ${!token ? `
-            <div class="account-status-banner guest-banner">
-              ${icon("alert", { size: 20 })}
-              <div>
-                <strong>Guest Mode · Materials & Scores Saved Locally Only</strong>
-                <span>Generated study sets and quiz attempt scores are kept in this browser session only. <a class="auth-link" href="#/auth">Sign in to your account</a> to preserve your study history in the SQLite database.</span>
-              </div>
+          <div class="account-status-banner signed-in-banner">
+            ${icon("sparkles", { size: 20 })}
+            <div>
+              <strong>AI-generated study materials</strong>
+              <span>Your selected course files are uploaded for processing before generation. Generated materials and quiz scores are saved by the backend.</span>
             </div>
-          ` : `
-            <div class="account-status-banner signed-in-banner">
-              ${icon("check", { size: 20 })}
-              <div>
-                <strong>SQLite Database Active</strong>
-                <span>Generated study materials, quiz attempts, and scores are automatically saved to your profile in the backend SQLite database.</span>
-              </div>
-            </div>
-          `}
+          </div>
           <div id="material-list"></div>
         </div>
       </section>
@@ -311,6 +232,7 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
     const form = root.querySelector("#generate-form");
     const list = root.querySelector("#material-list");
     const generateBtn = root.querySelector("#generate-btn");
+    const generationStatus = root.querySelector("#generation-status");
 
     function renderMaterials() {
       if (!klass.materials.length) {
@@ -345,7 +267,7 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
               </div>
             </header>
             <div class="material-badges">
-              ${material.isSample ? `<span class="sample-badge">Sample material</span>` : `<span class="ai-label">${escapeHtml(material.status || "Ready")}</span>`}
+              ${material.isSample ? `<span class="sample-badge">Sample material</span>` : `<span class="ai-label">${material.isRemote ? `AI-generated &middot; ${escapeHtml(material.status || "ready")}` : "Local draft"}</span>`}
               ${lastAttempt ? `<span class="row-meta">Last score: <strong>${lastAttempt.scorePercent}%</strong> &middot; ${(material.attempts || []).length} ${(material.attempts || []).length === 1 ? "attempt" : "attempts"}</span>` : ""}
             </div>
             <footer>
@@ -368,96 +290,70 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
+      if (generateBtn.disabled) return;
       const data = new FormData(form);
       const uiType = data.get("type");
       const count = Number(data.get("count")) || 10;
       const difficulty = data.get("difficulty") || "mixed";
-
-      const token = await getAccessToken();
-      if (token) {
-        generateBtn.disabled = true;
-        generateBtn.innerHTML = `${icon("sparkles", { size: 18 })} Generating...`;
-        try {
-          const apiKind = toApiKind(uiType);
-          const res = await createStudyMaterialApi(klass.id, {
-            kind: apiKind,
-            scope: { kind: "all" },
-            options: { count, difficulty, time_limit_minutes: uiType === "Practice test" ? 15 : undefined }
-          });
-
-          // If generation finished synchronously
-          if (res.status === "ready" && res.content) {
-            generateBtn.disabled = false;
-            generateBtn.innerHTML = `${icon("sparkles", { size: 18 })} Generate study set`;
-            const formatted = formatRemoteMaterial(res, klass.id, uiType);
-            onMaterialAdded(formatted);
-            toast(`Generated ${uiType} ready to practice!`);
-            renderMaterials();
-            return;
-          }
-
-          toast("Generating study material in the background...", { tone: "busy" });
-
-          // Poll until ready
-          let attempts = 0;
-          const pollInterval = setInterval(async () => {
-            attempts++;
-            try {
-              const detail = await getStudyMaterialDetailApi(res.id);
-              if (detail.status === "ready") {
-                clearInterval(pollInterval);
-                generateBtn.disabled = false;
-                generateBtn.innerHTML = `${icon("sparkles", { size: 18 })} Generate study set`;
-
-                const formatted = formatRemoteMaterial(detail, klass.id, uiType);
-                onMaterialAdded(formatted);
-                toast(`Generated ${uiType} ready to practice!`);
-                renderMaterials();
-              } else if (detail.status === "failed" || attempts >= 30) {
-                clearInterval(pollInterval);
-                generateBtn.disabled = false;
-                generateBtn.innerHTML = `${icon("sparkles", { size: 18 })} Generate study set`;
-                toast(detail.status === "failed"
-                  ? "Study generation failed on the server. Falling back to local template."
-                  : "Generation timed out. Falling back to local template.", { tone: "busy" });
-                const localMat = createLocalMaterial(uiType, klass, count);
-                onMaterialAdded(localMat);
-                renderMaterials();
-              }
-            } catch {
-              if (attempts >= 30) {
-                clearInterval(pollInterval);
-                generateBtn.disabled = false;
-                generateBtn.innerHTML = `${icon("sparkles", { size: 18 })} Generate study set`;
-                toast("Could not check generation status. Falling back to local template.", { tone: "busy" });
-                const localMat = createLocalMaterial(uiType, klass, count);
-                onMaterialAdded(localMat);
-                renderMaterials();
-              }
-            }
-          }, 3000);
-          return;
-        } catch (err) {
-          generateBtn.disabled = false;
-          generateBtn.innerHTML = `${icon("sparkles", { size: 18 })} Generate study set`;
-          toast(`Backend generation unavailable (${err.message}). Created local review set.`);
+      const controller = new AbortController();
+      const stopWaiting = () => controller.abort();
+      window.addEventListener("hashchange", stopWaiting, { once: true });
+      generateBtn.disabled = true;
+      generateBtn.innerHTML = `${icon("sparkles", { size: 18 })} Preparing sources…`;
+      try {
+        const { classId, uploadIds } = await prepareStudySources(klass, {
+          scope: data.get("scope"),
+          signal: controller.signal,
+          onProgress: (message) => { generationStatus.textContent = message; }
+        });
+        controller.signal.throwIfAborted();
+        generateBtn.innerHTML = `${icon("sparkles", { size: 18 })} Generating…`;
+        generationStatus.textContent = "Generating from your course materials…";
+        const summary = await createStudyMaterialApi(classId, {
+          kind: toApiKind(uiType),
+          scope: { kind: "uploads", upload_ids: uploadIds },
+          options: { count, difficulty, time_limit_minutes: uiType === "Practice test" ? 15 : undefined }
+        });
+        // Persist the pending job so reloads and polling failures do not lose it.
+        await onMaterialAdded(formatRemoteMaterial(summary, klass.id, uiType));
+        renderMaterials();
+        const detail = await waitForStudyMaterial(summary.id, { signal: controller.signal });
+        await onMaterialAdded(formatRemoteMaterial(detail, klass.id, uiType));
+        renderMaterials();
+        if (detail.status === "failed") {
+          throw new Error("Study generation failed on the server. Try generating again.");
         }
+        if (detail.status !== "ready") {
+          generationStatus.textContent = "This material is still generating. Open it later to check its progress.";
+          return;
+        }
+        generationStatus.textContent = `Your ${uiType.toLowerCase()} is ready.`;
+        toast(`Generated ${uiType} ready to practice!`);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        generationStatus.textContent = error.message;
+        toast(error.message, { tone: "error" });
+      } finally {
+        window.removeEventListener("hashchange", stopWaiting);
+        generateBtn.disabled = false;
+        generateBtn.innerHTML = `${icon("sparkles", { size: 18 })} Generate study set`;
       }
-
-      const material = createLocalMaterial(uiType, klass, count);
-      onMaterialAdded(material);
-      toast(`${material.type} saved as a review set.`);
-      renderMaterials();
     });
 
     list.addEventListener("click", async (event) => {
       const deleteId = event.target.closest("[data-delete-material]")?.dataset.deleteMaterial;
       if (deleteId) {
-        const token = await getAccessToken();
-        if (token) {
-          deleteStudyMaterialApi(deleteId).catch(() => {});
+        const material = klass.materials.find((item) => item.id === deleteId);
+        if (material?.isRemote) {
+          try {
+            await deleteStudyMaterialApi(deleteId);
+          } catch (error) {
+            toast(error.message, { tone: "error" });
+            return;
+          }
         }
         klass.materials = klass.materials.filter((m) => m.id !== deleteId);
+        await updateClass(klass.id, { materials: klass.materials });
         toast("Material deleted.");
         renderMaterials();
         return;
@@ -469,23 +365,22 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
 
       material.classId = klass.id;
 
-      // If remote and content not yet populated, fetch detail
-      const token = await getAccessToken();
-      if (token && material.isRemote && !material.questions?.length && !material.cards?.length && !material.content) {
+      if (material.isRemote && (material.status !== "ready" || (!material.questions?.length && !material.cards?.length && !material.content))) {
         try {
           const detail = await getStudyMaterialDetailApi(materialId);
-          if (detail.status) material.status = detail.status;
-          if (detail.content) {
-            const parsed = formatRemoteMaterial(detail, klass.id, material.type);
-            material.cards = parsed.cards;
-            material.sections = parsed.sections;
-            material.content = parsed.content;
-            material.questions = parsed.questions;
-            if (parsed.timeLimitMinutes) material.timeLimitMinutes = parsed.timeLimitMinutes;
-          }
+          Object.assign(material, formatRemoteMaterial(detail, klass.id, material.type));
+          await updateClass(klass.id, { materials: klass.materials });
+          renderMaterials();
         } catch (e) {
-          console.warn("Could not load material detail:", e);
+          toast(e.message, { tone: "error" });
+          return;
         }
+      }
+      if (material.isRemote && material.status !== "ready") {
+        toast(material.status === "failed"
+          ? "Study generation failed. Generate a new study set to retry."
+          : "This study material is still generating. Open it again to check progress.", { tone: material.status === "failed" ? "error" : "busy" });
+        return;
       }
 
       if (material.type === "Practice test" && !material.timeLimitMinutes) {

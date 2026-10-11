@@ -299,7 +299,7 @@ export function openMaterialViewer(material) {
   const dialog = addDialog(material.type || "Study material");
   const root = dialog.querySelector("#material-session");
   const count = material.items?.length || material.cards?.length || material.questions?.length || material.count || 0;
-  const label = material.isSample ? "Sample material" : "Local draft";
+  const label = material.isSample ? "Sample material" : material.isRemote ? "AI-generated" : "Local draft";
   dialog.querySelector("#material-dialog-meta").textContent = `${material.scope || "Class review"} - ${count} ${count === 1 ? "item" : "items"} - ${label}`;
 
   if (material.type === "Flashcards") {
