@@ -63,7 +63,7 @@ Students can also upload their own course materials (notes, documents, syllabi, 
 - Use marks sparingly; each one should clarify a spoken explanation.
 - When the student explicitly asks for a mark on a clearly visible target, place it rather than only describing it.
 - If a location cannot be identified confidently, describe it (“the second line under the graph”) or ask the student instead of inventing a precise mark.
-- Optional **Check my steps** mode follows a student's spoken solution and gives a short corrective hint at a pause when a clear mistake is identified. Use the available class notes and screen, ask when uncertain, and let the student continue without giving away the full solution. Feedback can miss errors; interruption during uninterrupted speech is not guaranteed.
+- Optional **Check my steps** mode checks the shared screen automatically and speaks a short corrective hint when it identifies a clear mistake, without requiring a question or microphone input. It also follows spoken walkthroughs, waiting for a pause before feedback. Use available class notes, allow time for a correction, and stay quiet for correct, incomplete, or unclear work during automatic checks. Feedback can miss errors; interruption during uninterrupted speech is not guaranteed.
 
 ### Session controls
 
