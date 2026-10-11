@@ -88,6 +88,8 @@ The class Tutor sends the backend class UUID from the persisted `backendId` mapp
 
 The browser may send only `text`, `audio`, `audio_end`, `frame`, and `annotation_result` events. Event payloads are size-limited and validated; frame payloads must be JPEG and are rate-limited. The backend emits `ready`, `assistant`, `annotation_request`, and sanitized `error` events. WebSocket media stays in active session memory only.
 
+The frontend caps the longest JPEG frame dimension at 1280 pixels to stay within the backend's 2,200,000-byte decoded frame limit, including detailed 4K displays. Original source dimensions stay in the browser's frame map for annotation alignment and source-resize validation. The browser rejects annotation references older than ten seconds and caps active marks at eight across requests. The HTTP and WebSocket formats remain unchanged.
+
 ## Approved Live Tools
 
 - `google_search`: provider-managed grounding, configured by the backend.
