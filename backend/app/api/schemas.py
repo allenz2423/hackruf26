@@ -552,6 +552,22 @@ class LoginRequest(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
+# The ids the browser's "Create your own Jot" offers. Keep in step with frontend/src/avatar.js.
+AvatarColor = Literal["slate", "ocean", "mint", "moss", "sunny", "tangerine", "coral", "berry", "grape"]
+AvatarFace = Literal["happy", "wink", "sleepy", "surprised", "grin"]
+AvatarAccessory = Literal["none", "glasses", "cap", "headphones", "party", "crown"]
+
+
+class Avatar(BaseModel):
+    """A customised Jot: three ids from fixed lists, never free text."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    color: AvatarColor
+    face: AvatarFace
+    accessory: AvatarAccessory
+
+
 class AuthUser(BaseModel):
     """The account fields the browser may see; never a password or hash."""
 
@@ -562,6 +578,7 @@ class AuthUser(BaseModel):
     display_name: str
     email: str | None = None
     is_demo: bool = False
+    avatar: Avatar | None = None
 
 
 class MeResponse(BaseModel):
@@ -579,6 +596,7 @@ class ProfileUpdate(BaseModel):
 
     username: str | None = Field(default=None, min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")
     email: str | None = Field(default=None, max_length=254)
+    avatar: Avatar | None = None
 
     @field_validator("username", mode="before")
     @classmethod

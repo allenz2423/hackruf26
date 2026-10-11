@@ -277,7 +277,7 @@ Existing local drafts remain labeled as local drafts; generate a new material fr
 | `POST /api/auth/login` | Log in with `identifier` (username or email) and `password`. Always `401 invalid_credentials` with one generic message on failure. |
 | `POST /api/auth/logout` | End the session and clear the cookie. Safe when already logged out. |
 | `GET /api/auth/me` | `{"user": {...}}` for a logged-in account, `{"user": null}` for a guest. The user includes `is_demo`. |
-| `PATCH /api/auth/me` | Change `username` and/or `email` (send `email: null` or `""` to remove it). Only sent fields change. `409 username_taken` / `email_taken` if already used; a display name that was just the old username follows the new one. |
+| `PATCH /api/auth/me` | Change `username`, `email` (send `null` or `""` to remove it), and/or `avatar`. Only sent fields change. `409 username_taken` / `email_taken` if already used; a display name that was just the old username follows the new one. |
 | `POST /api/auth/password` | Body `current_password`, `new_password` (8 to 128 characters). `400 incorrect_password` if the current one is wrong, `400 password_unchanged` if the new one is the same. On success every other session of the account is ended and this one stays; responds `204`. Rate limited like login. |
 
 - Usernames are 3 to 32 characters (letters, numbers, `.`, `_`, `-`) and unique ignoring case. Passwords are 8 to 128 characters and stored only as salted scrypt hashes.
@@ -287,3 +287,7 @@ Existing local drafts remain labeled as local drafts; generate a new material fr
 ### Demo account
 
 `users.is_demo` marks the single demo account (create or update it with `python -m app.scripts.seed_user NAME PASSWORD --demo`). The flag is returned by `/api/auth/me` and login so the client knows whether to show the built-in sample classes. The server never creates classes for any account; sample content is client-side and only for the demo account. Databases created before the flag existed are upgraded in place at startup.
+
+### Avatar ("Create your own Jot")
+
+`users.avatar` stores a customised Jot as JSON with exactly three ids: `color` (9 choices), `face` (5), and `accessory` (6, including `none`). The server validates them against fixed lists (`Avatar` in `schemas.py`), rejects anything else with `400`, and returns the avatar as `user.avatar` (`null` until one is saved). `PATCH /api/auth/me` with `{"avatar": null}` removes it. The browser draws the character from those ids; no image or free text is stored. Keep the lists in step with `frontend/src/avatar.js`.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from fastapi import APIRouter, Request, Response
 
@@ -157,13 +158,15 @@ async def update_me(request: Request, response: Response, payload: ProfileUpdate
     """Change the logged-in account's username and/or email."""
     user = await _require_user(request)
 
-    changes: dict[str, str | None] = {}
+    changes: dict[str, Any] = {}
     if "username" in payload.model_fields_set:
         if payload.username is None:
             raise ApiError(400, "invalid_request", "Enter a username.")
         changes["username"] = payload.username
     if "email" in payload.model_fields_set:
         changes["email"] = payload.email
+    if "avatar" in payload.model_fields_set:
+        changes["avatar"] = payload.avatar.model_dump() if payload.avatar else None
     if not changes:
         raise ApiError(400, "invalid_request", "Nothing to update.")
 

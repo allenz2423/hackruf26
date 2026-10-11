@@ -350,6 +350,57 @@ class ProfileAndPasswordTests(unittest.TestCase):
         )
         self.assertEqual(new.status_code, 200)
 
+    def test_avatar_is_saved_per_account_and_can_be_cleared(self) -> None:
+        self.signup(self.client)
+        self.assertIsNone(self.client.get("/api/auth/me").json()["user"]["avatar"])
+
+        mine = {"color": "berry", "face": "wink", "accessory": "crown"}
+        response = self.client.patch("/api/auth/me", json={"avatar": mine})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["user"]["avatar"], mine)
+        # Changing only the avatar leaves the rest of the account alone.
+        self.assertEqual(response.json()["user"]["username"], "Ada_L")
+
+        # It follows the account to another browser, and not to anyone else.
+        elsewhere = self.browser()
+        elsewhere.post("/api/auth/login", json={"identifier": "Ada_L", "password": "tutor-pass-1"})
+        self.assertEqual(elsewhere.get("/api/auth/me").json()["user"]["avatar"], mine)
+        other = self.browser()
+        self.signup(other, "Grace_H")
+        self.assertIsNone(other.get("/api/auth/me").json()["user"]["avatar"])
+
+        # Changing details later keeps the avatar; sending null removes it.
+        kept = self.client.patch("/api/auth/me", json={"email": "ada@example.com"})
+        self.assertEqual(kept.json()["user"]["avatar"], mine)
+        cleared = self.client.patch("/api/auth/me", json={"avatar": None})
+        self.assertIsNone(cleared.json()["user"]["avatar"])
+
+    def test_avatar_only_accepts_the_fixed_choices(self) -> None:
+        self.signup(self.client)
+        good = {"color": "grape", "face": "grin", "accessory": "none"}
+        for bad in (
+            {**good, "color": "hotpink"},
+            {**good, "face": "<script>alert(1)</script>"},
+            {**good, "accessory": "jetpack"},
+            {**good, "extra": "field"},
+            {"color": "grape", "face": "grin"},
+            {**good, "color": 7},
+            "slate",
+        ):
+            with self.subTest(avatar=bad):
+                response = self.client.patch("/api/auth/me", json={"avatar": bad})
+                self.assertEqual(response.status_code, 400)
+        self.assertIsNone(self.client.get("/api/auth/me").json()["user"]["avatar"])
+
+    def test_the_avatar_choices_match_the_ones_the_browser_offers(self) -> None:
+        schemas = self.client.app.openapi()["components"]["schemas"]["Avatar"]["properties"]
+        self.assertEqual(len(schemas["color"]["enum"]), 9)
+        self.assertEqual(len(schemas["face"]["enum"]), 5)
+        self.assertEqual(
+            schemas["accessory"]["enum"],
+            ["none", "glasses", "cap", "headphones", "party", "crown"],
+        )
+
     def test_wrong_current_password_attempts_are_rate_limited(self) -> None:
         limited = make_client(self.storage.name, auth_rate_limit=3)
         with limited:
@@ -422,8 +473,8 @@ class DemoColumnMigrationTests(unittest.IsolatedAsyncioTestCase):
             )
             database = await create_database(settings)
             try:
-                row = await database.fetchrow("SELECT username, is_demo FROM users")
-                self.assertEqual((row["username"], row["is_demo"]), ("Old_User", 0))
+                row = await database.fetchrow("SELECT username, is_demo, avatar FROM users")
+                self.assertEqual((row["username"], row["is_demo"], row["avatar"]), ("Old_User", 0, None))
             finally:
                 await database.close()
 

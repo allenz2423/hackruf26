@@ -59,7 +59,7 @@ Accounts live in SQLite (`users`, `user_sessions`). Passwords are stored as salt
 
 - **Guests** (no session) may use quick tutoring (`POST /api/live-sessions` without `class_id`), the calculator, and the Lean checker. They cannot read or write class-library data, and cannot start a class tutor session.
 - **Logged-in accounts** get their own class library. Another account's classes return 404, and class-library endpoints return 401 without a session.
-- `POST /api/auth/signup`, `POST /api/auth/login`, and `POST /api/auth/logout` need an allowed `Origin` and are rate limited (`AUTH_RATE_LIMIT` per `AUTH_RATE_WINDOW_SECONDS`). `GET /api/auth/me` returns `{"user": null}` for a guest. A logged-in account can change its details with `PATCH /api/auth/me` and its password with `POST /api/auth/password`.
+- `POST /api/auth/signup`, `POST /api/auth/login`, and `POST /api/auth/logout` need an allowed `Origin` and are rate limited (`AUTH_RATE_LIMIT` per `AUTH_RATE_WINDOW_SECONDS`). `GET /api/auth/me` returns `{"user": null}` for a guest. A logged-in account can change its details and saved avatar with `PATCH /api/auth/me` and its password with `POST /api/auth/password`.
 
 Create a local test account (refused when `APP_ENV=production`):
 

@@ -176,3 +176,5 @@ async def _add_missing_columns(connection: aiosqlite.Connection) -> None:
     await cursor.close()
     if "is_demo" not in columns:
         await connection.execute("ALTER TABLE users ADD COLUMN is_demo INTEGER NOT NULL DEFAULT 0")
+    if "avatar" not in columns:
+        await connection.execute("ALTER TABLE users ADD COLUMN avatar TEXT")

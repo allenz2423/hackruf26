@@ -11,6 +11,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
 import re
 import secrets
 import sqlite3
@@ -84,6 +85,18 @@ def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def _stored_avatar(value: Any) -> dict[str, str] | None:
+    """A saved avatar, or None if there is none or the stored value is not valid."""
+    from app.api.schemas import Avatar
+
+    if not value:
+        return None
+    try:
+        return Avatar.model_validate_json(value).model_dump()
+    except ValueError:
+        return None
+
+
 def public_user(row: dict[str, Any]) -> dict[str, Any]:
     """The account fields that are safe to send to the browser."""
     return {
@@ -92,6 +105,7 @@ def public_user(row: dict[str, Any]) -> dict[str, Any]:
         "display_name": row["display_name"],
         "email": row.get("email"),
         "is_demo": bool(row.get("is_demo")),
+        "avatar": _stored_avatar(row.get("avatar")),
     }
 
 
@@ -124,7 +138,7 @@ async def create_user(
         1 if is_demo else 0,
     )
     row = await database.fetchrow(
-        "SELECT id, username, email, display_name, is_demo FROM users WHERE id = ?1", new_id
+        "SELECT id, username, email, display_name, is_demo, avatar FROM users WHERE id = ?1", new_id
     )
     assert row is not None
     return row
@@ -136,7 +150,7 @@ async def authenticate(
     """Return the matching account for a username-or-email login, else None."""
     column = "email" if "@" in identifier else "username"
     row = await database.fetchrow(
-        f"SELECT id, username, email, display_name, is_demo, password_hash FROM users WHERE {column} = ?1",
+        f"SELECT id, username, email, display_name, is_demo, avatar, password_hash FROM users WHERE {column} = ?1",
         identifier,
     )
     if row is None:
@@ -144,7 +158,7 @@ async def authenticate(
         return None
     if not await verify_password(password, row["password_hash"]):
         return None
-    return {key: row[key] for key in ("id", "username", "email", "display_name", "is_demo")}
+    return {key: row[key] for key in ("id", "username", "email", "display_name", "is_demo", "avatar")}
 
 
 async def create_session(
@@ -169,7 +183,7 @@ async def user_for_token(database: SQLiteDatabase, token: str) -> dict[str, Any]
     if not token or len(token) > 128:
         return None
     return await database.fetchrow(
-        "SELECT u.id, u.username, u.email, u.display_name, u.is_demo "
+        "SELECT u.id, u.username, u.email, u.display_name, u.is_demo, u.avatar "
         "FROM user_sessions s JOIN users u ON u.id = s.user_id "
         "WHERE s.token_hash = ?1 AND s.expires_at > ?2",
         token_hash(token),
@@ -184,9 +198,9 @@ async def delete_session(database: SQLiteDatabase, token: str) -> None:
 async def update_profile(
     database: SQLiteDatabase, user_id: UUID | str, changes: dict[str, Any]
 ) -> dict[str, Any]:
-    """Change a username and/or email; `None` for email removes it. 409 if taken."""
+    """Change username, email, and/or avatar; `None` removes an email or avatar. 409 if taken."""
     current = await database.fetchrow(
-        "SELECT id, username, email, display_name, is_demo FROM users WHERE id = ?1", str(user_id)
+        "SELECT id, username, email, display_name, is_demo, avatar FROM users WHERE id = ?1", str(user_id)
     )
     if current is None:
         raise ApiError(401, "authentication_required", "Please log in again.")
@@ -205,19 +219,24 @@ async def update_profile(
 
     # A display name that was just the old username keeps following the username.
     display_name = username if current["display_name"] == current["username"] else current["display_name"]
+    if "avatar" in changes:
+        avatar = json.dumps(changes["avatar"], separators=(",", ":")) if changes["avatar"] else None
+    else:
+        avatar = current["avatar"]
     try:
         await database.execute(
-            "UPDATE users SET username = ?1, email = ?2, display_name = ?3 WHERE id = ?4",
+            "UPDATE users SET username = ?1, email = ?2, display_name = ?3, avatar = ?4 WHERE id = ?5",
             username,
             email or None,
             display_name,
+            avatar,
             str(user_id),
         )
     except sqlite3.IntegrityError:
         raise ApiError(409, "username_taken", "That username or email is already in use.") from None
 
     row = await database.fetchrow(
-        "SELECT id, username, email, display_name, is_demo FROM users WHERE id = ?1", str(user_id)
+        "SELECT id, username, email, display_name, is_demo, avatar FROM users WHERE id = ?1", str(user_id)
     )
     assert row is not None
     return row

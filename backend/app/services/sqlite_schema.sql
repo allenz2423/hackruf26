@@ -220,6 +220,7 @@ CREATE TABLE IF NOT EXISTS users (
     display_name  TEXT NOT NULL,
     password_hash TEXT NOT NULL,
     is_demo       INTEGER NOT NULL DEFAULT 0,
+    avatar        TEXT,
     created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 

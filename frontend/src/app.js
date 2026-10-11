@@ -22,6 +22,7 @@ import { renderLibraryTab } from "./library.js";
 import { createRouter } from "./router.js";
 import { ScreenCaptureController } from "./screen-capture.js";
 import { renderStudyTab } from "./study.js";
+import { AVATAR_ACCESSORIES, AVATAR_COLORS, AVATAR_FACES, avatarSvg, describeAvatar, normalizeAvatar, randomAvatar } from "./avatar.js";
 import { initTheme, themeToggleMarkup } from "./theme.js";
 import { renderGuestStudy } from "./guest-study.js";
 import { clearUploadedFiles, deleteUploadedFile, deleteUploadedFiles } from "./file-store.js";
@@ -200,7 +201,7 @@ function accountMenuMarkup() {
   return `
     <div class="account-menu" data-account-menu>
       <button class="btn btn-secondary account-trigger" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu-list">
-        <span class="account-initial" aria-hidden="true">${escapeHtml(name.charAt(0).toUpperCase())}</span>
+        <span class="account-avatar">${avatarSvg(currentUser.avatar, { size: 32 })}</span>
         <span class="account-name">${escapeHtml(name)}</span>
         ${chevron}
       </button>
@@ -1040,6 +1041,7 @@ const EMAIL_RULE = /^[^@\s]+@[^@\s]+\.[^@\s.]{2,}$/;
 // details and password, and where they log out.
 function renderAccount() {
   const user = currentUser;
+  const currentAvatar = normalizeAvatar(user.avatar);
 
   shell(`
     <section class="account-page section-stack">
@@ -1053,6 +1055,57 @@ function renderAccount() {
           <button id="account-logout" class="btn btn-danger-ghost" type="button">${icon("logOut", { size: 18 })} Log out</button>
         </div>
       </div>
+
+      <section id="jot-builder" class="panel jot-builder" aria-labelledby="jot-builder-title">
+        <div class="jot-preview">
+          <div class="jot-stage"></div>
+          <p class="jot-caption" aria-live="polite"></p>
+          <div class="jot-actions">
+            <button id="jot-shuffle" class="btn btn-secondary" type="button">${icon("sparkles", { size: 18 })} Surprise me</button>
+            <button id="jot-save" class="btn btn-primary" type="button">Save my Jot</button>
+          </div>
+          <p class="form-error" role="alert" hidden></p>
+        </div>
+        <div class="jot-options">
+          <div>
+            <h2 id="jot-builder-title">Create your own Jot</h2>
+            <p class="muted">Pick a color, a face, and an accessory. Your Jot shows up next to your name.</p>
+          </div>
+          <fieldset class="jot-group">
+            <legend>Color</legend>
+            <div class="jot-swatches">
+              ${AVATAR_COLORS.map((item) => `
+                <label class="jot-swatch">
+                  <input type="radio" name="jot-color" value="${item.id}"${item.id === currentAvatar.color ? " checked" : ""} />
+                  <span class="jot-swatch-dot" style="--swatch: ${item.body}"></span>
+                  <span class="visually-hidden">${item.name}</span>
+                </label>`).join("")}
+            </div>
+          </fieldset>
+          <fieldset class="jot-group">
+            <legend>Face</legend>
+            <div class="jot-tiles">
+              ${AVATAR_FACES.map((item) => `
+                <label class="jot-tile">
+                  <input type="radio" name="jot-face" value="${item.id}"${item.id === currentAvatar.face ? " checked" : ""} />
+                  <span class="jot-tile-art" data-face-art="${item.id}"></span>
+                  <span class="jot-tile-name">${item.name}</span>
+                </label>`).join("")}
+            </div>
+          </fieldset>
+          <fieldset class="jot-group">
+            <legend>Accessory</legend>
+            <div class="jot-tiles">
+              ${AVATAR_ACCESSORIES.map((item) => `
+                <label class="jot-tile">
+                  <input type="radio" name="jot-accessory" value="${item.id}"${item.id === currentAvatar.accessory ? " checked" : ""} />
+                  <span class="jot-tile-art" data-accessory-art="${item.id}"></span>
+                  <span class="jot-tile-name">${item.name}</span>
+                </label>`).join("")}
+            </div>
+          </fieldset>
+        </div>
+      </section>
 
       <div class="account-grid">
         <form id="profile-form" class="panel account-section" novalidate>
@@ -1108,6 +1161,72 @@ function renderAccount() {
   for (const input of document.querySelectorAll("#profile-form input, #password-form input")) {
     input.addEventListener("input", () => clearFieldError(input));
   }
+
+  // --- Your Jot ---------------------------------------------------------------
+  const builder = document.querySelector("#jot-builder");
+  const stage = builder.querySelector(".jot-stage");
+  const caption = builder.querySelector(".jot-caption");
+  const jotSave = builder.querySelector("#jot-save");
+  const jotError = builder.querySelector(".form-error");
+  let draft = { ...currentAvatar };
+
+  const sameAvatar = (a, b) => a.color === b.color && a.face === b.face && a.accessory === b.accessory;
+
+  // The big preview and every face and accessory tile are drawn in the current color.
+  const paintJot = ({ pop = true } = {}) => {
+    stage.innerHTML = avatarSvg(draft, { size: 176 });
+    caption.textContent = describeAvatar(draft);
+    for (const art of builder.querySelectorAll("[data-face-art]")) {
+      art.innerHTML = avatarSvg({ ...draft, face: art.dataset.faceArt, accessory: "none" }, { size: 52 });
+    }
+    for (const art of builder.querySelectorAll("[data-accessory-art]")) {
+      art.innerHTML = avatarSvg({ ...draft, accessory: art.dataset.accessoryArt }, { size: 52 });
+    }
+    if (pop) {
+      stage.classList.remove("is-popping");
+      void stage.offsetWidth;
+      stage.classList.add("is-popping");
+    }
+  };
+
+  builder.addEventListener("change", (event) => {
+    const input = event.target.closest('input[type="radio"]');
+    if (!input) return;
+    draft[input.name.replace("jot-", "")] = input.value;
+    jotError.hidden = true;
+    paintJot();
+  });
+
+  builder.querySelector("#jot-shuffle").addEventListener("click", () => {
+    draft = randomAvatar();
+    for (const input of builder.querySelectorAll('input[type="radio"]')) {
+      input.checked = draft[input.name.replace("jot-", "")] === input.value;
+    }
+    jotError.hidden = true;
+    paintJot();
+  });
+
+  jotSave.addEventListener("click", async () => {
+    if (sameAvatar(draft, currentAvatar)) {
+      toast("This is already your Jot.");
+      return;
+    }
+    jotError.hidden = true;
+    jotSave.disabled = true;
+    jotSave.textContent = "Saving...";
+    try {
+      currentUser = await updateProfile({ avatar: draft });
+      toast("Your Jot is saved.");
+      renderAccount();
+    } catch (error) {
+      jotSave.disabled = false;
+      jotSave.textContent = "Save my Jot";
+      jotError.textContent = error.message || "Could not save your Jot. Please try again.";
+      jotError.hidden = false;
+    }
+  });
+
+  paintJot({ pop: false });
 
   // --- Username and email -------------------------------------------------
   const profileForm = document.querySelector("#profile-form");

@@ -148,6 +148,10 @@ Only the demo account (`is_demo` from the server) starts with the built-in sampl
 
 Log in accepts a username or an email. Anything cached for an account (classes, uploaded files) is cleared on log out, when the server ends the session, and when a different account logs in on the same browser.
 
+## Create your own Jot
+
+The Account page has a character builder: pick one of 9 body colors, 5 faces (happy, wink, sleepy, surprised, big grin), and an accessory (none, round glasses, graduation cap, headphones, party hat, crown). A live preview updates as you choose; *Surprise me* picks at random and *Save my Jot* stores it on the account (`PATCH /api/auth/me` with `avatar`). The saved Jot appears in the header account menu. `avatar.js` draws it from three ids as SVG (a tilted note-block like the mascot, with a paper-colored sticker outline on accessories so they read on any color and in both themes); the ids must match the server's allowed lists. Every choice is a radio button with a text name, and the preview caption is a polite live region.
+
 ## Light and dark mode
 
 The theme is a choice, not just the system setting. `<html data-theme="light|dark">` selects the color tokens in `styles.css`. A small script in `index.html` applies the saved choice (`localStorage["jot-theme"]`) before first paint, so there is no flash; with no saved choice it follows `prefers-color-scheme`, including live changes, until the person picks one. `theme.js` owns the toggle: a sun/moon button in every header and floating in the corner of the welcome, login, and sign-up screens. It works if storage is blocked (the choice then lasts for the visit). Both themes keep text at 4.5:1 or better and control borders at 3:1 or better.

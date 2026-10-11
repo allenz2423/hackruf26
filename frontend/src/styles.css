@@ -3442,20 +3442,6 @@ p {
   gap: var(--space-2);
 }
 
-.account-initial {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 34%;
-  background: var(--primary);
-  color: var(--on-primary);
-  font-family: var(--font-display);
-  font-size: 0.875rem;
-  font-weight: 800;
-  transform: rotate(-6deg);
-}
-
 .account-name {
   max-width: 140px;
   overflow: hidden;
@@ -3712,4 +3698,203 @@ p {
   top: var(--space-4);
   right: var(--space-4);
   z-index: 15;
+}
+
+/* Create your own Jot */
+
+.avatar {
+  display: block;
+  flex: none;
+}
+
+.account-avatar {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+}
+
+.jot-builder {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  gap: var(--space-6);
+  padding: var(--space-5);
+}
+
+.jot-preview {
+  display: grid;
+  align-content: start;
+  gap: var(--space-3);
+}
+
+.jot-stage {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1;
+  border-radius: var(--radius-lg);
+  background: var(--surface-muted);
+}
+
+.jot-stage.is-popping .avatar {
+  animation: jot-pop 320ms var(--ease-out);
+}
+
+@keyframes jot-pop {
+  from {
+    opacity: 0.6;
+    transform: scale(0.9) rotate(-6deg);
+  }
+}
+
+.jot-caption {
+  min-height: 3em;
+  color: var(--muted);
+  font-size: 0.9375rem;
+  text-align: center;
+}
+
+.jot-actions {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.jot-options {
+  display: grid;
+  align-content: start;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+.jot-group {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.jot-group legend {
+  margin-bottom: var(--space-2);
+  padding: 0;
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.jot-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.jot-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(82px, 1fr));
+  gap: var(--space-2);
+}
+
+.jot-swatch,
+.jot-tile {
+  position: relative;
+  cursor: pointer;
+}
+
+.jot-swatch input,
+.jot-tile input {
+  position: absolute;
+  opacity: 0;
+  inset: 0;
+  margin: 0;
+  cursor: pointer;
+}
+
+.jot-swatch {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+}
+
+.jot-swatch-dot {
+  width: 30px;
+  height: 30px;
+  border-radius: 34%;
+  background: var(--swatch);
+  box-shadow: inset 0 0 0 1px rgba(28, 46, 55, 0.18);
+  transition: transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+
+.jot-swatch:hover .jot-swatch-dot {
+  transform: rotate(-6deg) scale(1.06);
+}
+
+.jot-swatch input:checked + .jot-swatch-dot {
+  box-shadow: 0 0 0 3px var(--surface), 0 0 0 5px var(--text);
+}
+
+.jot-swatch input:focus-visible + .jot-swatch-dot,
+.jot-tile input:focus-visible ~ .jot-tile-art {
+  outline: 3px solid var(--ring);
+  outline-offset: 4px;
+}
+
+.jot-tile {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  padding: var(--space-2) var(--space-1);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  transition: border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease);
+}
+
+.jot-tile:hover {
+  border-color: var(--line-strong);
+}
+
+.jot-tile:has(input:checked) {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.jot-tile-art {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: var(--radius-sm);
+}
+
+.jot-tile-name {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.jot-tile:has(input:checked) .jot-tile-name {
+  color: var(--text);
+}
+
+@media (max-width: 720px) {
+  .jot-builder {
+    grid-template-columns: minmax(0, 1fr);
+    padding: var(--space-4);
+  }
+
+  .jot-stage {
+    max-width: 240px;
+    justify-self: center;
+    width: 100%;
+  }
+
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jot-stage.is-popping .avatar {
+    animation: none;
+  }
 }
