@@ -334,14 +334,19 @@ function shell(content, { section = "classes", tutor = section === "tutor" } = {
   const isGuest = !currentUser;
   const brandHref = "#/home";
   const showSessionStatus = tutor || !["idle", "ended"].includes(state.session);
+  const sessionStatus = showSessionStatus ? `
+    <div class="status-strip" role="status" aria-live="polite" aria-label="Session status">
+      ${Object.keys(STATUS_LABELS).map(statusPill).join("")}
+    </div>` : "";
 
   app.innerHTML = `
     <a class="skip-link" href="#main-content">Skip to content</a>
-    <header class="app-header">
+    <header class="app-header${tutor ? " app-header--tutor" : ""}">
       <a class="brand" href="${brandHref}">
         <span class="brand-mark" aria-hidden="true"><img src="${jotMascot}" alt="" /></span>
         Jot
       </a>
+      ${tutor ? sessionStatus : ""}
       <nav class="primary-nav" aria-label="Primary">
         ${isGuest ? `
           <a href="#/study" ${section === "study" ? 'aria-current="page"' : ""}>Quick study</a>
@@ -353,12 +358,8 @@ function shell(content, { section = "classes", tutor = section === "tutor" } = {
       ${themeToggleMarkup()}
       ${accountMenuMarkup()}
     </header>
-    ${showSessionStatus ? `<div class="session-status-row">
-      <div class="status-strip" role="status" aria-live="polite" aria-label="Session status">
-        ${Object.keys(STATUS_LABELS).map(statusPill).join("")}
-      </div>
-    </div>` : ""}
-    <main id="main-content" tabindex="-1">${content}</main>
+    ${showSessionStatus && !tutor ? `<div class="session-status-row">${sessionStatus}</div>` : ""}
+    <main id="main-content"${tutor ? ' class="tutor-main"' : ""} tabindex="-1">${content}</main>
   `;
 
   app.querySelector(".skip-link")?.addEventListener("click", (event) => {
@@ -572,11 +573,14 @@ async function renderClassTab({ id, tab }) {
     window.location.hash = "#/classes";
     return;
   }
+  const tutor = tab === "tutor";
+  const backLink = `<a class="back-link" href="#/classes">${icon("arrowLeft", { size: 16 })} All classes</a>`;
 
   shell(`
     <section>
-      <a class="back-link" href="#/classes">${icon("arrowLeft", { size: 16 })} All classes</a>
-      <div class="class-header" style="--class-color: ${escapeHtml(classColor(klass))}">
+      ${tutor ? "" : backLink}
+      <div class="class-header${tutor ? " class-header--tutor" : ""}" style="--class-color: ${escapeHtml(classColor(klass))}">
+        ${tutor ? backLink : ""}
         <div class="class-title">
           <span class="class-icon" aria-hidden="true">${classBadge(klass)}</span>
           <div>
@@ -594,7 +598,7 @@ async function renderClassTab({ id, tab }) {
       </div>
       <div id="class-tab"></div>
     </section>
-  `, { section: "classes", tutor: tab === "tutor" });
+  `, { section: "classes", tutor });
 
   const root = document.querySelector("#class-tab");
 
@@ -667,6 +671,7 @@ function renderTutor(klass = null) {
             ${klass ? `<button id="open-material" class="btn btn-secondary" type="button" aria-haspopup="dialog" aria-label="Open a class material on the stage" title="Open a class material on the stage">${icon("file", { size: 18 })}<span class="btn-label">Open material</span></button>` : ""}
             <button id="pause-screen" class="btn btn-secondary" type="button" disabled aria-label="Pause screen sharing" title="Pause screen sharing">${icon("pause", { size: 18 })}<span class="btn-label">Pause</span></button>
             <button id="end-session" class="btn btn-danger-ghost" type="button" disabled aria-label="End session" title="End session">${icon("stop", { size: 18 })}<span class="btn-label">End</span></button>
+            <button id="open-tutor-settings" class="btn btn-secondary" type="button" aria-label="Tutor settings" title="Tutor settings" aria-haspopup="dialog" aria-controls="tutor-settings" aria-expanded="false">${icon("settings", { size: 18 })}<span class="btn-label">Settings</span></button>
           </div>
         </div>
         <p class="tutor-privacy-note">${icon("monitor", { size: 16 })}<span>${klass ? "Screen or material frames" : "Screen frames"} and enabled microphone audio pass through Jot's server for tutoring. They are not saved.</span></p>
@@ -699,26 +704,7 @@ function renderTutor(klass = null) {
       <aside class="panel conversation-panel" aria-label="Tutor conversation">
         <div id="jot-buddy"></div>
         <div class="conversation-head">
-          <div class="conversation-title-row">
-            <h2>Conversation</h2>
-            <button id="reset-tutor-memory" class="btn btn-ghost" type="button" disabled aria-label="Restart conversation" aria-describedby="reset-memory-description">${icon("refresh", { size: 16 })} Restart conversation</button>
-          </div>
-          <p id="reset-memory-description" class="tutor-memory-hint">Start fresh without previous conversation or saved recaps. Your screen stays shared; the microphone turns off. Saved recaps remain available next time.</p>
-          <div class="coaching-controls">
-            <label class="check-steps-control" for="check-steps">
-              <input id="check-steps" type="checkbox" aria-describedby="coaching-description" />
-              <span>Check my steps</span>
-            </label>
-            <p id="coaching-description" role="status" aria-live="polite"></p>
-            <label class="language-lock-control" for="tutor-language">
-              <span>${icon("lock", { size: 16 })} Language lock</span>
-              <select id="tutor-language" aria-describedby="language-description">
-                ${TUTOR_LANGUAGES.map((item) => `<option value="${item.id}">${escapeHtml(item.label)}</option>`).join("")}
-              </select>
-            </label>
-            <p id="language-description" role="status" aria-live="polite"></p>
-          </div>
-          ${tutorMemoryMarkup}
+          <h2>Conversation</h2>
         </div>
         <ol id="conversation-list" class="conversation-list" data-empty-prompt="${escapeHtml(klass ? `Ask about your shared screen or ${klass.name}'s course materials.` : "Share your screen or ask a general question to get started.")}" aria-live="polite"></ol>
         <div id="mic-feedback" class="mic-feedback" data-mic="off">
@@ -736,13 +722,43 @@ function renderTutor(klass = null) {
         </form>
       </aside>
     </section>
+    <dialog id="tutor-settings" class="dialog tutor-settings-dialog" aria-labelledby="tutor-settings-title">
+      <div class="dialog-body">
+        <div class="tutor-settings-heading">
+          <h2 id="tutor-settings-title">Tutor settings</h2>
+          <button id="close-tutor-settings" class="btn btn-ghost btn-icon" type="button" aria-label="Close tutor settings" autofocus>${icon("x", { size: 20 })}</button>
+        </div>
+        <section class="coaching-controls" aria-label="Tutoring preferences">
+          <label class="check-steps-control" for="check-steps">
+            <input id="check-steps" type="checkbox" aria-describedby="coaching-description" />
+            <span>Check my steps</span>
+          </label>
+          <p id="coaching-description" role="status" aria-live="polite"></p>
+          <label class="language-lock-control" for="tutor-language">
+            <span>${icon("lock", { size: 16 })} Language lock</span>
+            <select id="tutor-language" aria-describedby="language-description">
+              ${TUTOR_LANGUAGES.map((item) => `<option value="${item.id}">${escapeHtml(item.label)}</option>`).join("")}
+            </select>
+          </label>
+          <p id="language-description" role="status" aria-live="polite"></p>
+        </section>
+        ${tutorMemoryMarkup}
+        <section class="tutor-settings-restart" aria-label="Current conversation">
+          <button id="reset-tutor-memory" class="btn btn-secondary" type="button" disabled aria-describedby="reset-memory-description">${icon("refresh", { size: 16 })} Restart conversation</button>
+          <p id="reset-memory-description" class="tutor-memory-hint">Start fresh without previous conversation or saved recaps. Your screen stays shared; the microphone turns off. Saved recaps remain available next time.</p>
+        </section>
+        <div class="dialog-actions">
+          <button id="done-tutor-settings" class="btn btn-primary" type="button">Done</button>
+        </div>
+      </div>
+    </dialog>
   `;
 
   if (container) {
     container.innerHTML = content;
   } else {
     shell(`
-      <div class="page-heading">
+      <div class="page-heading tutor-heading">
         <div>
           <h1>Quick tutor</h1>
           <p class="muted">Get help with anything on your screen.</p>
@@ -783,6 +799,20 @@ function renderTutor(klass = null) {
     if (quizSources.length) selectedSources = quizSources;
   }
   const materialBar = document.querySelector("#material-bar");
+  const settingsDialog = document.querySelector("#tutor-settings");
+  const settingsTrigger = document.querySelector("#open-tutor-settings");
+  settingsTrigger.addEventListener("click", () => {
+    if (disposed || settingsDialog.open) return;
+    syncTutorControls();
+    settingsTrigger.setAttribute("aria-expanded", "true");
+    settingsDialog.showModal();
+  });
+  settingsDialog.addEventListener("close", () => {
+    settingsTrigger.setAttribute("aria-expanded", String(settingsDialog.open));
+    if (!disposed && !settingsDialog.open) settingsTrigger.focus({ preventScroll: true });
+  });
+  document.querySelector("#close-tutor-settings").addEventListener("click", () => settingsDialog.close());
+  document.querySelector("#done-tutor-settings").addEventListener("click", () => settingsDialog.close());
 
   function currentClass() {
     return klass ? getClassById(klass.id) || klass : null;
@@ -933,6 +963,7 @@ function renderTutor(klass = null) {
 
   disposeTutor = () => {
     disposed = true;
+    if (settingsDialog.open) settingsDialog.close();
     memoryPanel.dispose();
     if (tutorMemoryPanel === memoryPanel) tutorMemoryPanel = null;
     buddy?.dispose();
@@ -1087,6 +1118,7 @@ function renderTutor(klass = null) {
   document.querySelector("#clear-marks").addEventListener("click", () => annotations.clear());
   document.querySelector("#reset-tutor-memory").addEventListener("click", async () => {
     if (state.connection !== "connected" || !["active", "screen_paused"].includes(state.session)) return;
+    settingsDialog.close();
     const requestId = ++sessionRequestId;
     // A fresh ticket creates a new provider conversation. No old messages or
     // frames are replayed, and no new capture permission is requested.
