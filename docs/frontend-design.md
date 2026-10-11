@@ -45,7 +45,7 @@ On narrow viewports, stack the preview and conversation vertically. Keep the pre
 
 ### Main UI elements
 
-- **Header:** on Tutor pages, session, connection, screen-sharing, and microphone indicators share the app navigation row on wide screens and wrap below it on narrower screens. Keep the class name, All classes link, and Library/Study/Tutor tabs in one compact row when space allows; use a smaller heading and reduced top spacing so the preview starts near the top of the page. Class navigation wraps on mobile, and all status text remains visible. End session stays in the stage toolbar.
+- **Header:** all class tabs and Quick tutor use compact app navigation and reduced top spacing. On Tutor pages, session, connection, screen-sharing, and microphone indicators share the navigation row on wide screens and wrap below it on narrower screens. Keep the class name, All classes link, and Library/Study/Tutor tabs in one compact row when space allows, with a smaller heading across every class tab. Class navigation wraps on mobile, and all status text remains visible. End session stays in the stage toolbar.
 - **Screen stage:** video preview, annotation layer, source/re-share controls, and an explicit pause action.
 - **Tutor settings:** a dedicated modal opened from Settings in the stage toolbar. Check my steps, language lock, Remember sessions, saved recaps, and Restart conversation live here. The conversation panel contains the buddy, heading, transcript, microphone status, and composer. Closing settings returns focus to its trigger; Escape closes it, navigation disposes it, and existing session locks remain in effect.
 - **Conversation:** user questions, tutor text transcript, connection/retry notices, and a Clear conversation control.
@@ -68,7 +68,7 @@ Classes ─┬─ Math 151 ─┬─ Library   (uploads: notes, docs, syllabus, 
 
 **Classes page.** A grid of class cards plus **New class**. Each card has a band in the class color with the class badge (a subject icon or the class initial) hanging over its edge, then the name, upload and study-set counts ("No materials yet" when empty), and the next exam from the syllabus if known. A "⋯" options menu holds **Edit class** and **Delete**. Edit class changes the name, color (nine deep inks), and icon (sixteen subject icons or the initial) with a live badge preview. Color and icon are saved with the class on the account (`color` and `icon` ids from fixed lists in `class-style.js`), so every device shows the same card; classes styled before the backend stored the look upload it on the next sync. Delete asks for confirmation because it removes the class's uploads and study materials.
 
-**Class page.** A header with the class name and three tabs: Library, Study, and Tutor. The Tutor tab uses the compact workspace header described above.
+**Class page.** Library, Study, and Tutor share the same compact header: All classes link, class badge and name, and three tabs in one row on wide screens, wrapping on mobile.
 
 ### Library tab (uploads)
 

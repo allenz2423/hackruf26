@@ -330,7 +330,7 @@ function wireMenu(menu, { signal, onSelect } = {}) {
 }
 
 // `section` picks the highlighted nav link; `tutor` marks any tutor page, including a class's Tutor tab.
-function shell(content, { section = "classes", tutor = section === "tutor" } = {}) {
+function shell(content, { section = "classes", tutor = section === "tutor", compact = tutor } = {}) {
   const isGuest = !currentUser;
   const brandHref = "#/home";
   const showSessionStatus = tutor || !["idle", "ended"].includes(state.session);
@@ -341,12 +341,12 @@ function shell(content, { section = "classes", tutor = section === "tutor" } = {
 
   app.innerHTML = `
     <a class="skip-link" href="#main-content">Skip to content</a>
-    <header class="app-header${tutor ? " app-header--tutor" : ""}">
+    <header class="app-header${compact ? " app-header--compact" : ""}">
       <a class="brand" href="${brandHref}">
         <span class="brand-mark" aria-hidden="true"><img src="${jotMascot}" alt="" /></span>
         Jot
       </a>
-      ${tutor ? sessionStatus : ""}
+      ${compact ? sessionStatus : ""}
       <nav class="primary-nav" aria-label="Primary">
         ${isGuest ? `
           <a href="#/study" ${section === "study" ? 'aria-current="page"' : ""}>Quick study</a>
@@ -358,8 +358,8 @@ function shell(content, { section = "classes", tutor = section === "tutor" } = {
       ${themeToggleMarkup()}
       ${accountMenuMarkup()}
     </header>
-    ${showSessionStatus && !tutor ? `<div class="session-status-row">${sessionStatus}</div>` : ""}
-    <main id="main-content"${tutor ? ' class="tutor-main"' : ""} tabindex="-1">${content}</main>
+    ${showSessionStatus && !compact ? `<div class="session-status-row">${sessionStatus}</div>` : ""}
+    <main id="main-content" class="${compact ? "workspace-main" : ""}${tutor ? " tutor-main" : ""}" tabindex="-1">${content}</main>
   `;
 
   app.querySelector(".skip-link")?.addEventListener("click", (event) => {
@@ -578,9 +578,8 @@ async function renderClassTab({ id, tab }) {
 
   shell(`
     <section>
-      ${tutor ? "" : backLink}
-      <div class="class-header${tutor ? " class-header--tutor" : ""}" style="--class-color: ${escapeHtml(classColor(klass))}">
-        ${tutor ? backLink : ""}
+      <div class="class-header class-header--compact" style="--class-color: ${escapeHtml(classColor(klass))}">
+        ${backLink}
         <div class="class-title">
           <span class="class-icon" aria-hidden="true">${classBadge(klass)}</span>
           <div>
@@ -598,7 +597,7 @@ async function renderClassTab({ id, tab }) {
       </div>
       <div id="class-tab"></div>
     </section>
-  `, { section: "classes", tutor });
+  `, { section: "classes", tutor, compact: true });
 
   const root = document.querySelector("#class-tab");
 
