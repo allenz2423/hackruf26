@@ -16,9 +16,9 @@ The annotations live inside the Screen Tutor page. A normal web page cannot draw
 
 - Semantic HTML for the page and controls.
 - CSS for the responsive two-column workspace, preview overlays, and status indicators.
-- Vanilla JavaScript ES modules for capture, Gemini session, audio, and annotation behavior.
+- Vanilla JavaScript ES modules for capture, audio, conversation UI, annotations, and backend session events.
 - Vite for local development and static asset bundling; no UI framework.
-- Google's `@google/genai` JavaScript SDK for the browser's Live API WebSocket session. The client receives an ephemeral token from the Python backend; it never receives the long-lived API key.
+- A provider-neutral WebSocket client for the backend. The frontend contains no provider SDK, model identifier, model instructions, tool declarations, or provider credentials.
 - Browser APIs: `getDisplayMedia()` for screen capture, `getUserMedia()` and Web Audio for microphone capture/playback, Canvas for frame sampling, and an SVG/canvas layer for marks.
 - File input, drag-and-drop, and `fetch`/`XMLHttpRequest` upload progress for course materials; `<video>`/`<audio>` for playing uploaded lectures.
 - Simple hash-based routing (`#/classes`, `#/classes/:id/library`, …) so the library, study, and tutor pages stay in one static app.
@@ -109,7 +109,7 @@ The screen-sharing workspace described above, with the class selected. The page 
 
 - `app.js` — page initialization, event wiring, top-level session state, and user-facing errors.
 - `screen-capture.js` — browser permission flow, `MediaStream` lifecycle, preview sizing, and sampled JPEG frames.
-- `gemini-live.js` — token request, `@google/genai` Live connection, input forwarding, response events, and function-call responses.
+- `live-session.js` — one-use backend ticket request, same-origin WebSocket lifecycle, media/input events, and server response events.
 - `audio.js` — optional microphone input, tutor audio playback, interruption, and mute/pause behavior.
 - `annotations.js` — tool argument validation, frame-to-preview coordinate mapping, SVG/canvas drawing, expiration, and dismissal.
 - `api.js` — same-origin calls to the Python backend.
@@ -120,23 +120,23 @@ The screen-sharing workspace described above, with the class selected. The page 
 - `quiz-player.js` — quiz and practice test taking, timer, submission, and results.
 - `flashcards.js` — flashcard deck view and sorting.
 
-Keep the model session in one controller so capture, audio, transcript, and annotation code do not create separate Live connections.
+Keep the backend session in one controller so capture, audio, transcript, and annotation code share one WebSocket.
 
 ## Session flow
 
 1. The student presses **Share screen**. In that click handler, call `navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })`. Let the browser choose the source; do not attempt to select one from JavaScript or reuse permission silently.
 2. Show the returned stream in a `<video>` element using `srcObject`. The local preview does not pass through the backend.
-3. Request a Live token from `POST /api/live-token`. Open a Live API session with model and settings matching the token constraints. If token creation or connection fails, stop the capture tracks and show a retry action.
-4. While screen sharing is active, sample the preview to JPEG at no more than the Live API's documented 1 frame per second. Send each frame with a client-generated `frame_id` and keep a short in-memory map of frame IDs to capture dimensions and timestamps.
-5. Send typed questions as text. When the student enables the microphone, request microphone permission separately and stream audio to the same Live session. Screen-only plus typed input remains available when microphone permission is denied.
-6. Play tutor audio and show output transcription as captions/conversation text. A response may include audio, transcript parts, and a function call; handle every part of a Live event rather than assuming one event contains only one kind of content.
-7. When the student ends screen sharing, stops the tracks, closes the Live session, clears frame buffers, and removes annotations. When only the microphone is paused, stop sending audio while keeping text/screen tutoring available.
+3. Request a one-use ticket from `POST /api/live-sessions`, then open `WS /api/live` on the same origin using the ticket subprotocol. If ticket creation or connection fails, stop capture tracks and show a retry action.
+4. While screen sharing is active, sample the preview to JPEG no more than once per second. Send each frame over the backend WebSocket with a client-generated `frame_id` and keep a short in-memory map of frame IDs to capture dimensions and timestamps.
+5. Send typed questions as text. When the student enables the microphone, request microphone permission separately and stream audio over the same WebSocket. Screen-only plus typed input remains available when microphone permission is denied.
+6. Play returned tutor audio and show transcript events as captions/conversation text. The backend translates provider events into a small, provider-neutral event protocol.
+7. When the student ends screen sharing, stop the tracks, close the backend session, clear frame buffers, and remove annotations. When only the microphone is paused, stop sending audio while keeping text/screen tutoring available.
 
-The Live API supports audio and video in a persistent session. Its current audio model uses audio responses; enable output transcription for readable captions. See the [Live API guide](https://ai.google.dev/gemini-api/docs/live-api/get-started-sdk), [capabilities guide](https://ai.google.dev/gemini-api/docs/live-api/capabilities), [session management guide](https://ai.google.dev/gemini-api/docs/live-api/session-management), and the [official JavaScript SDK](https://github.com/googleapis/js-genai).
+The browser-to-backend event contract is intentionally separate from provider payloads. The backend owns all provider connections, model configuration, instructions, and tool execution.
 
 ## Annotation rendering
 
-The `add_annotations` function is the only model-requested visual action. Each item contains a shape, a short label, a normalized rectangle, and the `frame_id` it references. The frontend:
+`add_annotations` is the only provider-requested visual action. The backend attaches the `frame_id` of the latest frame it forwarded. Each item contains a shape, a short label, and a normalized rectangle. The frontend:
 
 - Accepts only known shapes (`pointer`, `rectangle`, `underline`, `note`) and finite coordinates in the `0..1` range.
 - Rejects unknown frames, old frame IDs, out-of-bounds regions, long labels, and excessive mark counts.
@@ -144,7 +144,7 @@ The `add_annotations` function is the only model-requested visual action. Each i
 - Renders marks as pointer-events-disabled UI elements; they must not intercept input to the video or conversation controls.
 - Gives each mark a dismiss button in an accessible list and expires marks automatically. If an annotation references a stale frame, return an error tool response and display the spoken explanation without a mark.
 
-The example schema and coordinate convention live in [the product design](design.md#annotation-contract). All validation happens in the browser even though the model provided the arguments.
+The example schema and coordinate convention live in [the product design](design.md#annotation-contract). The browser performs final frame and geometry validation because it owns the preview and frame map.
 
 ## Client state model
 
@@ -167,14 +167,14 @@ The browser may stop a screen track when the user ends sharing from its own cont
 
 ## Privacy, accessibility, and failure behavior
 
-- Explain that screen frames and optional microphone audio go to Google's Gemini API before the student starts.
+- Explain that selected screen frames and enabled microphone audio pass through the Screen Tutor backend for live tutoring before the student starts. Screen Tutor does not save them.
 - Keep a visible sharing indicator and immediate End/Stop controls. A Screen pause action should stop the capture track; resuming invokes the browser picker again.
 - Keep captured frames, transcript, and marks in memory only by default. Clear them when the session ends.
 - Uploaded materials and generated study items are stored by the backend in the student's account. Make delete easy to find for every upload, material, and class.
 - Show distinct errors for unsupported file type, file too large, upload interrupted, processing failed, and generation failed, each with a retry where it makes sense.
-- Never log the ephemeral token or include it in app analytics.
+- Never log the one-use session ticket or include it in app analytics.
 - Use semantic buttons, visible focus, keyboard operation, captions, sufficient contrast, and reduced-motion support.
-- Show distinct errors for denied permissions, unsupported capture, failed token service, Live disconnect, and expired session. Do not continue sending a stream after an error or user stop.
+- Show distinct errors for denied permissions, unsupported capture, failed ticket issuance, backend session disconnect, and expired session. Do not continue sending a stream after an error or user stop.
 
 ## Frontend acceptance criteria
 
@@ -183,7 +183,7 @@ The browser may stop a screen track when the user ends sharing from its own cont
 - Tutor speech plays and its transcript is visible.
 - A valid annotation lands over the correct region of the preview; invalid or stale annotations are dropped safely.
 - Pause and End stop the corresponding media immediately and visibly.
-- The browser bundle contains no long-lived Gemini API key.
+- The browser bundle contains no provider SDK, model configuration, or provider credential.
 - A student can create classes (for example, Math and Science) and see each class's uploads and study materials kept separate.
 - A student can upload notes, a document, a syllabus, slides, and a lecture video into a class and see each one's progress until it is ready.
 - A ready lecture shows a timestamped transcript that seeks the player when clicked.

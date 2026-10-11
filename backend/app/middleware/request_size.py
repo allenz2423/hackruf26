@@ -40,7 +40,7 @@ class RequestSizeLimitMiddleware:
             return None
         path = scope.get("path", "")
         method = scope.get("method", "GET").upper()
-        if path in {"/api/live-token", "/api/tools/calculate"}:
+        if path in {"/api/live-sessions", "/api/tools/calculate"}:
             return self.capability_max_bytes
         if path == "/api/tools/verify-lean":
             return self.lean_max_bytes

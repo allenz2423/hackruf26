@@ -13,20 +13,20 @@ See the [product overview](docs/design.md), [frontend design](docs/frontend-desi
 ## Status
 
 The FastAPI backend uses SQLite for class-library data and private local storage
-for uploaded files. Supabase Auth remains the identity provider for browser
-sign-in; the backend verifies its access tokens and stores the verified user ID
-with each class. The default SQLite database and uploaded files live under
-`backend/.local/` and need persistent storage for deployed environments.
+for uploaded files. Local/demo ownership is scoped by a configured UUID, so no
+external auth provider is required. The default SQLite database and uploaded
+files live under `backend/.local/` and need persistent storage for deployed
+environments.
 
 ## Proposed stack
 
-- HTML, CSS, and JavaScript for the browser UI, with Google's JavaScript SDK for Gemini Live.
-- Python, FastAPI, and Pydantic for the token service.
+- HTML, CSS, and JavaScript for the browser UI, with a provider-neutral WebSocket connection to the backend.
+- Python, FastAPI, and Pydantic for server-owned Live sessions and content processing.
 - Gemini Live API using `gemini-3.8-live` for real-time multimodal tutoring.
-- Supabase Auth for sign-in and SQLite for backend-owned class-library data.
-- A small backend that issues constrained, short-lived Gemini Live credentials; the long-lived API key stays server-side. SQLite-backed class-library APIs store course notes and generated study materials.
+- SQLite for backend-owned class-library data.
+- The backend owns all provider SDK use, model configuration, instructions, and tools. The browser receives only a short-lived, one-use WebSocket ticket; the long-lived API key never leaves the server.
 
-See [backend setup and configuration](backend/README.md) to run the token
-service locally.
+See [backend setup and configuration](backend/README.md) to run the session
+gateway locally.
 
 The MVP annotates the shared-screen preview inside the web page. It does not draw over other applications outside the browser. The current Gemini model and API behavior are linked in the [design doc](docs/design.md#gemini-live-integration).

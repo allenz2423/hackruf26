@@ -12,11 +12,6 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 
-# Supabase CLI state is machine-local; keep config and migrations tracked.
-supabase/.temp/
-supabase/.branches/
-.supabase/
-
 # Frontend dependencies and build output
 frontend/node_modules/
 frontend/dist/

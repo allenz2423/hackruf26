@@ -1,6 +1,5 @@
 -- SQLite schema for backend-owned class library data.
--- Supabase Auth remains the identity provider. Auth UUIDs are stored as TEXT;
--- they intentionally have no cross-database foreign key into Supabase.
+-- Owner IDs are stored as TEXT so local/demo deployments can use a stable UUID.
 
 CREATE TABLE IF NOT EXISTS course_classes (
     id          TEXT PRIMARY KEY,

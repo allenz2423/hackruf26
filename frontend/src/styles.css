@@ -39,7 +39,7 @@
   --dur-base: 200ms;
   --ease: cubic-bezier(0.2, 0, 0, 1);
 
-  font-family: "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   font-size: 16px;
   line-height: 1.5;
 }
@@ -95,7 +95,7 @@ h3 {
 
 h1 {
   font-size: 1.75rem;
-  font-weight: 800;
+  font-weight: 700;
 }
 
 h2 {
@@ -265,7 +265,7 @@ ol {
   align-items: center;
   gap: var(--space-2);
   font-size: 1.125rem;
-  font-weight: 800;
+  font-weight: 700;
 }
 
 .brand-mark {
@@ -319,7 +319,17 @@ ol {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
-  margin-left: var(--space-3);
+}
+
+.session-status-row {
+  padding: var(--space-2) var(--space-6);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-muted);
+}
+
+.session-status-row .status-strip {
+  max-width: 1440px;
+  margin-inline: auto;
 }
 
 .skip-link {
@@ -526,7 +536,7 @@ main {
   background: color-mix(in srgb, var(--class-color, var(--primary)) 10%, var(--surface));
   color: color-mix(in srgb, var(--class-color, var(--primary)) 78%, var(--text));
   font-size: 1.125rem;
-  font-weight: 800;
+  font-weight: 700;
 }
 
 .class-name {
@@ -557,8 +567,9 @@ main {
   max-width: 100%;
   min-height: 32px;
   padding: 0 var(--space-2);
-  border-left: 2px solid var(--accent);
-  border-radius: 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
   color: var(--text);
   font-size: 0.8125rem;
   font-weight: 600;
@@ -1206,7 +1217,7 @@ main {
 .eyebrow {
   color: var(--primary);
   font-size: 0.75rem;
-  font-weight: 800;
+  font-weight: 700;
   letter-spacing: 0;
   text-transform: uppercase;
 }
@@ -1355,14 +1366,14 @@ main {
   display: grid;
   gap: var(--space-2);
   padding: var(--space-4) var(--space-5);
-  border: 1px solid var(--line);
-  border-left: 4px solid var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--line));
   border-radius: var(--radius-md);
-  background: var(--surface);
+  background: color-mix(in srgb, var(--danger-soft) 40%, var(--surface));
 }
 
 .question-review[data-result="correct"] {
-  border-left-color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 28%, var(--line));
+  background: color-mix(in srgb, var(--success-soft) 40%, var(--surface));
 }
 
 .review-heading {
@@ -1577,7 +1588,7 @@ main {
 }
 
 .conversation-list:empty::before {
-  content: "Ask about anything on your shared screen, or something from this class's materials.";
+  content: attr(data-empty-prompt);
   margin: auto;
   max-width: 260px;
   color: var(--muted);
@@ -2105,20 +2116,29 @@ main {
 
 .answer-feedback {
   min-height: 1px;
-  padding: 0 var(--space-3);
-  border-left: 3px solid var(--line-strong);
+  padding: 0;
 }
 
 .answer-feedback:has(strong) {
-  padding-block: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
 }
 
 .answer-feedback strong[data-correct="true"] {
   color: var(--success);
 }
 
+.answer-feedback:has(strong[data-correct="true"]) {
+  background: var(--success-soft);
+}
+
 .answer-feedback strong[data-correct="false"] {
   color: var(--danger);
+}
+
+.answer-feedback:has(strong[data-correct="false"]) {
+  background: var(--danger-soft);
 }
 
 .answer-feedback p {
@@ -2202,8 +2222,11 @@ main {
 
 @media (max-width: 640px) {
   .status-strip {
-    margin-left: 0;
     width: 100%;
+  }
+
+  .session-status-row {
+    padding-inline: var(--space-4);
   }
 
   .app-header {
@@ -2822,7 +2845,6 @@ main {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     width: 100%;
-    margin-left: 0;
   }
 
   .status-strip .pill {

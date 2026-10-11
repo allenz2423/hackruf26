@@ -1,54 +1,46 @@
-import { createClient } from "@supabase/supabase-js";
+const LOCAL_USER = {
+  id: "00000000-0000-4000-8000-000000000001",
+  email: "local@student"
+};
 
-// Supabase configuration
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "https://rmwpbaxufddzerxfbtwa.supabase.co";
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_z43N15w5KEE0byz46MMlFg_g-G6uRjE";
+const authListeners = new Set();
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: {
-    persistSession: true,
-    autoRefreshToken: true
-  }
-});
-
-// Authentication helpers
+// Local workspace helpers
 export async function getAccessToken() {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.access_token || "";
+  return "";
 }
 
 export async function getCurrentUser() {
-  const { data: { user } } = await supabase.auth.getUser();
-  return user;
+  return LOCAL_USER;
 }
 
 export async function signInWithEmail(email, password) {
-  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-  if (error) throw error;
-  return data;
+  void email;
+  void password;
+  return { user: LOCAL_USER, session: null };
 }
 
 export async function signUpWithEmail(email, password, displayName = "") {
-  const { data, error } = await supabase.auth.signUp({
-    email,
-    password,
-    options: {
-      data: { display_name: displayName }
-    }
-  });
-  if (error) throw error;
-  return data;
+  void email;
+  void password;
+  void displayName;
+  return { user: LOCAL_USER, session: null };
 }
 
 export async function signOut() {
-  const { error } = await supabase.auth.signOut();
-  if (error) throw error;
+  return undefined;
 }
 
 export function onAuthStateChange(callback) {
-  return supabase.auth.onAuthStateChange((event, session) => {
-    callback(event, session);
-  });
+  authListeners.add(callback);
+  queueMicrotask(() => callback("LOCAL_READY", { user: LOCAL_USER }));
+  return {
+    data: {
+      subscription: {
+        unsubscribe: () => authListeners.delete(callback)
+      }
+    }
+  };
 }
 
 // Internal HTTP client
@@ -104,10 +96,10 @@ export async function checkBackendHealth() {
   }
 }
 
-// Gemini Live token request
-export async function requestLiveToken(classId = null) {
+// One-use same-origin session ticket
+export async function requestLiveSession(classId = null) {
   const body = classId ? { class_id: classId } : {};
-  return await apiFetch("/api/live-token", {
+  return await apiFetch("/api/live-sessions", {
     method: "POST",
     body: JSON.stringify(body)
   });

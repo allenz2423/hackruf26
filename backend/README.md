@@ -1,11 +1,11 @@
 # Screen Tutor backend
 
-FastAPI owns the Gemini API key, provisions one-use Gemini Live tokens, verifies Supabase Auth access tokens, and serves the class library API. The browser connects directly to Gemini Live; screen frames, microphone audio, tutor audio, live transcripts, and annotation events do not pass through this service.
+FastAPI owns the Gemini API key, model configuration, Live sessions, and model tools, and serves the SQLite-backed class library API. The browser connects to a same-origin backend WebSocket. Screen frames and enabled microphone audio pass through the backend in memory and are forwarded to the provider; live media and conversation data are not logged or stored.
 
 ## Local setup
 
-1. Configure a Supabase project for browser sign-in and set its `SUPABASE_URL`. Supabase Auth remains the identity provider; application records are stored in SQLite.
-2. Copy the root `.env.example` to `.env` and configure `GEMINI_API_KEY`, `SUPABASE_URL`, and a random `FILE_URL_SIGNING_SECRET` with at least 32 characters. Set `SUPABASE_JWT_SECRET` only for projects still signing JWTs with HS256. Set `GEMINI_TEXT_MODEL=gemini-3.8-flash` to override its default.
+1. Copy the root `.env.example` to `.env` and configure `GEMINI_API_KEY` and a random `FILE_URL_SIGNING_SECRET` with at least 32 characters. Set `GEMINI_TEXT_MODEL=gemini-3.8-flash` to override its default.
+2. Keep the default `LOCAL_OWNER_ID` for a single local workspace, or replace it with another UUID if you need a separate SQLite owner namespace.
 3. Install Lean through `elan` if it is not already installed, then prepare the pinned Lean/Mathlib project. The proof checker uses the local `lake` executable; no container runtime is required.
 
    ```bash
@@ -33,14 +33,13 @@ The API listens on port 8000. A Vite development server can proxy `/api` to it. 
 
 ## Authentication and ownership
 
-When `SUPABASE_URL` is configured, protected APIs require `Authorization: Bearer <Supabase access token>`. The server validates the JWT signature and claims using Supabase JWKS, or `SUPABASE_JWT_SECRET` for legacy HS256 projects, and scopes every database query to the verified `sub` UUID. Sign-in, refresh, and sign-out remain Supabase Auth operations; the backend does not copy refresh tokens or create its own user-session table.
-
-Without `SUPABASE_URL`, configure `DEMO_GATE_TOKEN` to use the token, calculator, and Lean proof-check tools. If neither authentication option is configured, protected routes return `503`. Class-library routes return `503` without Supabase Auth because per-user ownership cannot be established. Production must configure Supabase Auth or a strong private demo gate for the token service.
+Class-library rows are scoped to `LOCAL_OWNER_ID` in SQLite. In development, same-origin or allowed-origin API requests can use that local owner directly. In production, configure a strong `DEMO_GATE_TOKEN` to protect session-ticket and tool endpoints.
 
 ## API
 
 - `GET /healthz`
-- `POST /api/live-token` with `{}` or optional `{"class_id":"<uuid>"}`
+- `POST /api/live-sessions` with `{}` or optional `{"class_id":"<uuid>"}`; returns a one-use ticket, not a provider credential
+- `WS /api/live` using the ticket as a WebSocket subprotocol
 - `POST /api/tools/calculate`
 - `POST /api/tools/verify-lean`
 - `GET|POST /api/classes`
@@ -59,7 +58,7 @@ Without `SUPABASE_URL`, configure `DEMO_GATE_TOKEN` to use the token, calculator
 
 The full request/response shapes, status codes, processing lifecycle, and data boundaries are in the [backend design](../docs/backend-design.md#http-api).
 
-Gemini Live advertises `verify_lean_proof` by default. The browser dispatches that blocking function call to `POST /api/tools/verify-lean` and returns the response to the same Live session using the original function-call ID. The endpoint accepts a formal proposition and a Lean tactic proof body, then returns `verified`, `rejected`, or `timed_out` with bounded diagnostics. Lean checks only the formal statement the model supplied.
+The backend executes the configured calculation and optional `verify_lean_proof` tools directly inside the Live session. Annotation requests are sent to the browser for frame/geometry validation and local rendering, then the result is returned to the session. The Lean checker accepts a formal proposition and tactic proof body and returns `verified`, `rejected`, or `timed_out` with bounded diagnostics. Lean checks only the formal statement supplied by the provider.
 
 ## Gemini models
 
@@ -72,6 +71,6 @@ Gemini Live advertises `verify_lean_proof` by default. The browser dispatches th
 - Long media is uploaded to Gemini's temporary Files API for processing and deleted after the job when possible.
 - Upload and generation jobs use FastAPI background tasks for the hackathon MVP. They run in-process; a restart can interrupt active work. Use a durable queue before multi-instance production.
 - The local private storage directory is not cloud storage and is ignored by Git. Use a persistent disk or move `LocalPrivateStorage` to a private object store before deploying to ephemeral hosts.
-- Rate limits are in-memory, per user and process. Use a shared store or gateway when deploying multiple workers/instances.
-- The Lean runner uses the pinned Lean 4/Mathlib project, caps input/output, limits concurrency, and applies a timeout plus CPU/file-size limits where `prlimit` is available. It is not a full OS sandbox; keep proof checks behind authentication and add process isolation before public multi-tenant deployment. Set `LEAN_TOOL_ENABLED=false` to omit the tool from newly issued Live tokens.
-- Uploaded course materials and generated study items are stored because the student explicitly adds them. Live screen/audio media and tutor conversations are not stored.
+- Rate limits are in-memory, per user and process. Session tickets expire after 45 seconds and can be consumed once. Use a shared store or gateway when deploying multiple workers/instances.
+- The Lean runner uses the pinned Lean 4/Mathlib project, caps input/output, limits concurrency, and applies a timeout plus CPU/file-size limits where `prlimit` is available. It is not a full OS sandbox; keep proof checks behind authentication and add process isolation before public multi-tenant deployment. Set `LEAN_TOOL_ENABLED=false` to omit the tool from Live sessions.
+- Uploaded course materials and generated study items are stored because the student explicitly adds them. Live screen/audio media and tutor conversations pass through active session memory only and are never logged or stored.

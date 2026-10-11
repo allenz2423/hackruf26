@@ -6,30 +6,19 @@ Read the repository [AGENTS.md](../AGENTS.md) and [backend design](../docs/backe
 
 - Own Python service code and backend-specific configuration under `backend/`.
 - Use Python, FastAPI, Pydantic v2, `pydantic-settings`, Google's `google-genai` Python SDK, and Uvicorn as described in the backend design.
-- Do not change frontend implementation or UI behavior. If a client contract needs to change, update the shared design and coordinate with the frontend role first.
+- Coordinate shared WebSocket/API changes with the frontend role; do not change frontend implementation in a backend-only task.
 
 ## Required behavior
 
 - Keep `GEMINI_API_KEY` on the server. Load it from environment configuration; never return, log, or persist it.
-- Implement `POST /api/live-token` as a narrow token-provisioning endpoint. Validate input and output with Pydantic. Do not accept a model name, system instruction, or arbitrary tools from the caller.
-- Issue a short-lived ephemeral token constrained to the configured Live model and the approved session configuration/tool declarations where the Gemini API supports those constraints. The approved tool set is `google_search`, `calculate_expression`, `verify_lean_proof`, and `add_annotations`.
-- Return only `access_token`, `model`, and `expires_at` to the browser. Do not log or persist the ephemeral token.
-- Keep screen frames, microphone audio, tutor audio, transcripts, and annotation payloads out of backend requests, logs, and storage. The browser connects directly to Gemini Live.
-- Add origin checks, rate limits, request-size limits, and sanitized error responses to capability endpoints such as token issuance and calculator execution. Public deployments require an authenticated app session or an explicit demo gate.
+- The backend owns provider SDK usage, model selection, instructions, session configuration, and tools. The browser receives only a short-lived, one-use WebSocket ticket from `POST /api/live-sessions`, then connects to `WS /api/live`.
+- The approved Live tools are `google_search`, `calculate_expression`, `verify_lean_proof`, and `add_annotations`. Execute calculations and proof checks on the backend. Send annotation requests to the browser for local frame/geometry validation and rendering.
+- Relay screen frames and enabled microphone audio only while the session is active. Apply strict message size and frame-rate limits. Never log, record, or persist live media, transcripts, or conversations.
+- Add origin checks, rate limits, request-size limits, one-use ticket validation, and sanitized error responses. Public deployments require an authenticated app session or an explicit demo gate.
 - The calculator accepts only bounded numeric or symbolic expressions through its allow-listed parser. Never use SymPy's string parser on user input; never log or persist calculator expressions or results.
 - Lean proof checking accepts only a bounded formal proposition and tactic proof, rejects metaprogramming and admission syntax, runs with a timeout and OS resource limits, and never logs or stores submitted proofs. Keep the local runner behind authenticated access; isolate it before public multi-tenant deployment.
 - Keep backend-specific settings and Python dependencies under backend ownership. `.env` is local and ignored; `.env.example` contains names and safe defaults only.
 
 ## Shared API contract
 
-`POST /api/live-token` accepts `{}` and returns:
-
-```json
-{
-  "access_token": "short-lived-token",
-  "model": "gemini-3.8-live",
-  "expires_at": "ISO-8601 timestamp"
-}
-```
-
-The backend chooses the model and tool configuration. Keep this response and the Live session constraints aligned with the frontend design; communicate any contract change before implementation.
+`POST /api/live-sessions` returns a short-lived ticket and expiry, never a provider credential or model metadata. The ticket is consumed once by `WS /api/live`. The server owns the provider session and translates between its protocol and the browser's small event protocol.

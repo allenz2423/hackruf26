@@ -5,17 +5,17 @@ These instructions apply to all work in this repository. Read the relevant desig
 ## Project boundaries
 
 - Screen Tutor is a browser application. Marks are drawn over the shared-screen preview inside the page; do not implement a system-wide desktop overlay.
-- The browser captures the display and connects directly to Gemini Live using a short-lived ephemeral token.
-- The backend issues that token and protects `GEMINI_API_KEY`. Screen frames, microphone audio, model audio, transcripts, and annotation events must not pass through or be stored by the backend.
+- The browser captures and previews the display, then relays sampled frames and enabled microphone audio through a same-origin backend WebSocket. Live media is handled in memory and never recorded or stored by Screen Tutor.
+- The backend owns all provider SDK use, `GEMINI_API_KEY`, model selection, instructions, session configuration, and tool execution. The browser must not contain provider SDKs, model identifiers, prompts, tool declarations, or provider credentials.
 - The only model-requested visual action is `add_annotations`. The model must not get general mouse, keyboard, shell, or application-control tools.
 - Do not add media recording, screenshot persistence, or conversation storage without an explicit product decision.
 
 ## Shared integration contract
 
 - Frontend implementation belongs in `frontend/`; backend implementation belongs in `backend/`.
-- The backend exposes `POST /api/live-token`. The frontend sends an empty JSON object and receives `access_token`, `model`, and `expires_at`.
-- The backend chooses the model and tool configuration. The frontend must not send a model name, system instructions, or tools to expand its permissions.
-- The frontend uses the returned ephemeral token for one Live session. Never expose or bundle the long-lived Gemini API key in browser code.
+- The backend exposes `POST /api/live-sessions`. The frontend sends `{}` or an optional `class_id` and receives a short-lived, one-use WebSocket ticket and expiry; it receives no provider credential or model metadata.
+- The frontend connects to same-origin `WS /api/live` using that ticket as a WebSocket subprotocol. The backend chooses the provider, model, tools, and configuration; the client cannot expand permissions.
+- The backend forwards live media in memory and never logs or stores it. The frontend validates annotation geometry against its local frame map and renders marks only over the matching preview.
 - An annotation references a `frame_id` and uses normalized coordinates from 0 to 1 relative to that exact captured frame. The frontend validates geometry and renders it only over the corresponding preview.
 - Keep the HTTP API same-origin in production where possible. If either side needs to change the shared contract, update the relevant design docs and coordinate with the other role before changing code.
 
@@ -28,9 +28,9 @@ These instructions apply to all work in this repository. Read the relevant desig
 
 ## Stack and configuration
 
-- Frontend: HTML, CSS, vanilla JavaScript modules, Vite, and Google's `@google/genai` JavaScript SDK.
+- Frontend: HTML, CSS, vanilla JavaScript modules, Vite, and a provider-neutral backend WebSocket client.
 - Backend: Python, FastAPI, Pydantic v2, `pydantic-settings`, Google's `google-genai` Python SDK, and Uvicorn.
-- Gemini Live model default: `gemini-3.8-live`, selected by the backend.
+- Gemini Live model default: `gemini-3.8-live`, selected and used only by the backend.
 - `GEMINI_API_KEY` is server-only. Use `.env.example` as the template; `.env` is local and must remain untracked.
 - Follow the active task's requested verification scope. Do not broaden work into unrelated features.
 

@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse
 
 from app.api.dependencies import (
     database,
-    enforce_supabase_api_policy,
+    enforce_sqlite_api_policy,
     private_storage,
 )
 from app.api.errors import ApiError
@@ -73,7 +73,7 @@ ASSESSMENT_EXTENSIONS = {".pdf", ".docx", ".pptx", ".txt", ".md", ".png", ".jpg"
 
 async def _authorize(request: Request) -> tuple[UUID, SQLiteDatabase, Settings]:
     settings: Settings = request.app.state.settings
-    user_id = await enforce_supabase_api_policy(request, settings)
+    user_id = await enforce_sqlite_api_policy(request, settings)
     return user_id, database(request), settings
 
 

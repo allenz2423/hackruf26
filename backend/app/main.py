@@ -15,6 +15,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.class_library import router as class_library_router
 from app.api.errors import ApiError
+from app.api.live import router as live_router
 from app.api.routes import router
 from app.api.schemas import ErrorResponse
 from app.config import Settings, get_settings
@@ -22,11 +23,11 @@ from app.middleware.request_context import RequestContextMiddleware
 from app.middleware.request_size import RequestSizeLimitMiddleware
 from app.security.rate_limit import InMemoryRateLimiter
 from app.services.database import create_database
+from app.services.gemini_client import create_genai_client
 from app.services.gemini_content import GeminiContentService
-from app.services.gemini_tokens import GeminiTokenService, create_genai_client
 from app.services.lean_proofs import LeanProofService, LeanRuntimeUnavailable
+from app.services.live_sessions import GeminiLiveSessionService, LiveSessionTicketStore
 from app.services.storage import LocalPrivateStorage
-from app.services.supabase_auth import SupabaseJWTVerifier
 
 logger = logging.getLogger("screen_tutor.errors")
 
@@ -34,7 +35,6 @@ logger = logging.getLogger("screen_tutor.errors")
 def create_app(
     *,
     settings_override: Settings | None = None,
-    token_service_override: GeminiTokenService | None = None,
 ) -> FastAPI:
     """Build an application instance; overrides make integration composition explicit."""
 
@@ -44,9 +44,9 @@ def create_app(
         # Fail closed during startup. No endpoint is served with a missing API key.
         settings.require_gemini_key()
         application.state.settings = settings
-        application.state.rate_limiter = InMemoryRateLimiter(
-            settings.token_rate_limit,
-            settings.token_rate_window_seconds,
+        application.state.live_session_rate_limiter = InMemoryRateLimiter(
+            settings.live_session_rate_limit,
+            settings.live_session_rate_window_seconds,
         )
         application.state.calculator_rate_limiter = InMemoryRateLimiter(
             settings.calculator_rate_limit,
@@ -80,28 +80,26 @@ def create_app(
 
         application.state.database = await create_database(settings)
         application.state.private_storage = LocalPrivateStorage(settings)
-        application.state.supabase_verifier = (
-            SupabaseJWTVerifier(settings) if settings.supabase_url is not None else None
-        )
+        application.state.live_session_ticket_store = LiveSessionTicketStore()
 
-        client = None
-        content_client = None
-        if token_service_override is not None:
-            application.state.token_service = token_service_override
-            application.state.gemini_content_service = None
-        else:
-            client = create_genai_client(settings)
-            application.state.gemini_client = client
-            application.state.token_service = GeminiTokenService(client, settings)
-            content_client = create_genai_client(
-                settings,
-                timeout_seconds=settings.gemini_content_timeout_seconds,
-            )
-            application.state.gemini_content_client = content_client
-            application.state.gemini_content_service = GeminiContentService(
-                content_client,
-                settings,
-            )
+        client = create_genai_client(settings)
+        application.state.gemini_client = client
+        application.state.live_session_service = GeminiLiveSessionService(
+            client,
+            settings,
+            calculator_limiter=application.state.calculator_rate_limiter,
+            lean_limiter=application.state.lean_rate_limiter,
+            lean_service=application.state.lean_proof_service,
+        )
+        content_client = create_genai_client(
+            settings,
+            timeout_seconds=settings.gemini_content_timeout_seconds,
+        )
+        application.state.gemini_content_client = content_client
+        application.state.gemini_content_service = GeminiContentService(
+            content_client,
+            settings,
+        )
 
         try:
             yield
@@ -115,14 +113,14 @@ def create_app(
     application = FastAPI(
         title="Screen Tutor API",
         description=(
-            "Authenticated class library, Gemini content processing, constrained Live token service, "
-            "bounded symbolic calculator, and Lean proof checker. "
-            "Live media remains browser-to-Gemini."
+            "Authenticated class library, server-owned Live sessions and content processing, "
+            "bounded symbolic calculator, and Lean proof checker. Live media is not stored."
         ),
         version="0.1.0",
         lifespan=lifespan,
     )
     application.include_router(router)
+    application.include_router(live_router)
     application.include_router(class_library_router)
 
     @application.exception_handler(ApiError)

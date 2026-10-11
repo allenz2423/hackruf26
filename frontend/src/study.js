@@ -376,7 +376,7 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
       const token = await getAccessToken();
       if (token) {
         generateBtn.disabled = true;
-        generateBtn.innerHTML = `${icon("sparkles", { size: 18 })} Generating with Gemini...`;
+        generateBtn.innerHTML = `${icon("sparkles", { size: 18 })} Generating...`;
         try {
           const apiKind = toApiKind(uiType);
           const res = await createStudyMaterialApi(klass.id, {
@@ -396,7 +396,7 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
             return;
           }
 
-          toast("Generating study material with Gemini in the background...", { tone: "busy" });
+          toast("Generating study material in the background...", { tone: "busy" });
 
           // Poll until ready
           let attempts = 0;

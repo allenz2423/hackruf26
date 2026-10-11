@@ -10,7 +10,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-class LiveTokenRequest(BaseModel):
+class LiveSessionRequest(BaseModel):
     """Only a server-authorized class context may be selected by the caller."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -51,13 +51,12 @@ class LeanProofResponse(BaseModel):
     diagnostics: str = Field(min_length=1, max_length=4_000)
 
 
-class LiveTokenResponse(BaseModel):
-    """Short-lived bearer credential returned to the requesting browser."""
+class LiveSessionTicketResponse(BaseModel):
+    """One-use WebSocket ticket; it does not authorize direct model access."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    access_token: str = Field(min_length=1)
-    model: str = Field(min_length=1)
+    ticket: str = Field(min_length=32, max_length=128)
     expires_at: datetime
 
     @field_validator("expires_at")
@@ -479,16 +478,3 @@ class ErrorResponse(BaseModel):
     request_id: str | None = None
 
 
-class TokenIssueResult(BaseModel):
-    """Internal validated result produced by the Gemini token service."""
-
-    access_token: str = Field(min_length=1)
-    model: str = Field(min_length=1)
-    expires_at: datetime
-
-    @field_validator("expires_at")
-    @classmethod
-    def require_timezone_aware_expiration(cls, value: datetime) -> datetime:
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("token expiration must include a timezone")
-        return value.astimezone(timezone.utc)

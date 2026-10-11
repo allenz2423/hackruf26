@@ -11,6 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -58,11 +59,8 @@ class Settings(BaseSettings):
     gemini_text_model: str = "gemini-3.8-flash"
     gemini_timeout_seconds: float = 10.0
     gemini_content_timeout_seconds: float = 600.0
-    token_expiration_minutes: int = 30
-    new_session_expiration_seconds: int = 60
-
-    token_rate_limit: int = 5
-    token_rate_window_seconds: int = 60
+    live_session_rate_limit: int = 5
+    live_session_rate_window_seconds: int = 60
     calculator_rate_limit: int = 30
     calculator_rate_window_seconds: int = 60
     lean_tool_enabled: bool = True
@@ -80,8 +78,7 @@ class Settings(BaseSettings):
     library_json_body_max_bytes: int = 1_100_000
     frontend_dist: str = "frontend/dist"
 
-    supabase_url: str | None = None
-    supabase_jwt_secret: SecretStr | None = None
+    local_owner_id: UUID = UUID("00000000-0000-4000-8000-000000000001")
     sqlite_path: str = "backend/.local/screen_tutor.sqlite3"
     storage_dir: str = "backend/.local/private_uploads"
     file_url_signing_secret: SecretStr | None = None
@@ -106,25 +103,6 @@ class Settings(BaseSettings):
             raise ValueError("GEMINI_TEXT_MODEL must be a non-empty model identifier.")
         return model
 
-    @field_validator("supabase_url")
-    @classmethod
-    def validate_supabase_url(cls, value: str | None) -> str | None:
-        if value is None or not value.strip():
-            return None
-        candidate = value.strip().rstrip("/")
-        parsed = urlsplit(candidate)
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.netloc
-            or parsed.path
-            or parsed.query
-            or parsed.fragment
-            or parsed.username is not None
-            or parsed.password is not None
-        ):
-            raise ValueError("SUPABASE_URL must be an HTTP(S) project origin without a path.")
-        return candidate
-
     @field_validator("app_origins")
     @classmethod
     def validate_origin_list(cls, value: str) -> str:
@@ -139,12 +117,8 @@ class Settings(BaseSettings):
     def validate_limits_and_deployment(self) -> Settings:
         if self.gemini_timeout_seconds <= 0 or self.gemini_content_timeout_seconds <= 0:
             raise ValueError("Gemini timeouts must be greater than zero.")
-        if not 1 <= self.token_expiration_minutes <= 60:
-            raise ValueError("TOKEN_EXPIRATION_MINUTES must be between 1 and 60.")
-        if not 10 <= self.new_session_expiration_seconds <= 120:
-            raise ValueError("NEW_SESSION_EXPIRATION_SECONDS must be between 10 and 120.")
-        if self.token_rate_limit < 1 or self.token_rate_window_seconds < 1:
-            raise ValueError("Token rate limit and window must both be positive.")
+        if self.live_session_rate_limit < 1 or self.live_session_rate_window_seconds < 1:
+            raise ValueError("Live session rate limit and window must both be positive.")
         if self.calculator_rate_limit < 1 or self.calculator_rate_window_seconds < 1:
             raise ValueError("Calculator rate limit and window must both be positive.")
         if self.lean_rate_limit < 1 or self.lean_rate_window_seconds < 1:
@@ -192,12 +166,8 @@ class Settings(BaseSettings):
             if any(not origin.startswith("https://") for origin in origins):
                 raise ValueError("Production APP_ORIGINS must use HTTPS.")
             gate = self.demo_gate_token.get_secret_value().strip() if self.demo_gate_token else ""
-            if self.supabase_url is None and len(gate) < 32:
-                raise ValueError(
-                    "Production requires SUPABASE_URL or a high-entropy DEMO_GATE_TOKEN."
-                )
-            if self.supabase_url is not None and not self.supabase_url.startswith("https://"):
-                raise ValueError("Production SUPABASE_URL must use HTTPS.")
+            if len(gate) < 32:
+                raise ValueError("Production requires a high-entropy DEMO_GATE_TOKEN.")
         return self
 
     @property
@@ -231,17 +201,13 @@ class Settings(BaseSettings):
     def max_upload_bytes(self) -> int:
         return self.max_upload_mb * 1024 * 1024
 
-    @property
-    def supabase_issuer(self) -> str | None:
-        return f"{self.supabase_url}/auth/v1" if self.supabase_url else None
-
     def require_gemini_key(self) -> str:
         """Return the configured key or fail startup without leaking its value."""
         if self.gemini_api_key is None:
-            raise RuntimeError("GEMINI_API_KEY is required to start the token service.")
+            raise RuntimeError("GEMINI_API_KEY is required to start the backend services.")
         value = self.gemini_api_key.get_secret_value().strip()
         if not value:
-            raise RuntimeError("GEMINI_API_KEY is required to start the token service.")
+            raise RuntimeError("GEMINI_API_KEY is required to start the backend services.")
         return value
 
 

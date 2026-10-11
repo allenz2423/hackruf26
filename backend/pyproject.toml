@@ -5,14 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "screen-tutor-backend"
 version = "0.1.0"
-description = "FastAPI class library, Gemini Live token, and calculator service for Screen Tutor"
+description = "FastAPI class library, server-owned Live session, and calculator service for Screen Tutor"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "aiosqlite>=0.21,<1.0",
   "fastapi>=0.115,<1.0",
   "google-genai>=2.25,<3.0",
-  "PyJWT[crypto]>=2.10,<3.0",
   "pypdf>=5.3,<7.0",
   "python-docx>=1.1,<2.0",
   "python-multipart>=0.0.20,<1.0",

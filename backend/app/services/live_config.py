@@ -11,7 +11,8 @@ You are Screen Tutor, a concise and patient tutor. Start with a hint or a
 clarifying question rather than immediately giving away a full solution.
 Explain only what you can see or what the student tells you, and say when
 visual text is unclear. Keep spoken turns brief and invite the student to
-continue. Use the student's class notes only when the client supplies them.
+continue. Use the student's class notes only when they are provided for this
+session.
 
 Use Google Search to check current or uncertain factual claims. Explain when
 sources disagree or the available evidence is limited. Use
@@ -23,10 +24,13 @@ and proof supplied to it; acceptance does not confirm that the proposition
 faithfully represents the student's natural-language question.
 
 You may request one visual action: add_annotations. Use it sparingly and only
-when a location is clear in a frame the client just supplied. The client will
-validate the frame ID and geometry. If location is uncertain, explain in words
-instead. Never request or imply clicking, typing, scrolling, shell commands,
-or control of the student's computer or applications.
+when a location is clear in the most recently supplied screen frame. The
+server binds the request to that frame; the browser validates the frame and
+geometry before rendering. If location is uncertain, explain in words instead.
+When the student explicitly asks for a mark and the target is clearly visible,
+use add_annotations rather than only describing where the mark would go.
+Never request or imply clicking, typing, scrolling, shell commands, or control
+of the student's computer or applications.
 """.strip()
 
 
@@ -57,17 +61,15 @@ def annotation_tool() -> types.Tool:
     )
     parameters = types.Schema(
         type=types.Type.OBJECT,
-        properties={
-            "frame_id": types.Schema(type=types.Type.STRING),
-            "items": types.Schema(type=types.Type.ARRAY, items=item, max_items=5),
-        },
-        required=["frame_id", "items"],
+        properties={"items": types.Schema(type=types.Type.ARRAY, items=item, max_items=5)},
+        required=["items"],
     )
     declaration = types.FunctionDeclaration(
         name="add_annotations",
         description=(
-            "Request a small number of temporary marks over the exact recently-sent screen frame. "
-            "Use normalized coordinates from 0 to 1 and a short explanatory label."
+            "Request a small number of temporary marks over the most recently supplied screen frame. "
+            "Use normalized coordinates from 0 to 1 and a short explanatory label. The server attaches "
+            "the frame identifier."
         ),
         behavior=types.Behavior.BLOCKING,
         parameters=parameters,
@@ -157,7 +159,7 @@ def live_connect_config(
     *,
     include_lean_tool: bool = True,
 ) -> types.LiveConnectConfig:
-    """Construct the fixed client configuration protected by each token."""
+    """Construct the fixed server-owned Live session configuration."""
     instruction = LIVE_SYSTEM_INSTRUCTION
     if class_context:
         instruction = (
@@ -167,8 +169,8 @@ def live_connect_config(
             "for course definitions and methods, and say when it does not cover the question.\n\n"
             f"{json.dumps(class_context, ensure_ascii=False)}"
         )
-    # Screen frames arrive as browser-to-Gemini realtime input. They are not
-    # posted to this service and do not grant the model any control tools.
+    # The browser-to-server gateway forwards media in memory; no control tools
+    # beyond temporary in-page annotations are exposed.
     tools = [google_search_tool(), calculator_tool()]
     if include_lean_tool:
         tools.append(lean_proof_tool())

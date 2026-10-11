@@ -10,7 +10,7 @@ import {
   resetSampleData,
   syncClassesFromApi
 } from "./classes.js";
-import { GeminiLiveController } from "./gemini-live.js";
+import { LiveSessionController } from "./live-session.js";
 import { icon } from "./icons.js";
 import { renderLibraryTab } from "./library.js";
 import { createRouter } from "./router.js";
@@ -75,7 +75,13 @@ function syncTutorControls() {
   share.disabled = sharing;
   document.querySelector("#pause-screen").disabled = !sharing;
   document.querySelector("#end-session").disabled = !inSession;
-  document.querySelector("#mic-toggle")?.setAttribute("aria-pressed", String(state.mic === "on"));
+  const micToggle = document.querySelector("#mic-toggle");
+  if (micToggle) {
+    micToggle.disabled = state.connection !== "connected" && state.mic !== "on";
+    micToggle.setAttribute("aria-pressed", String(state.mic === "on"));
+  }
+  const sendButton = document.querySelector('#composer button[type="submit"]');
+  if (sendButton) sendButton.disabled = state.connection !== "connected";
 }
 
 function shell(content, { section = "classes" } = {}) {
@@ -103,10 +109,12 @@ function shell(content, { section = "classes" } = {}) {
           ${isGuest ? `<span class="nav-account-name">Guest</span>` : `<span class="nav-account-name">${escapeHtml(userLabel)}</span><span class="tier-badge badge-cloud">SQLite</span>`}
         </a>
       </nav>
-      ${showSessionStatus ? `<div class="status-strip" role="status" aria-live="polite" aria-label="Session status">
-        ${Object.keys(STATUS_LABELS).map(statusPill).join("")}
-      </div>` : ""}
     </header>
+    ${showSessionStatus ? `<div class="session-status-row">
+      <div class="status-strip" role="status" aria-live="polite" aria-label="Session status">
+        ${Object.keys(STATUS_LABELS).map(statusPill).join("")}
+      </div>
+    </div>` : ""}
     <main id="main-content" tabindex="-1">${content}</main>
   `;
 
@@ -345,7 +353,7 @@ function renderTutor(klass = null) {
             <button id="end-session" class="btn btn-danger-ghost" type="button" disabled aria-label="End session" title="End session">${icon("stop", { size: 18 })}<span class="btn-label">End</span></button>
           </div>
         </div>
-        <p class="tutor-privacy-note">${icon("monitor", { size: 16 })}<span>Screen frames go to Google Gemini while sharing. Microphone audio is sent only when you turn on the mic.</span></p>
+        <p class="tutor-privacy-note">${icon("monitor", { size: 16 })}<span>Screen frames and enabled microphone audio pass through Screen Tutor's server for tutoring. They are not saved.</span></p>
         <div class="screen-stage">
           <video id="screen-preview" autoplay muted playsinline aria-label="Shared screen preview"></video>
           <svg id="annotation-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg>
@@ -364,7 +372,7 @@ function renderTutor(klass = null) {
         <div class="conversation-head">
           <h2>Conversation</h2>
         </div>
-        <ol id="conversation-list" class="conversation-list" aria-live="polite"></ol>
+        <ol id="conversation-list" class="conversation-list" data-empty-prompt="${escapeHtml(klass ? `Ask about your shared screen or ${klass.name}'s course materials.` : "Share your screen or ask a general question to get started.")}" aria-live="polite"></ol>
         <form id="composer" class="composer">
           <label class="visually-hidden" for="question-input">Ask the tutor a question</label>
           <input id="question-input" name="question" autocomplete="off" placeholder="Ask a question…" />
@@ -403,11 +411,23 @@ function renderTutor(klass = null) {
 
   const video = document.querySelector("#screen-preview");
   const emptyStage = document.querySelector(".empty-stage");
-  const live = new GeminiLiveController({
+  let audioController = null;
+  const live = new LiveSessionController({
     classId: klass?.id || null,
     onMessage: (message) => appendMessage(message.role, message.text),
-    onStatusChange: (connection) => setStatus({ connection }),
-    onAnnotationRequest: (args) => annotations.addMany(args?.items || args?.annotations || [])
+    onStatusChange: (connection) => {
+      setStatus({ connection });
+      if (connection === "error" && state.session === "active") {
+        toast("The tutoring service could not connect. Please try again.", { tone: "error" });
+      }
+    },
+    onAudioData: (data, mimeType) => audioController?.playPcm(data, mimeType),
+    onAudioInterrupted: () => audioController?.stopPlayback(),
+    onAnnotationRequest: (payload) => {
+      const frameId = payload?.frame_id;
+      const items = (payload?.items || []).map((item) => ({ ...item, frame_id: frameId }));
+      return annotations.addMany(items);
+    }
   });
   const capture = new ScreenCaptureController({
     video,
@@ -422,20 +442,29 @@ function renderTutor(klass = null) {
     list: document.querySelector("#annotation-list"),
     getFrames: () => capture.getFrames()
   });
-  const audio = new AudioController({
-    onStatusChange: (mic) => setStatus({ mic })
+  audioController = new AudioController({
+    onStatusChange: (mic) => {
+      setStatus({ mic });
+      if (mic === "off") live.endAudioInput();
+    },
+    onAudioChunk: (chunk) => live.sendAudio(chunk)
   });
 
   document.querySelector("#share-screen").addEventListener("click", async () => {
     try {
       setStatus({ session: "selecting_screen", screen: "selecting" });
-      await capture.start();
+      const captureRequest = capture.start();
+      const playbackReady = audioController.preparePlayback();
+      await captureRequest;
+      await playbackReady;
       emptyStage.hidden = true;
       setStatus({ session: "connecting", screen: "sharing" });
       await live.connect();
       setStatus({ session: "active" });
     } catch (error) {
       capture.stop();
+      void audioController.close();
+      live.close();
       emptyStage.hidden = false;
       setStatus({ session: "error", screen: "not sharing", connection: "offline" });
       toast(error.message, { tone: "error" });
@@ -451,7 +480,7 @@ function renderTutor(klass = null) {
 
   document.querySelector("#end-session").addEventListener("click", () => {
     capture.stop();
-    audio.disable();
+    void audioController.close();
     live.close();
     annotations.clear();
     emptyStage.hidden = false;
@@ -461,7 +490,7 @@ function renderTutor(klass = null) {
   document.querySelector("#clear-marks").addEventListener("click", () => annotations.clear());
   document.querySelector("#mic-toggle")?.addEventListener("click", async () => {
     try {
-      await audio.toggle();
+      await audioController.toggle();
     } catch (error) {
       toast(error.message, { tone: "error" });
     }
@@ -473,9 +502,13 @@ function renderTutor(klass = null) {
     const text = input.value.trim();
     if (!text) return;
 
-    appendMessage("student", text);
-    live.sendText(text);
-    input.value = "";
+    try {
+      if (!live.sendText(text)) return;
+      appendMessage("student", text);
+      input.value = "";
+    } catch (error) {
+      toast(error.message || "The question could not be sent.", { tone: "error" });
+    }
   });
 }
 
@@ -519,7 +552,7 @@ async function renderAuth() {
           </div>
           <p class="auth-tier-desc">Quick, zero-setup study sessions without an account. Best for exploring features.</p>
           <ul class="auth-tier-features">
-            <li><span class="feature-check">✓</span> Gemini Live real-time screen & voice tutor</li>
+            <li><span class="feature-check">✓</span> Live voice and screen tutoring</li>
             <li><span class="feature-check">✓</span> Interactive flashcards and quiz players</li>
             <li><span class="feature-check">✓</span> Built-in scratchpad & scientific calculator</li>
             <li><span class="feature-check">✓</span> Sample study sets and quick review</li>
@@ -543,7 +576,7 @@ async function renderAuth() {
             <li><span class="feature-check">✓</span> Sync classes & syllabus maps automatically via FastAPI</li>
             <li><span class="feature-check">✓</span> Background lecture transcription & extraction</li>
             <li><span class="feature-check">✓</span> Study sets, practice tests & score history preserved in SQLite</li>
-            <li><span class="feature-check">✓</span> Gemini Live screen & audio sessions grounded in your files</li>
+            <li><span class="feature-check">✓</span> Voice and screen tutoring grounded in course files</li>
             <li><span class="feature-check">✓</span> High performance local WAL-mode storage</li>
           </ul>
           ${user ? `
@@ -562,7 +595,7 @@ async function renderAuth() {
         <span class="kind-icon">${icon("monitor", { size: 22 })}</span>
         <div>
           <strong>Backend & SQLite Database: <span class="pill" data-tone="${backendReady ? 'good' : 'busy'}">${backendReady ? 'Connected (SQLite)' : health.status}</span></strong>
-          <span class="row-meta">FastAPI server connected to SQLite (<code>screen_tutor.sqlite3</code>), provisions Live tokens, and extracts text.</span>
+            <span class="row-meta">FastAPI server connected to SQLite (<code>screen_tutor.sqlite3</code>), runs live tutoring sessions, and processes course materials.</span>
         </div>
       </div>
 
@@ -614,7 +647,7 @@ async function renderAuth() {
             </button>
           </form>
           <p class="field-hint" style="text-align: center; margin-top: 1.25rem;">
-            Authentication via Supabase Auth · Database storage powered by backend SQLite (<code>screen_tutor.sqlite3</code>)
+            Local workspace mode · Database storage powered by backend SQLite (<code>screen_tutor.sqlite3</code>)
           </p>
         </div>
       `}

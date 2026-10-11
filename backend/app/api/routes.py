@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, Body, Request, Response
+from fastapi import APIRouter, Request, Response
 
 from app.api.dependencies import (
     database,
     enforce_calculator_request_policy,
     enforce_lean_request_policy,
-    enforce_token_request_policy,
+    enforce_live_session_request_policy,
 )
 from app.api.errors import ApiError
 from app.api.schemas import (
@@ -20,18 +20,18 @@ from app.api.schemas import (
     HealthResponse,
     LeanProofRequest,
     LeanProofResponse,
-    LiveTokenRequest,
-    LiveTokenResponse,
+    LiveSessionRequest,
+    LiveSessionTicketResponse,
 )
 from app.config import Settings
 from app.services.calculator import CalculatorInputError, evaluate_expression
-from app.services.gemini_tokens import GeminiTokenService
 from app.services.lean_proofs import (
     LeanProofBusy,
     LeanProofInputError,
     LeanProofService,
     LeanRuntimeUnavailable,
 )
+from app.services.live_sessions import LiveSessionTicketStore
 
 logger = logging.getLogger("screen_tutor.api")
 router = APIRouter()
@@ -48,27 +48,26 @@ async def health_check() -> HealthResponse:
 
 
 @router.post(
-    "/api/live-token",
-    response_model=LiveTokenResponse,
+    "/api/live-sessions",
+    response_model=LiveSessionTicketResponse,
     tags=["live"],
     responses={
         400: {"description": "Malformed request or unexpected fields."},
         401: {"description": "The configured demo gate was not satisfied."},
         403: {"description": "The request origin is not allow-listed."},
         413: {"description": "The request body exceeds the configured limit."},
-        429: {"description": "The token issuance rate limit was reached."},
-        502: {"description": "Gemini token provisioning failed."},
+        429: {"description": "The session creation rate limit was reached."},
         503: {"description": "Server configuration is unavailable."},
     },
 )
-async def create_live_token(
+async def create_live_session_ticket(
     request: Request,
     response: Response,
-    payload: LiveTokenRequest = Body(default=LiveTokenRequest()),
-) -> LiveTokenResponse:
-    """Issue one constrained token; media continues directly from browser to Gemini."""
+    payload: LiveSessionRequest,
+) -> LiveSessionTicketResponse:
+    """Issue a one-use ticket for a server-owned Live WebSocket session."""
     settings = _settings(request)
-    await enforce_token_request_policy(request, settings)
+    await enforce_live_session_request_policy(request, settings)
 
     class_context = None
     if payload.class_id is not None:
@@ -104,27 +103,9 @@ async def create_live_token(
     response.headers["Cache-Control"] = "no-store, private"
     response.headers["Pragma"] = "no-cache"
 
-    service: GeminiTokenService = request.app.state.token_service
-    try:
-        result = await service.create_token(class_context=class_context)
-    except Exception as exc:  # noqa: BLE001 - upstream details must not reach clients or logs
-        request_id = getattr(request.state, "request_id", "unknown")
-        logger.error(
-            "upstream_failure request_id=%s category=gemini_token_provisioning_failed type=%s",
-            request_id,
-            type(exc).__name__,
-        )
-        raise ApiError(
-            502,
-            "token_provisioning_failed",
-            "A Live session token could not be created. Please try again.",
-        ) from None
-
-    return LiveTokenResponse(
-        access_token=result.access_token,
-        model=result.model,
-        expires_at=result.expires_at,
-    )
+    store: LiveSessionTicketStore = request.app.state.live_session_ticket_store
+    ticket, expires_at = await store.issue(class_context)
+    return LiveSessionTicketResponse(ticket=ticket, expires_at=expires_at)
 
 
 @router.post(
