@@ -74,6 +74,8 @@ class Settings(BaseSettings):
     upload_rate_window_seconds: int = 3600
     generation_rate_limit: int = 10
     generation_rate_window_seconds: int = 3600
+    study_tutor_rate_limit: int = 30
+    study_tutor_rate_window_seconds: int = 60
     study_pdf_executable: str = "tectonic"
     study_pdf_timeout_seconds: float = 60.0
     auth_rate_limit: int = 10
@@ -136,6 +138,8 @@ class Settings(BaseSettings):
             raise ValueError("Upload rate limit and window must both be positive.")
         if self.generation_rate_limit < 1 or self.generation_rate_window_seconds < 1:
             raise ValueError("Generation rate limit and window must both be positive.")
+        if self.study_tutor_rate_limit < 1 or self.study_tutor_rate_window_seconds < 1:
+            raise ValueError("Study tutor rate limit and window must both be positive.")
         if not self.study_pdf_executable.strip() or not 1 <= self.study_pdf_timeout_seconds <= 120:
             raise ValueError(
                 "Set STUDY_PDF_EXECUTABLE and a STUDY_PDF_TIMEOUT_SECONDS between 1 and 120."

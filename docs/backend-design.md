@@ -29,6 +29,7 @@ The class library stores classes, uploaded course materials, extracted text, lec
 | `GEMINI_API_KEY` | Yes | Server-only credential for Live sessions and content processing |
 | `GEMINI_MODEL` | No | Live model, defaults to `gemini-3.8-live` |
 | `GEMINI_TEXT_MODEL` | No | Text extraction and generation model, defaults to `gemini-3.8-flash` |
+| `STUDY_TUTOR_RATE_LIMIT`, `STUDY_TUTOR_RATE_WINDOW_SECONDS` | No | In-page quiz review chat requests per account or guest IP, default 30 per 60 seconds |
 | `STUDY_PDF_EXECUTABLE`, `STUDY_PDF_TIMEOUT_SECONDS` | No | Tectonic executable (PATH or `backend/.local/bin/tectonic`) and bounded PDF compilation timeout, default 60 seconds |
 | `APP_ORIGINS` | Deployment-dependent | Allowed browser origins |
 | `DEMO_GATE_TOKEN` | Production | Optional private bearer token gate for session-ticket/tool endpoints; required in production |
@@ -73,9 +74,20 @@ Class-library routes always scope reads and writes to the configured owner UUID.
 - `POST|GET /api/uploads/{upload_id}/document`
 - `GET /api/uploads/{upload_id}/document/files/{format}` (`pdf`, `latex`, or `original_text`)
 - `POST /api/study-materials/{material_id}/attempts`
+- `POST /api/study-tutor` for in-page quiz/practice-test review hints and follow-up explanations
 - `POST /api/study-materials/{material_id}/flags`
 
 Errors use `{"code": "...", "message": "...", "request_id": "..."}` with user-safe messages.
+
+### In-page study tutor
+
+`POST /api/study-tutor` returns `{"reply": "..."}` using the server's `GEMINI_TEXT_MODEL` (default `gemini-3.8-flash`). No Live connection or media is involved. The existing adaptive tutoring and answer-withholding policy applies: focused hints, prerequisite explanations, and analogous examples; avoid supplying the student's nontrivial next step or final answer.
+
+Remote reviews send `material_id`, `question_id`, `attempt_id`, and `messages`. Require a cookie-authenticated owner, a ready quiz/practice exam, a question in that material, and a saved attempt belonging to it. Load the question/key and submitted answer from SQLite, rather than trusting client-supplied answer keys. Include bounded excerpts only from that material's remaining ready sources in the same class; disclose missing, changed, or shortened source context to the model.
+
+Local/sample reviews omit those IDs and send `question: {prompt, choices, submitted_answer, correct_answer, explanation}` with `messages`. Treat this object as untrusted reference data; it grants no private class access. Guests follow the existing app/demo-gate policy. `choices` is an array of display strings (at most 8, 1000 characters each); prompt, answers, and explanation have 5000-character limits.
+
+`messages` is an alternating list of `{role: "user" | "assistant", text}`, beginning and ending with a user message: at most 15 entries, 6000 characters each, 24000 characters total; user messages are at most 2000 characters. The client keeps complete recent exchanges when trimming history. The request body is limited to 262144 bytes. Replies are bounded to 6000 characters, requests have a 45-second deadline and a service-wide concurrency limit of two, and rate limits use their own budget. Failures use sanitized 429/503/504 errors. Responses are private/no-store; neither side persists chat history, and logs contain no question, answer, reference, or provider response text.
 
 ## Live Session Flow
 

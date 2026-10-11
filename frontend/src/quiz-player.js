@@ -2,7 +2,7 @@ import { mathHtml, typesetMath } from "./math.js";
 import { escapeHtml, toast } from "./ui.js";
 import { submitAttemptApi, flagMaterialItemApi } from "./api.js";
 import { sourceCitationHtml, bindSourceCitations, sourceWarningsHtml } from "./source-citations.js";
-import { quizTutorContext } from "./quiz-tutor-context.js";
+import { StudyTutorPanel } from "./study-tutor.js";
 
 function formatTime(totalSeconds) {
   const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
@@ -126,6 +126,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
   let submitted = false;
   let expiredAnswers = null;
   let disposed = false;
+  const tutorPanels = new Map();
   const deadline = material.timeLimitMinutes ? Date.now() + material.timeLimitMinutes * 60 * 1000 : null;
 
   function clearTimer() {
@@ -135,14 +136,20 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
     }
   }
 
+  function disposeTutorPanels() {
+    for (const panel of tutorPanels.values()) panel.dispose();
+    tutorPanels.clear();
+  }
+
   function goBack() {
     disposed = true;
     clearTimer();
+    disposeTutorPanels();
     window.removeEventListener("hashchange", leave);
     onBack?.();
   }
 
-  const leave = () => { disposed = true; clearTimer(); };
+  const leave = () => { disposed = true; clearTimer(); disposeTutorPanels(); };
   window.addEventListener("hashchange", leave, { once: true });
 
   function startTimer() {
@@ -257,22 +264,38 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
     root.querySelector("[data-retake]").addEventListener("click", () => {
       disposed = true;
       clearTimer();
+      disposeTutorPanels();
       window.removeEventListener("hashchange", leave);
       renderQuizPlayer(root, material, { onBack, onAttemptCompleted });
     });
 
     root.querySelectorAll("[data-ask-tutor]").forEach((button) => {
       button.addEventListener("click", () => {
-        clearTimer();
-        const question = material.questions[Number(button.dataset.askTutor)];
-        const questionId = question.id || `q-${Number(button.dataset.askTutor) + 1}`;
-        const context = quizTutorContext(question, attempt.answers?.[questionId], material.sourceUploadIds);
-        sessionStorage.setItem("tutor_initial_question", JSON.stringify(context));
-        if (material.classId) {
-          window.location.hash = `#/classes/${encodeURIComponent(material.classId)}/tutor`;
-        } else {
-          window.location.hash = "#/tutor";
+        if (disposed) return;
+        const index = Number(button.dataset.askTutor);
+        if (!tutorPanels.has(index)) {
+          const question = material.questions[index];
+          const questionId = question.id || `q-${index + 1}`;
+          const review = attempt.questionResults?.find((result) => String(result.question_id) === String(questionId))
+            || attempt.questionResults?.[index];
+          const clip = (value, limit = 5000) => String(value ?? "").slice(0, limit);
+          const context = material.isRemote ? {
+            material_id: material.id, question_id: questionId, attempt_id: attempt.backendAttemptId
+          } : {
+            question: {
+              prompt: clip(question.prompt),
+              choices: (question.choices || []).slice(0, 8).map((choice, choiceIndex) =>
+                clip(typeof choice === "object" && choice !== null
+                  ? `${choice.id ?? choiceIndex}: ${choice.text ?? choice.label ?? ""}`
+                  : `${choiceIndex}: ${choice}`, 1000)),
+              submitted_answer: clip(getSubmittedDisplay(question, review?.submitted_answer ?? attempt.answers?.[questionId])),
+              correct_answer: clip(getCorrectDisplay(question, review?.correct_answer)),
+              explanation: clip(review?.explanation || question.explanation)
+            }
+          };
+          tutorPanels.set(index, new StudyTutorPanel(button.closest(".question-review"), button, context));
         }
+        tutorPanels.get(index).toggle();
       });
     });
 
@@ -339,6 +362,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
     let correctCount = localResults.filter((r) => r.isCorrect).length;
     let scorePercent = Math.round((correctCount / Math.max(1, material.questions.length)) * 100);
     let questionResults = null;
+    let backendAttemptId = null;
     if (expired) expiredAnswers = { ...answersMap };
     const inputs = [...form.querySelectorAll("input, textarea, select")];
     inputs.forEach((input) => { input.disabled = true; });
@@ -351,12 +375,14 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
       try {
         const attemptRes = await submitAttemptApi(material.id, answersMap);
         if (disposed) return;
-        if (typeof attemptRes.score_percent !== "number" || !Array.isArray(attemptRes.question_results)) {
+        if (typeof attemptRes.score_percent !== "number" || !Array.isArray(attemptRes.question_results)
+          || typeof attemptRes.attempt_id !== "string" || !attemptRes.attempt_id) {
           throw new Error("The server did not return a quiz score. Try submitting again.");
         }
         scorePercent = Math.round(attemptRes.score_percent);
         correctCount = attemptRes.correct_count;
         questionResults = attemptRes.question_results;
+        backendAttemptId = attemptRes.attempt_id;
       } catch (err) {
         if (disposed) return;
         submitted = false;
@@ -381,6 +407,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted } 
       answers: answersMap,
       results: localResults,
       questionResults,
+      backendAttemptId,
       scorePercent,
       correctCount,
       completedAt: new Date().toISOString(),

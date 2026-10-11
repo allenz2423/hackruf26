@@ -19,6 +19,7 @@ from app.api.errors import ApiError
 from app.api.live import router as live_router
 from app.api.routes import router
 from app.api.schemas import ErrorResponse
+from app.api.study_tutor import router as study_tutor_router
 from app.api.tutor_memory import router as tutor_memory_router
 from app.api.upload_documents import router as upload_documents_router
 from app.config import Settings, get_settings
@@ -31,6 +32,7 @@ from app.services.gemini_content import GeminiContentService
 from app.services.lean_proofs import LeanProofService, LeanRuntimeUnavailable
 from app.services.live_sessions import GeminiLiveSessionService, LiveSessionTicketStore
 from app.services.storage import LocalPrivateStorage
+from app.services.study_tutor import StudyTutorService
 from app.services.tutor_memory import TutorMemoryService
 
 logger = logging.getLogger("screen_tutor.errors")
@@ -72,6 +74,10 @@ def create_app(
             settings.generation_rate_limit,
             settings.generation_rate_window_seconds,
         )
+        application.state.study_tutor_rate_limiter = InMemoryRateLimiter(
+            settings.study_tutor_rate_limit,
+            settings.study_tutor_rate_window_seconds,
+        )
 
         lean_proof_service = LeanProofService(settings)
         if settings.lean_tool_enabled:
@@ -101,6 +107,9 @@ def create_app(
         application.state.gemini_content_service = GeminiContentService(
             content_client,
             settings,
+        )
+        application.state.study_tutor_service = StudyTutorService(
+            content_client, settings.gemini_text_model,
         )
         application.state.tutor_memory_service = TutorMemoryService(
             application.state.database, content_client, settings.gemini_text_model,
@@ -138,6 +147,7 @@ def create_app(
     application.include_router(class_library_router)
     application.include_router(upload_documents_router)
     application.include_router(tutor_memory_router)
+    application.include_router(study_tutor_router)
 
     @application.exception_handler(ApiError)
     async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:

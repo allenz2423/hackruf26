@@ -174,6 +174,29 @@ export function clearTutorMemoryApi(classId = null) {
   return tutorMemoryRequest(tutorMemoryPath(classId), { method: "DELETE" });
 }
 
+export async function askStudyTutorApi(payload, { signal } = {}) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const abort = () => controller.abort();
+  if (signal?.aborted) abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, 55_000);
+  try {
+    return await apiFetch("/api/study-tutor", {
+      method: "POST", body: JSON.stringify(payload), signal: controller.signal
+    });
+  } catch (error) {
+    if (timedOut) throw new Error("The tutor took too long. Try your question again.");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", abort);
+  }
+}
+
 // Calculator tool execution
 export async function calculateExpression(expression) {
   return await apiFetch("/api/tools/calculate", {

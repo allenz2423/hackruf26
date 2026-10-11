@@ -44,6 +44,8 @@ class RequestSizeLimitMiddleware:
             return self.capability_max_bytes
         if path == "/api/tools/verify-lean":
             return self.lean_max_bytes
+        if path == "/api/study-tutor":
+            return 262_144
         if method == "POST" and CLASS_ID_UPLOAD_PATH.fullmatch(path):
             return self.upload_max_bytes + 2 * 1024 * 1024
         if method in {"POST", "PATCH", "PUT", "DELETE"} and path.startswith(

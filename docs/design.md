@@ -52,7 +52,7 @@ Students can also upload their own course materials (notes, documents, syllabi, 
 2. **Upload course materials.** The student uploads notes, documents, a syllabus, lecture slides, a recorded video/audio lecture, or an existing test into that class, or pastes text. The app extracts text (and transcribes lectures) and shows each upload's processing status. A blank test is kept as a reference; a completed test is graded from an answer key when present, or against class notes with an estimated-grade label when no key is available.
 3. **Study with the class tutor.** When the student starts a tutoring session inside a class, the tutor gets that class's notes as reference material (all of them, or the uploads the student picks), alongside any shared screen. Instead of sharing a screen, the student can open one of the class's uploads on the stage; the tutor sees and can mark up that page.
 4. **Generate study materials.** The student picks a class (and optionally specific uploads, including existing tests, lectures, or syllabus topics) and asks for a quiz, study guide, practice exam, or flashcard set. The app generates it from those sources, saves it separately from the original uploads, and opens it.
-5. **Practice and review.** The student takes a quiz or practice exam in the app, sees a score, and can ask the tutor to explain any question they missed.
+5. **Practice and review.** The student takes a quiz or practice exam in the app, sees a score, and can open an inline text tutor on a missed question for hints and follow-up explanations while keeping the results visible.
 
 ## Product behavior
 

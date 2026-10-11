@@ -335,6 +335,65 @@ class AttemptResult(BaseModel):
     question_results: list[QuestionAttemptResult]
 
 
+class StudyTutorQuestion(BaseModel):
+    """Untrusted review context for a browser-only quiz or sample."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+    prompt: str = Field(min_length=1, max_length=5000, strict=True)
+    choices: list[Annotated[str, Field(max_length=1000, strict=True)]] = Field(
+        default_factory=list, max_length=8,
+    )
+    submitted_answer: str = Field(default="", max_length=5000, strict=True)
+    correct_answer: str = Field(default="", max_length=5000, strict=True)
+    explanation: str = Field(default="", max_length=5000, strict=True)
+
+
+class StudyTutorMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+    role: Literal["user", "assistant"]
+    text: str = Field(min_length=1, max_length=6000, strict=True)
+
+    @model_validator(mode="after")
+    def bound_user_text(self) -> StudyTutorMessage:
+        if self.role == "user" and len(self.text) > 2000:
+            raise ValueError("Study tutor questions must be at most 2000 characters.")
+        return self
+
+
+class StudyTutorRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    material_id: UUID | None = None
+    question_id: str | None = Field(default=None, min_length=1, max_length=100, strict=True)
+    attempt_id: UUID | None = None
+    question: StudyTutorQuestion | None = None
+    messages: list[StudyTutorMessage] = Field(min_length=1, max_length=15)
+
+    @model_validator(mode="after")
+    def validate_context_and_history(self) -> StudyTutorRequest:
+        if self.material_id is not None:
+            if not self.question_id or self.attempt_id is None or self.question is not None:
+                raise ValueError(
+                    "A remote review needs question_id and attempt_id, without question."
+                )
+        elif self.question is None or self.question_id is not None or self.attempt_id is not None:
+            raise ValueError("A local review needs question without remote IDs.")
+        if self.messages[-1].role != "user":
+            raise ValueError("The last message must be a user question.")
+        if any(
+            message.role != ("user" if index % 2 == 0 else "assistant")
+            for index, message in enumerate(self.messages)
+        ):
+            raise ValueError("Messages must alternate user and assistant, starting with user.")
+        if sum(len(message.text) for message in self.messages) > 24_000:
+            raise ValueError("Study tutor history is too long.")
+        return self
+
+
+class StudyTutorResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+    reply: str = Field(min_length=1, max_length=6000)
+
+
 class StudyMaterialFlagCreate(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     question_id: str = Field(min_length=1, max_length=100)
