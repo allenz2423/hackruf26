@@ -14,6 +14,8 @@ If the tutor keeps referring to erased or outdated work, use **Reset memory** in
 
 See the [product overview](docs/design.md), [frontend design](docs/frontend-design.md), and [backend design](docs/backend-design.md).
 
+See the [proactive coaching and barge-in design](docs/proactive-coaching-design.md) for the implemented backend, silent-typing behavior, spoken interruptions, test results, and frontend handoff.
+
 ## Status
 
 The FastAPI backend uses SQLite for class-library data and private local storage

@@ -49,8 +49,7 @@ class Settings(BaseSettings):
 
     app_env: Literal["development", "production"] = "development"
     app_origins: str = (
-        "http://localhost:5173,http://127.0.0.1:5173,"
-        "http://localhost:8000,http://127.0.0.1:8000"
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000"
     )
     demo_gate_token: SecretStr | None = None
 
@@ -61,6 +60,7 @@ class Settings(BaseSettings):
     gemini_content_timeout_seconds: float = 600.0
     live_session_rate_limit: int = 5
     live_session_rate_window_seconds: int = 60
+    live_review_timeout_seconds: float = 60.0
     calculator_rate_limit: int = 30
     calculator_rate_window_seconds: int = 60
     lean_tool_enabled: bool = True
@@ -124,6 +124,8 @@ class Settings(BaseSettings):
             raise ValueError("Gemini timeouts must be greater than zero.")
         if self.live_session_rate_limit < 1 or self.live_session_rate_window_seconds < 1:
             raise ValueError("Live session rate limit and window must both be positive.")
+        if not 1 <= self.live_review_timeout_seconds <= 180:
+            raise ValueError("LIVE_REVIEW_TIMEOUT_SECONDS must be between 1 and 180.")
         if self.calculator_rate_limit < 1 or self.calculator_rate_window_seconds < 1:
             raise ValueError("Calculator rate limit and window must both be positive.")
         if self.lean_rate_limit < 1 or self.lean_rate_window_seconds < 1:
@@ -135,7 +137,9 @@ class Settings(BaseSettings):
         if self.generation_rate_limit < 1 or self.generation_rate_window_seconds < 1:
             raise ValueError("Generation rate limit and window must both be positive.")
         if not self.study_pdf_executable.strip() or not 1 <= self.study_pdf_timeout_seconds <= 120:
-            raise ValueError("Set STUDY_PDF_EXECUTABLE and a STUDY_PDF_TIMEOUT_SECONDS between 1 and 120.")
+            raise ValueError(
+                "Set STUDY_PDF_EXECUTABLE and a STUDY_PDF_TIMEOUT_SECONDS between 1 and 120."
+            )
         if not 1 <= self.request_body_max_bytes <= 16_384:
             raise ValueError("REQUEST_BODY_MAX_BYTES must be between 1 and 16384.")
         if not 1_024 <= self.lean_request_max_bytes <= 131_072:
@@ -151,18 +155,21 @@ class Settings(BaseSettings):
         if not 1 <= self.max_class_name_length <= 200:
             raise ValueError("MAX_CLASS_NAME_LENGTH must be between 1 and 200.")
 
-        if self.demo_gate_token is not None and len(
-            self.demo_gate_token.get_secret_value().strip()
-        ) < 32:
+        if (
+            self.demo_gate_token is not None
+            and len(self.demo_gate_token.get_secret_value().strip()) < 32
+        ):
             raise ValueError("DEMO_GATE_TOKEN must contain at least 32 characters when configured.")
 
         if not self.sqlite_path.strip():
             raise ValueError("SQLITE_PATH must be a file path or :memory:.")
-        if self.file_url_signing_secret is None or len(
-            self.file_url_signing_secret.get_secret_value().strip()
-        ) < 32:
+        if (
+            self.file_url_signing_secret is None
+            or len(self.file_url_signing_secret.get_secret_value().strip()) < 32
+        ):
             raise ValueError(
-                "FILE_URL_SIGNING_SECRET must contain at least 32 characters for private file storage."
+                "FILE_URL_SIGNING_SECRET must contain at least 32 characters "
+                "for private file storage."
             )
 
         if not self.lean_lake_executable.strip():
