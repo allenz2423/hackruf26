@@ -36,6 +36,7 @@ The class library stores classes, uploaded course materials, extracted text, lec
 | `STORAGE_DIR` | No | Private upload storage path |
 | `FILE_URL_SIGNING_SECRET` | Yes | HMAC secret for short-lived private file links |
 | `LEAN_TOOL_ENABLED` | No | Enables the local Lean proof-check tool |
+| `LEAN_TIMEOUT_SECONDS` | No | Proof-check wall-clock limit, defaults to 30 seconds |
 | `MAX_UPLOAD_MB`, `MAX_UPLOADS_PER_CLASS`, `MAX_LECTURE_MINUTES` | No | Course-material limits |
 
 ## Request Policy
@@ -79,6 +80,10 @@ The SDK's `session.receive()` iterator ends after each completed model turn. The
 
 If `class_id` is supplied, the backend checks ownership in SQLite and builds class context from ready uploads. The client cannot choose the provider, model, system instructions, modalities, or tool declarations. Tickets contain no provider credential and do not grant direct model access.
 
+### Class Tutor integration
+
+The class Tutor sends the backend class UUID from the persisted `backendId` mapping, resolved by `getBackendClassId(klass)`, to `POST /api/live-sessions`. Its browser route slug is not a backend ID. Before opening Live, `prepareTutorClass()` reconciles the class and actual source files through the existing class/upload APIs and waits for processing to finish. Empty classes are created without requiring an upload. Navigation or End cancels client preparation and prevents a late connection. Quick Tutor sends `{}` and works without a class. The backend retains UUID validation and ownership checks.
+
 ### WebSocket events
 
 The browser may send only `text`, `audio`, `audio_end`, `frame`, and `annotation_result` events. Event payloads are size-limited and validated; frame payloads must be JPEG and are rate-limited. The backend emits `ready`, `assistant`, `annotation_request`, and sanitized `error` events. WebSocket media stays in active session memory only.
@@ -91,6 +96,10 @@ The browser may send only `text`, `audio`, `audio_end`, `frame`, and `annotation
 - `add_annotations`: the backend binds the request to the latest forwarded frame; the browser validates and renders temporary marks over the in-page preview, then returns a bounded result.
 
 No tool may click, type, control the desktop, run shell commands, or draw outside the web page.
+
+Live calculator and Lean calls validate their arguments with the same `CalculatorRequest` and `LeanProofRequest` contracts as their HTTP endpoints. The calculator parser returns a string, which is sent to the model as `{"result":"..."}`. Invalid or missing arguments return bounded `invalid_expression` or `invalid_proof` tool errors without ending the Live session.
+
+The native Lean runner imports the fixed `Mathlib.Tactic` prelude for readiness checks and submitted proofs. Loading the entire Mathlib umbrella module exceeded the local deadline even for `True`; the tactic prelude supports the common arithmetic/algebra tactics within the 30-second default limit. The tool declaration tells the model which prelude is available. Definitions from other Mathlib modules are not guaranteed to be present, and unsupported propositions return `rejected`. Input, heartbeat, process, and output bounds remain enforced.
 
 ## SQLite Data Model
 
@@ -112,7 +121,7 @@ Uploads are validated by extension, signature, size, and kind. Text files, DOCX,
 
 Structured content requests use `response_json_schema` with a compact schema derived from the Pydantic model, plus `response_mime_type: application/json`. This preserves JSON Schema keywords such as `additionalProperties` instead of converting them to the legacy provider schema's unsupported `additional_properties` field. The provider schema inlines local references, converts constant values to enums, normalizes nullable types, and omits length/range/format metadata to avoid rejection of complex nested question schemas. Types, required fields, enums, and object structure remain explicit. The same path handles upload summaries, syllabus extraction, lecture transcription, assessments, and generated study materials. Returned JSON is still validated locally with the full original Pydantic model and the existing count/answer/citation checks before saving; provider simplification does not relax backend validation. See [Gemini structured-output documentation](https://ai.google.dev/gemini-api/docs/generate-content/structured-output).
 
-Background jobs are in-process for the hackathon build. A restart can interrupt active processing, so production should use a durable queue before running multiple instances or workers.
+Background jobs are in-process for the hackathon build. On startup, the single backend process marks uploads and imported assessments left in `processing` as `failed` with `processing_interrupted`, and study materials left in `generating` as `failed` with `generation_interrupted`. Completed records stay unchanged. Retry failed uploads through the existing retry endpoint; request a new study material for interrupted generation. This prevents indefinite polling after a crash or restart. Processing completion and failure updates apply only to the active attempt, so an older upload job cannot overwrite a newer edit. Production should use a durable queue before running multiple instances or workers; startup recovery assumes this documented single-process deployment.
 
 ## Quiz Generation Integration for the Frontend Agent
 
@@ -122,7 +131,7 @@ Class-library APIs do **not** require an authentication token in the current loc
 
 The earlier browser implementation gated study generation on a nonempty token and called `createLocalMaterial()` instead. Its three generic question strings produced the reported “Quick check on New class workspace” local draft, without calling Gemini. That fallback has been removed. Generation, remote material loading/deletion, scoring, and remote flags now call the SQLite APIs without a token prerequisite.
 
-`frontend/src/course-sync.js` performs source reconciliation when the student generates a material. It retains the browser's class/upload IDs and persists `backendId` mappings in local class metadata. Class creation and initial file selection can still create browser-only records; only selected source content is synchronized by this generation path. Original files remain retrievable under their existing IndexedDB IDs.
+`frontend/src/course-sync.js` performs source reconciliation when the student generates a material or starts class tutoring. It retains the browser's class/upload IDs and persists `backendId` mappings in local class metadata. New classes and uploads call the SQLite APIs without a token prerequisite. Existing browser-only records, including files retained after a failed upload, synchronize through this preparation path. Original files remain retrievable under their existing IndexedDB IDs. Class listing, rename, deletion, library refresh, and syllabus loading likewise use backend UUID mappings without token gates; refresh preserves local IDs and source content. Creating a class with an existing local name reopens that class instead of resetting its saved uploads/materials. Pasted notes accept multiline content up to the backend's 1,000,000-character bound.
 
 Before requesting generation, the frontend must reconcile its browser-only records with the backend:
 
@@ -169,6 +178,8 @@ The backend's `_create_material_job()` calls `GeminiContentService.generate_mate
 For `quiz` and `practice_exam`, public material detail contains `content.format` and `content.questions`. Each question has a stable `id`, `kind`, `prompt`, optional choices as `{"id":"a","text":"..."}`, and source citations using backend `upload_id` values. Preserve those IDs when displaying questions and selections.
 
 Answer keys, accepted answers, rubrics, and explanations are intentionally omitted from public quiz detail. Submit remote quizzes through `POST /api/study-materials/{id}/attempts`, with an `answers` object mapping question IDs to selected choice IDs, `"true"`/`"false"`, or the student's short-answer text. This call also does not require an auth token. The response provides `score_percent`, `correct_count`, and `question_results` with the correct answers, explanations, and sources for review. Do not score backend quizzes using missing client-side answer keys. Remote flags use `POST /api/study-materials/{id}/flags` without a token prerequisite as well.
+
+Short-answer scoring always accepts the canonical answer as well as the generated accepted alternatives. Matching normalizes Unicode, letter case, and repeated whitespace while preserving punctuation, signs, decimal points, and mathematical operators: `-1` must not match `1`, `1.0` must not match `10`, and `x+y` must not match `xy`. Multiple-choice submissions must match the exact choice ID after trimming surrounding whitespace. This also applies to already saved quizzes; generating a new quiz is not required for the scoring correction.
 
 ### Errors and recovery
 

@@ -31,7 +31,9 @@ export function openDialog({ title, message = "", input = null, confirmLabel = "
         ${input ? `
           <label class="field">
             <span>${escapeHtml(input.label)}</span>
-            <input name="value" required maxlength="60" autocomplete="off" value="${escapeHtml(input.value || "")}" />
+            ${input.multiline
+              ? `<textarea name="value" required maxlength="${input.maxLength || 60}" rows="8" placeholder="${escapeHtml(input.placeholder || "")}">${escapeHtml(input.value || "")}</textarea>`
+              : `<input name="value" required maxlength="${input.maxLength || 60}" autocomplete="off" value="${escapeHtml(input.value || "")}" />`}
           </label>` : ""}
         <div class="dialog-actions">
           <button type="button" class="btn btn-secondary" data-cancel>Cancel</button>
@@ -42,7 +44,7 @@ export function openDialog({ title, message = "", input = null, confirmLabel = "
 
     let result = null;
     const form = dialog.querySelector("form");
-    const field = dialog.querySelector("input");
+    const field = dialog.querySelector("input, textarea");
 
     form.addEventListener("submit", (event) => {
       if (field) {

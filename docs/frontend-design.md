@@ -69,6 +69,8 @@ Classes ─┬─ Math 151 ─┬─ Library   (uploads: notes, docs, syllabus, 
 
 ### Library tab (uploads)
 
+The local SQLite workspace calls class/upload APIs without an access-token prerequisite. Existing browser route and IndexedDB IDs stay stable; a persisted `backendId` identifies the corresponding backend class or upload. Library refresh merges remote records into those mappings without discarding locally retained source files. New classes and uploads save through the API, with local files retained for recovery after network failures. Pasted notes use a multiline field with the backend's 1,000,000-character limit. Rename and deletion use the mapped backend UUID and surface API failures.
+
 ```text
 ┌────────────────────────────────────────────────────────────────────┐
 │ Math 151      [Library]  Study   Tutor                             │

@@ -31,6 +31,16 @@ FastAPI owns the Gemini API key, model configuration, Live sessions, and model t
 
 The API listens on port 8000. A Vite development server can proxy `/api` to it. If `frontend/dist` exists, FastAPI serves it from the same origin. Original course files are stored privately under `backend/.local/private_uploads` by default; use persistent private storage for both that directory and the SQLite database file when deploying this single-instance implementation. Back up both together. SQLite is configured for one backend process; move to a shared database before running multiple workers or instances.
 
+## Regression checks
+
+From the repository root, run the isolated calculator/Lean argument, quiz-scoring, and processing-lifecycle tests:
+
+```bash
+PYTHONPATH=backend backend/.venv/bin/python -m unittest discover -s backend/tests -v
+```
+
+These tests use in-memory SQLite and a fake Lean runner; they do not call Gemini or change the local course library. Live and native Lean integration checks require the running service and configured runtime.
+
 ## Authentication and ownership
 
 Class-library rows are scoped to `LOCAL_OWNER_ID` in SQLite. In development, same-origin or allowed-origin API requests can use that local owner directly. In production, configure a strong `DEMO_GATE_TOKEN` to protect session-ticket and tool endpoints.
@@ -62,15 +72,15 @@ The backend executes the configured calculation and optional `verify_lean_proof`
 
 ## Gemini models
 
-`GEMINI_MODEL` defaults to `gemini-3.8-live` for low-latency tutor sessions. `GEMINI_TEXT_MODEL` defaults to `gemini-3.8-flash` for document extraction, lecture transcription, syllabus parsing, and structured study-material generation. These are separate APIs and credentials: the Flash model does not provide the Live session.
+`GEMINI_MODEL` defaults to `gemini-3.8-live` for low-latency tutor sessions. `GEMINI_TEXT_MODEL` defaults to `gemini-3.8-flash` for document extraction, lecture transcription, syllabus parsing, and structured study-material generation. They use separate API modes with the same server-only Gemini key; the Flash model does not provide the Live session.
 
 ## Limits and deployment notes
 
 - `MAX_UPLOAD_MB` defaults to 250 MiB, matching the current browser-side validation. The server remains authoritative.
 - `MAX_UPLOADS_PER_CLASS` defaults to 100 uploads; `MAX_LECTURE_MINUTES` defaults to 120.
 - Long media is uploaded to Gemini's temporary Files API for processing and deleted after the job when possible.
-- Upload and generation jobs use FastAPI background tasks for the hackathon MVP. They run in-process; a restart can interrupt active work. Use a durable queue before multi-instance production.
+- Upload and generation jobs use FastAPI background tasks for the hackathon MVP. Startup marks interrupted work as failed so uploads can be retried and study generation can be requested again. Ready records are preserved. Run one backend process; use a durable queue before multi-instance production.
 - The local private storage directory is not cloud storage and is ignored by Git. Use a persistent disk or move `LocalPrivateStorage` to a private object store before deploying to ephemeral hosts.
 - Rate limits are in-memory, per user and process. Session tickets expire after 45 seconds and can be consumed once. Use a shared store or gateway when deploying multiple workers/instances.
-- The Lean runner uses the pinned Lean 4/Mathlib project, caps input/output, limits concurrency, and applies a timeout plus CPU/file-size limits where `prlimit` is available. It is not a full OS sandbox; keep proof checks behind authentication and add process isolation before public multi-tenant deployment. Set `LEAN_TOOL_ENABLED=false` to omit the tool from Live sessions.
+- The Lean runner uses the pinned Lean 4/Mathlib project with the fixed `Mathlib.Tactic` prelude, which supplies common tactics without loading every Mathlib module. It caps input/output, limits concurrency, and applies a 30-second default timeout plus CPU/file-size limits where `prlimit` is available. Proofs requiring definitions from other Mathlib modules may be rejected; the model tool declaration states this limit. It is not a full OS sandbox; keep proof checks behind authentication and add process isolation before public multi-tenant deployment. Set `LEAN_TOOL_ENABLED=false` to omit the tool from Live sessions.
 - Uploaded course materials and generated study items are stored because the student explicitly adds them. Live screen/audio media and tutor conversations pass through active session memory only and are never logged or stored.

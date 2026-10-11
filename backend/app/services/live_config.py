@@ -127,7 +127,8 @@ def lean_proof_tool() -> types.Tool:
                 type=types.Type.STRING,
                 description=(
                     "Lean 4 tactic proof body for the proposition, without the leading 'by'. "
-                    "Use Mathlib tactics when useful. Do not include imports, commands, "
+                    "The runner imports Mathlib.Tactic. Use its tactics when useful. "
+                    "Do not include imports, commands, "
                     "metaprogramming, sorry, or admit."
                 ),
                 min_length=1,
@@ -139,7 +140,8 @@ def lean_proof_tool() -> types.Tool:
     declaration = types.FunctionDeclaration(
         name="verify_lean_proof",
         description=(
-            "Check whether a Lean 4/Mathlib tactic proof proves its supplied formal proposition. "
+            "Check whether a Lean 4 proof with the Mathlib.Tactic prelude proves its "
+            "supplied formal proposition. Other Mathlib modules are not imported. "
             "Returns verified, rejected with compiler diagnostics, or timed_out. Verification only "
             "applies to the formal proposition, not its translation from natural language."
         ),

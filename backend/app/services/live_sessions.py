@@ -20,6 +20,7 @@ from google.genai import types
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from starlette.websockets import WebSocketDisconnect
 
+from app.api.schemas import CalculatorRequest, LeanProofRequest
 from app.config import Settings
 from app.security.rate_limit import InMemoryRateLimiter
 from app.services.calculator import CalculatorInputError, evaluate_expression
@@ -476,9 +477,10 @@ class GeminiLiveSessionService:
                 }
             else:
                 try:
-                    value = await asyncio.to_thread(evaluate_expression, args.get("expression"))
-                    result = {"result": value.result}
-                except CalculatorInputError:
+                    expression = CalculatorRequest.model_validate(args).expression
+                    value = await asyncio.to_thread(evaluate_expression, expression)
+                    result = {"result": value}
+                except (CalculatorInputError, ValidationError):
                     result = {
                         "error": {
                             "code": "invalid_expression",
@@ -503,12 +505,13 @@ class GeminiLiveSessionService:
                 }
             else:
                 try:
+                    proof_request = LeanProofRequest.model_validate(args)
                     checked = await self._lean_service.verify(
-                        args.get("proposition", ""),
-                        args.get("proof", ""),
+                        proof_request.proposition,
+                        proof_request.proof,
                     )
                     result = {"status": checked.status, "diagnostics": checked.diagnostics}
-                except LeanProofInputError:
+                except (LeanProofInputError, ValidationError):
                     result = {
                         "error": {
                             "code": "invalid_proof",

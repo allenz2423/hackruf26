@@ -1078,6 +1078,7 @@ main {
 }
 
 .field input,
+.field textarea,
 .field select {
   min-height: 44px;
   padding: 0 var(--space-3);
