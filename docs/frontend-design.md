@@ -82,7 +82,7 @@ Members with class read access see the authorized active concepts, descriptions,
 
 Shared-resource release controls appear below the resource title and metadata. Their form width is capped, and they remain within the content column so expanded controls do not stretch the upload icon column or overflow at narrow widths and browser zoom.
 
-The local SQLite workspace calls class/upload APIs without an access-token prerequisite. Existing browser route and IndexedDB IDs stay stable; a persisted `backendId` identifies the corresponding backend class or upload. Library refresh merges remote records into those mappings without discarding locally retained source files. New classes and uploads save through the API, with local files retained for recovery after network failures. Pasted notes use a multiline field with the backend's 1,000,000-character limit. Rename and deletion use the mapped backend UUID and surface API failures.
+The local SQLite workspace calls class/upload APIs without an access-token prerequisite. Existing browser route and IndexedDB IDs stay stable; a persisted `backendId` identifies the corresponding backend class or upload. Library refresh reconciles server-backed uploads by backend ID, removes stale mappings omitted from an authoritative remote list, and preserves browser-only uploads. New classes and uploads save through the API, with local files retained for recovery after network failures. Pasted notes use a multiline field with the backend's 1,000,000-character limit. Rename and deletion use the mapped backend UUID and surface API failures.
 
 ```text
 ┌────────────────────────────────────────────────────────────────────┐

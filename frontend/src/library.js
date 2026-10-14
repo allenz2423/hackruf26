@@ -87,6 +87,28 @@ export function validateUpload(file) {
   return null;
 }
 
+export function reconcileRemoteUploads(localUploads, remoteUploads) {
+  const localByBackendId = new Map(localUploads.map((item) => [getBackendUploadId(item), item]));
+  const remoteList = remoteUploads.map((item) => ({
+    ...localByBackendId.get(item.id),
+    id: localByBackendId.get(item.id)?.id || item.id,
+    backendId: item.id,
+    name: item.title || item.original_filename || "Document",
+    kind: fromApiKind(item.kind),
+    size: item.file_size_bytes || 0,
+    status: item.status || "ready",
+    progress: item.processing_progress ?? 100,
+    createdAt: item.created_at || new Date().toISOString(),
+    resourceScope: item.resource_scope || "class_owned",
+    createdBy: item.created_by || null,
+    publicationState: item.publication_state || "published",
+    releaseAt: item.release_at || null,
+    isRemote: true
+  }));
+  const localOnly = localUploads.filter((item) => !getBackendUploadId(item));
+  return [...remoteList, ...localOnly];
+}
+
 export function createLocalUpload(file) {
   return {
     id: crypto.randomUUID(),
@@ -111,25 +133,7 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
       ]);
 
       if (remoteUploads.status === "fulfilled" && Array.isArray(remoteUploads.value)) {
-        const localByBackendId = new Map(klass.uploads.map((item) => [getBackendUploadId(item), item]));
-        const remoteList = remoteUploads.value.map((item) => ({
-          ...localByBackendId.get(item.id),
-          id: localByBackendId.get(item.id)?.id || item.id,
-          backendId: item.id,
-          name: item.title || item.original_filename || "Document",
-          kind: fromApiKind(item.kind),
-          size: item.file_size_bytes || 0,
-          status: item.status || "ready",
-          progress: item.processing_progress ?? 100,
-          createdAt: item.created_at || new Date().toISOString(),
-          resourceScope: item.resource_scope || "class_owned",
-          createdBy: item.created_by || null,
-          publicationState: item.publication_state || "published",
-          releaseAt: item.release_at || null,
-          isRemote: true
-        }));
-        const mappedIds = new Set(remoteList.map((item) => item.id));
-        klass.uploads = [...remoteList, ...klass.uploads.filter((item) => !mappedIds.has(item.id))];
+        klass.uploads = reconcileRemoteUploads(klass.uploads, remoteUploads.value);
         await updateClass(klass.id, { uploads: klass.uploads });
       }
 

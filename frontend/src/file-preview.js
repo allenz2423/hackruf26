@@ -8,6 +8,13 @@ import { mathHtml, typesetMath } from "./math.js";
 
 const MAX_TEXT_PREVIEW = 2 * 1024 * 1024;
 
+export function uploadDocumentErrorMessage(error) {
+  if (error?.status === 404) {
+    return "This course material is no longer available. Refresh the Library; if it was removed, upload the file again if you still have access.";
+  }
+  return error?.message || "Could not load the study document. Try again.";
+}
+
 function extensionOf(name) {
   return name.split(".").pop().toLowerCase();
 }
@@ -236,8 +243,8 @@ export async function openUploadPreview(upload, { citation = null, initialView =
         void typesetMath(body);
       } catch (error) {
         if (signal.aborted || !dialog.open) return;
-        status.textContent = error.message || "Could not load the study document. Try again.";
-        retry.hidden = false;
+        status.textContent = uploadDocumentErrorMessage(error);
+        retry.hidden = error.status === 404;
       }
     }
     detailSelect.addEventListener("change", showDocument);
@@ -245,7 +252,10 @@ export async function openUploadPreview(upload, { citation = null, initialView =
       try {
         await createUploadDocumentApi(backendId, detailSelect.value);
         if (dialog.open) await showDocument();
-      } catch (error) { status.textContent = error.message; }
+      } catch (error) {
+        status.textContent = uploadDocumentErrorMessage(error);
+        retry.hidden = error.status === 404;
+      }
     });
     content.querySelectorAll("[data-document-download]").forEach((button) => button.addEventListener("click", async () => {
       if (downloading) return;
