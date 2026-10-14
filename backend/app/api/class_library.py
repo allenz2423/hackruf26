@@ -35,6 +35,7 @@ from app.api.schemas import (
     MaterialDetail,
     MaterialSummary,
     QuestionAttemptResult,
+    ResourcePublicationUpdate,
     StudyMaterialCreate,
     StudyMaterialFlagCreate,
     SyllabusOutline,
@@ -46,6 +47,17 @@ from app.api.schemas import (
 from app.api.upload_documents import create_default_document, document_detail
 from app.config import Settings
 from app.services.database import SQLiteConnection, SQLiteDatabase, json_value
+from app.services.class_access import (
+    can_view_unreleased,
+    can_view_assessment_key,
+    class_access,
+    is_class_manager,
+    is_effectively_published,
+    is_private_assessment,
+    material_access,
+    require_capability,
+    require_resource_mutation,
+)
 from app.services.gemini_content import MAX_NOTE_CONTEXT_CHARS, GeminiContentService
 from app.services.source_context import source_excerpts
 from app.services.storage import LocalPrivateStorage, UploadTooLarge
@@ -81,24 +93,37 @@ async def _authorize(request: Request) -> tuple[UUID, SQLiteDatabase, Settings]:
     return user_id, database(request), settings
 
 
-async def _owned_class(database: SQLiteDatabase, class_id: UUID, owner_id: UUID) -> dict[str, Any]:
-    row = await database.fetchrow(
-        "SELECT id, name, created_at, updated_at FROM course_classes "
-        "WHERE id = ?1 AND owner_id = ?2",
-        class_id,
-        owner_id,
-    )
-    if row is None:
-        raise ApiError(404, "not_found", "The requested resource was not found.")
-    return row
+async def _owned_class(
+    database: SQLiteDatabase,
+    class_id: UUID,
+    user_id: UUID,
+    *,
+    required: str = "read",
+) -> dict[str, Any]:
+    """Compatibility name for the shared class authorization boundary."""
+    return await class_access(database, class_id, user_id, required=required)
 
 
-async def _class_summary(database: SQLiteDatabase, row: dict[str, Any]) -> ClassSummary:
+async def _class_summary(
+    database: SQLiteDatabase,
+    row: dict[str, Any],
+    *,
+    access: dict[str, Any] | None = None,
+) -> ClassSummary:
+    access = access or row
     counts = await database.fetchrow(
         "SELECT "
-        "(SELECT count(*) FROM course_notes WHERE class_id = ?1) AS upload_count, "
-        "(SELECT count(*) FROM study_materials WHERE class_id = ?1) AS material_count",
+        "(SELECT count(*) FROM course_notes n WHERE n.class_id = ?1 AND "
+        "(?3 OR n.created_by = ?2 OR n.publication_state = 'published' OR "
+        "(n.publication_state = 'scheduled' AND n.release_at <= strftime('%Y-%m-%dT%H:%M:%fZ','now')))) "
+        "AS upload_count, "
+        "(SELECT count(*) FROM study_materials m WHERE m.class_id = ?1 AND "
+        "(?3 OR m.created_by = ?2 OR m.publication_state = 'published' OR "
+        "(m.publication_state = 'scheduled' AND m.release_at <= strftime('%Y-%m-%dT%H:%M:%fZ','now')))) "
+        "AS material_count",
         row["id"],
+        access.get("user_id", ""),
+        int(is_class_manager(access)),
     )
     return ClassSummary(
         id=row["id"],
@@ -109,6 +134,8 @@ async def _class_summary(database: SQLiteDatabase, row: dict[str, Any]) -> Class
         updated_at=row["updated_at"],
         upload_count=counts["upload_count"],
         material_count=counts["material_count"],
+        is_owner=bool(access.get("is_owner", False)),
+        capabilities=access.get("capabilities", []),
     )
 
 
@@ -128,7 +155,15 @@ def _upload_summary(row: dict[str, Any]) -> UploadSummary:
         failure_code=row["failure_code"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        resource_scope=row.get("resource_scope", "class_owned"),
+        created_by=row.get("created_by"),
+        publication_state=row.get("publication_state", "published"),
+        release_at=row.get("release_at"),
     )
+
+
+def _assessment_key_visible(row: dict[str, Any], access: dict[str, Any], user_id: UUID) -> bool:
+    return can_view_assessment_key(row, access, user_id)
 
 
 def _assessment_summary(row: dict[str, Any]) -> AssessmentSummary:
@@ -205,10 +240,17 @@ def _material_summary(row: dict[str, Any]) -> MaterialSummary:
                 ("context_truncated", "truncated"),
             ) if values.get(column)
         ],
+        origin_class_id=row.get("origin_class_id"),
+        resource_scope=row.get("resource_scope", "class_owned"),
+        created_by=row.get("created_by"),
+        publication_state=row.get("publication_state", "published"),
+        release_at=row.get("release_at"),
     )
 
 
-def _public_material_content(kind: str, value: object) -> dict | None:
+def _public_material_content(
+    kind: str, value: object, *, visible_source_ids: set[str] | None = None
+) -> dict | None:
     content = json_value(value)
     if not isinstance(content, dict):
         return None
@@ -217,7 +259,74 @@ def _public_material_content(kind: str, value: object) -> dict | None:
         for question in result.get("questions", []):
             for key in ("answer", "accepted_answers", "rubric", "explanation"):
                 question.pop(key, None)
+    collections = [result.get("questions", []), result.get("sections", []), result.get("cards", [])]
+    if visible_source_ids is not None:
+        for group in collections:
+            for item in group if isinstance(group, list) else []:
+                if isinstance(item, dict) and isinstance(item.get("sources"), list):
+                    item["sources"] = [
+                        source for source in item["sources"]
+                        if isinstance(source, dict)
+                        and str(source.get("upload_id")) in visible_source_ids
+                    ]
     return result
+
+
+async def _visible_material_source_ids(
+    db: SQLiteDatabase,
+    material_id: UUID,
+    user_id: UUID,
+    material: dict[str, Any],
+    access: dict[str, Any] | None,
+) -> set[str]:
+    rows = await db.fetch(
+        "SELECT COALESCE(s.source_note_id,s.note_id) AS note_id, "
+        "COALESCE(s.source_class_id,s.class_id) AS class_id,n.created_by, "
+        "n.publication_state,n.release_at,n.resource_scope,a.id AS assessment_id,a.owner_id AS assessment_owner,"
+        "a.has_student_responses,a.score_percent,a.grading_result,a.answer_key_release_state,"
+        "a.answer_key_release_at FROM study_material_sources s "
+        "LEFT JOIN course_notes n ON n.id=COALESCE(s.source_note_id,s.note_id) "
+        "LEFT JOIN uploaded_assessments a ON a.note_id=n.id "
+        "WHERE s.material_id=?1",
+        material_id,
+    )
+    visible: set[str] = set()
+    for row in rows:
+        if row["note_id"] is None or row["class_id"] is None:
+            continue
+        if access is None:
+            try:
+                source_access = await class_access(db, row["class_id"], user_id, required="read")
+            except ApiError:
+                continue
+        elif str(material.get("class_id") or material.get("origin_class_id")) == str(row["class_id"]):
+            source_access = access
+        else:
+            try:
+                source_access = await class_access(db, row["class_id"], user_id, required="read")
+            except ApiError:
+                continue
+        if (
+            is_effectively_published(row["publication_state"], row["release_at"])
+            or can_view_unreleased(source_access, user_id, row["created_by"])
+        ):
+            if row["assessment_id"] is not None and not can_view_assessment_key(
+                {
+                    "owner_id": row["assessment_owner"],
+                    "created_by": row["created_by"],
+                    "resource_scope": row["resource_scope"],
+                    "has_student_responses": row["has_student_responses"],
+                    "score_percent": row["score_percent"],
+                    "grading_result": row["grading_result"],
+                    "answer_key_release_state": row["answer_key_release_state"],
+                    "answer_key_release_at": row["answer_key_release_at"],
+                },
+                source_access,
+                user_id,
+            ):
+                continue
+            visible.add(str(row["note_id"]))
+    return visible
 
 
 def _infer_kind(filename: str, extension: str, default_kind: str) -> str:
@@ -284,13 +393,18 @@ async def _rate_limit(request: Request, key: str, user_id: UUID) -> None:
 async def list_classes(request: Request) -> dict[str, list[ClassSummary]]:
     user_id, database, _ = await _authorize(request)
     rows = await database.fetch(
-        "SELECT c.id, c.name, c.color, c.icon, c.created_at, c.updated_at, "
-        "(SELECT count(*) FROM course_notes n WHERE n.class_id = c.id) AS upload_count, "
-        "(SELECT count(*) FROM study_materials m WHERE m.class_id = c.id) AS material_count "
-        "FROM course_classes c WHERE c.owner_id = ?1 ORDER BY c.updated_at DESC, c.id",
+        "SELECT c.id,c.name,c.color,c.icon,c.created_at,c.updated_at FROM course_classes c "
+        "WHERE c.owner_id=?1 OR EXISTS (SELECT 1 FROM class_memberships mm "
+        "WHERE mm.class_id=c.id AND mm.user_id=?1 AND mm.status='active') "
+        "ORDER BY c.updated_at DESC,c.id",
         user_id,
     )
-    return {"items": [ClassSummary.model_validate(dict(row)) for row in rows]}
+    items = []
+    for row in rows:
+        access = await class_access(database, row["id"], user_id)
+        access["user_id"] = user_id
+        items.append(await _class_summary(database, row, access=access))
+    return {"items": items}
 
 
 @router.post("/api/classes", status_code=201)
@@ -299,21 +413,36 @@ async def create_class(payload: ClassCreate, request: Request) -> ClassSummary:
     name = payload.name.strip()
     if not name or len(name) > settings.max_class_name_length:
         raise ApiError(400, "invalid_class_name", "Enter a class name within the allowed length.")
-    row = await database.fetchrow(
-        "INSERT INTO course_classes (id, owner_id, name, color, icon) VALUES (?1, ?2, ?3, ?4, ?5) "
-        "RETURNING id, name, color, icon, created_at, updated_at",
-        uuid4(),
-        user_id,
-        name,
-        payload.color,
-        payload.icon,
-    )
-    return await _class_summary(database, row)
+    class_id = uuid4()
+    async with database.acquire() as connection:
+        async with connection.transaction():
+            row = await connection.fetchrow(
+                "INSERT INTO course_classes (id, owner_id, name, color, icon) "
+                "VALUES (?1, ?2, ?3, ?4, ?5) "
+                "RETURNING id, name, color, icon, created_at, updated_at",
+                class_id, user_id, name, payload.color, payload.icon,
+            )
+            await connection.execute(
+                "INSERT INTO class_memberships (class_id,user_id,status,added_by) "
+                "VALUES (?1,?2,'active',?2)", class_id, user_id,
+            )
+            await connection.executemany(
+                "INSERT INTO class_membership_capabilities "
+                "(class_id,user_id,capability,granted_by) VALUES (?1,?2,?3,?2)",
+                [(str(class_id), str(user_id), capability) for capability in (
+                    "read", "create", "edit", "delete", "delete_others", "invite",
+                    "manage_members", "manage_permissions"
+                )],
+            )
+    access = await class_access(database, class_id, user_id)
+    access["user_id"] = user_id
+    return await _class_summary(database, row, access=access)
 
 
 @router.patch("/api/classes/{class_id}")
 async def update_class(class_id: UUID, payload: ClassPatch, request: Request) -> ClassSummary:
     user_id, database, settings = await _authorize(request)
+    access = await _owned_class(database, class_id, user_id, required="manage_permissions")
     changes: dict[str, Any] = {}
     if "name" in payload.model_fields_set:
         name = (payload.name or "").strip()
@@ -328,18 +457,18 @@ async def update_class(class_id: UUID, payload: ClassPatch, request: Request) ->
         raise ApiError(400, "invalid_request", "Nothing to update.")
 
     # Column names come from the fixed list above, never from the request.
-    assignments = ", ".join(f"{column} = ?{index}" for index, column in enumerate(changes, start=3))
+    assignments = ", ".join(f"{column} = ?{index}" for index, column in enumerate(changes, start=2))
     row = await database.fetchrow(
         f"UPDATE course_classes SET {assignments}, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-        "WHERE id = ?1 AND owner_id = ?2 "
+        "WHERE id = ?1 "
         "RETURNING id, name, color, icon, created_at, updated_at",
         class_id,
-        user_id,
         *changes.values(),
     )
     if row is None:
         raise ApiError(404, "not_found", "The requested resource was not found.")
-    return await _class_summary(database, row)
+    access["user_id"] = user_id
+    return await _class_summary(database, row, access=access)
 
 
 @router.delete("/api/classes/{class_id}", status_code=204)
@@ -362,6 +491,7 @@ async def delete_class(class_id: UUID, request: Request) -> Response:
             )
             if result == "DELETE 0":
                 raise ApiError(404, "not_found", "The requested resource was not found.")
+    await request.app.state.live_session_ticket_store.revoke_class(class_id)
     for row in rows:
         storage.delete(row["storage_key"])
     return Response(status_code=204)
@@ -380,7 +510,7 @@ async def create_upload(
     user_id, database, settings = await _authorize(request)
     if getattr(request.app.state, "gemini_content_service", None) is None:
         raise ApiError(503, "content_processing_unavailable", "Course material processing is unavailable.")
-    await _owned_class(database, class_id, user_id)
+    access = await _owned_class(database, class_id, user_id, required="create")
     await _rate_limit(request, "upload_rate_limiter", user_id)
     upload_count = await database.fetchval(
         "SELECT count(*) FROM course_notes WHERE class_id = ?1",
@@ -439,14 +569,21 @@ async def create_upload(
         raise ApiError(400, "invalid_upload_title", "Enter a title of 1 to 255 characters.")
 
     try:
+        manager = is_class_manager(access)
         row = await database.fetchrow(
             "INSERT INTO course_notes "
-            "(id, class_id, title, kind, source_type, original_filename, mime_type, storage_key, "
+            "(id, class_id, resource_scope, created_by, publication_state, published_at, "
+            "title, kind, source_type, original_filename, mime_type, storage_key, "
             "file_size_bytes, extracted_text, status, processing_progress) "
-            "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'processing', 0) "
+            "VALUES (?1, ?2, ?3, ?4, ?5, CASE WHEN ?5='published' THEN "
+            "strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE NULL END, "
+            "?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'processing', 0) "
             "RETURNING *",
             uuid4(),
             class_id,
+            "class_owned" if manager else "student_contribution",
+            user_id,
+            "published" if manager else "draft",
             note_title,
             chosen_kind,
             source_type,
@@ -480,7 +617,7 @@ async def create_assessment(
             "content_processing_unavailable",
             "Assessment processing is unavailable.",
         )
-    await _owned_class(database, class_id, user_id)
+    access = await _owned_class(database, class_id, user_id, required="create")
     await _rate_limit(request, "upload_rate_limiter", user_id)
     await _rate_limit(request, "generation_rate_limiter", user_id)
     upload_count = await database.fetchval(
@@ -533,15 +670,22 @@ async def create_assessment(
     try:
         async with database.acquire() as connection:
             async with connection.transaction():
+                manager = is_class_manager(access)
                 note = await connection.fetchrow(
                     "INSERT INTO course_notes "
-                    "(id, class_id, title, kind, source_type, original_filename, mime_type, "
-                    "storage_key, file_size_bytes, status, processing_progress) "
-                    "VALUES (?1, ?2, ?3, ?4, 'file', ?5, ?6, ?7, ?8, "
+                    "(id, class_id, resource_scope, created_by, publication_state, published_at, "
+                    "title, kind, source_type, original_filename, mime_type, storage_key, "
+                    "file_size_bytes, status, processing_progress) "
+                    "VALUES (?1, ?2, ?3, ?4, ?5, CASE WHEN ?5='published' THEN "
+                    "strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE NULL END, "
+                    "?6, ?7, 'file', ?8, ?9, ?10, ?11, "
                     "'processing', 0) "
                     "RETURNING id, processing_revision",
                     uuid4(),
                     class_id,
+                    "class_owned" if manager else "student_contribution",
+                    user_id,
+                    "published" if manager else "draft",
                     note_title,
                     note_kind,
                     filename,
@@ -550,11 +694,12 @@ async def create_assessment(
                     file_size,
                 )
                 assessment = await connection.fetchrow(
-                    "INSERT INTO uploaded_assessments (id, class_id, note_id) "
-                    "VALUES (?1, ?2, ?3) RETURNING *",
+                    "INSERT INTO uploaded_assessments (id, class_id, note_id, owner_id, "
+                    "answer_key_release_state) VALUES (?1, ?2, ?3, ?4, 'draft') RETURNING *",
                     uuid4(),
                     class_id,
                     note["id"],
+                    user_id,
                 )
     except Exception:
         storage.delete(storage_key)
@@ -587,29 +732,52 @@ async def list_assessments(
     class_id: UUID, request: Request
 ) -> dict[str, list[AssessmentSummary]]:
     user_id, database, _ = await _authorize(request)
-    await _owned_class(database, class_id, user_id)
+    access = await _owned_class(database, class_id, user_id)
     rows = await database.fetch(
-        "SELECT a.*, n.title, n.original_filename FROM uploaded_assessments a "
+        "SELECT a.*,n.title,n.original_filename,n.resource_scope,n.created_by FROM uploaded_assessments a "
         "JOIN course_notes n ON n.id = a.note_id "
         "WHERE a.class_id = ?1 ORDER BY a.created_at DESC, a.id",
         class_id,
     )
-    return {"items": [_assessment_summary(row) for row in rows]}
+    visible = []
+    for row in rows:
+        note = await database.fetchrow(
+            "SELECT created_by,publication_state,release_at FROM course_notes WHERE id=?1", row["note_id"]
+        )
+        if note is None or (
+            not is_effectively_published(note["publication_state"], note["release_at"])
+            and not can_view_unreleased(access, user_id, note["created_by"])
+        ):
+            continue
+        if is_private_assessment(row) and str(row["owner_id"]) != str(user_id):
+            continue
+        safe_row = dict(row)
+        if str(row["owner_id"]) != str(user_id):
+            safe_row.update(score_percent=None, grade_confidence=None)
+        visible.append(_assessment_summary(safe_row))
+    return {"items": visible}
 
 
 @router.get("/api/assessments/{assessment_id}")
 async def get_assessment(assessment_id: UUID, request: Request) -> AssessmentDetail:
     user_id, database, _ = await _authorize(request)
     row = await database.fetchrow(
-        "SELECT a.*, n.title, n.original_filename, n.storage_key "
+        "SELECT a.*, n.title, n.original_filename, n.storage_key,n.created_by AS note_created_by, "
+        "n.publication_state,n.release_at,n.resource_scope "
         "FROM uploaded_assessments a "
         "JOIN course_notes n ON n.id = a.note_id AND n.class_id = a.class_id "
-        "JOIN course_classes c ON c.id = a.class_id "
-        "WHERE a.id = ?1 AND c.owner_id = ?2",
+        "WHERE a.id = ?1",
         assessment_id,
-        user_id,
     )
     if row is None:
+        raise ApiError(404, "not_found", "The requested resource was not found.")
+    access = await _owned_class(database, row["class_id"], user_id)
+    if (
+        not is_effectively_published(row["publication_state"], row["release_at"])
+        and not can_view_unreleased(access, user_id, row["note_created_by"])
+    ):
+        raise ApiError(404, "not_found", "The requested resource was not found.")
+    if is_private_assessment(row) and str(row["owner_id"]) != str(user_id):
         raise ApiError(404, "not_found", "The requested resource was not found.")
 
     questions = json_value(row["questions"], [])
@@ -618,61 +786,112 @@ async def get_assessment(assessment_id: UUID, request: Request) -> AssessmentDet
     grading_result = json_value(row["grading_result"])
     if not isinstance(grading_result, dict):
         grading_result = None
-    file_url, expires = private_storage(request).signed_url(
-        str(request.base_url).rstrip("/"), row["note_id"]
+    has_key_access = _assessment_key_visible(
+        {**row, "created_by": row["note_created_by"]}, access, user_id
     )
+    if not has_key_access:
+        questions = [
+            {
+                **question,
+                "answer_key": None,
+                "answer_key_status": "missing",
+                "student_response": None,
+                "response_status": "blank",
+            }
+            for question in questions if isinstance(question, dict)
+        ]
+        grading_result = None
+    file_url, expires = (None, None)
+    if has_key_access:
+        file_url, expires = private_storage(request).signed_url(
+            str(request.base_url).rstrip("/"), row["note_id"]
+        )
     return AssessmentDetail(
-        **_assessment_summary(row).model_dump(),
+        **_assessment_summary({
+            **row,
+            "score_percent": row["score_percent"] if str(row["owner_id"]) == str(user_id) else None,
+            "grade_confidence": row["grade_confidence"] if str(row["owner_id"]) == str(user_id) else None,
+        }).model_dump(),
         questions=questions,
         grading_result=grading_result,
         review_reason=(grading_result or {}).get("review_reason"),
         file_url=file_url,
-        file_url_expires_at=datetime.fromtimestamp(expires, UTC),
+        file_url_expires_at=datetime.fromtimestamp(expires, UTC) if expires is not None else None,
     )
 
 
 @router.get("/api/classes/{class_id}/uploads")
 async def list_uploads(class_id: UUID, request: Request) -> dict[str, list[UploadSummary]]:
     user_id, database, _ = await _authorize(request)
-    await _owned_class(database, class_id, user_id)
+    access = await _owned_class(database, class_id, user_id)
     rows = await database.fetch(
-        "SELECT n.* FROM course_notes n "
-        "JOIN course_classes c ON c.id = n.class_id "
-        "WHERE c.id = ?1 AND c.owner_id = ?2 ORDER BY n.created_at DESC, n.id",
+        "SELECT n.*,a.owner_id AS assessment_owner,a.has_student_responses,a.score_percent AS assessment_score,"
+        "a.grading_result AS assessment_result FROM course_notes n "
+        "LEFT JOIN uploaded_assessments a ON a.note_id=n.id "
+        "WHERE n.class_id = ?1 ORDER BY n.created_at DESC, n.id",
         class_id,
-        user_id,
     )
-    return {"items": [_upload_summary(row) for row in rows]}
+    return {"items": [
+        _upload_summary(row) for row in rows
+        if not is_private_assessment({
+            "has_student_responses": row.get("has_student_responses"),
+            "score_percent": row.get("assessment_score"),
+            "grading_result": row.get("assessment_result"),
+            "owner_id": row.get("assessment_owner"),
+        }) or str(row.get("assessment_owner")) == str(user_id)
+        if is_effectively_published(row["publication_state"], row["release_at"])
+        or can_view_unreleased(access, user_id, row["created_by"])
+    ]}
 
 
 @router.get("/api/uploads/{upload_id}")
 async def get_upload(upload_id: UUID, request: Request) -> UploadDetail:
     user_id, database, _ = await _authorize(request)
     row = await database.fetchrow(
-        "SELECT n.* FROM course_notes n "
-        "JOIN course_classes c ON c.id = n.class_id "
-        "WHERE n.id = ?1 AND c.owner_id = ?2",
+        "SELECT n.*,a.owner_id AS assessment_owner,a.has_student_responses,a.score_percent AS assessment_score,"
+        "a.grading_result AS assessment_result,a.answer_key_release_state,a.answer_key_release_at,n.resource_scope "
+        "FROM course_notes n LEFT JOIN uploaded_assessments a ON a.note_id=n.id WHERE n.id = ?1",
         upload_id,
-        user_id,
     )
     if row is None:
         raise ApiError(404, "not_found", "The requested resource was not found.")
+    access = await _owned_class(database, row["class_id"], user_id)
+    if is_private_assessment({
+        "has_student_responses": row.get("has_student_responses"),
+        "score_percent": row.get("assessment_score"),
+        "grading_result": row.get("assessment_result"),
+        "owner_id": row.get("assessment_owner"),
+    }) and str(row.get("assessment_owner")) != str(user_id):
+        raise ApiError(404, "not_found", "The requested resource was not found.")
+    if (
+        not is_effectively_published(row["publication_state"], row["release_at"])
+        and not can_view_unreleased(access, user_id, row["created_by"])
+    ):
+        raise ApiError(404, "not_found", "The requested resource was not found.")
+    assessment = await database.fetchrow(
+        "SELECT a.id,a.owner_id,a.has_student_responses,a.score_percent,a.grading_result,"
+        "a.answer_key_release_state,a.answer_key_release_at,"
+        "n.created_by,n.resource_scope FROM uploaded_assessments a JOIN course_notes n ON n.id=a.note_id "
+        "WHERE a.note_id=?1",
+        upload_id,
+    )
+    key_visible = assessment is None or _assessment_key_visible(assessment, access, user_id)
     file_url = None
     expires_at = None
-    if row["storage_key"]:
+    if row["storage_key"] and key_visible:
         storage = private_storage(request)
         file_url, expires = storage.signed_url(str(request.base_url).rstrip("/"), upload_id)
         expires_at = datetime.fromtimestamp(expires, UTC)
     return UploadDetail(
         **_upload_summary(row).model_dump(),
-        extracted_text=row["extracted_text"],
-        summary=row["summary"],
-        key_topics=json_value(row["key_topics"], []),
-        transcript_segments=json_value(row["transcript_segments"], []),
-        syllabus_outline=json_value(row["syllabus_outline"]),
+        extracted_text=row["extracted_text"] if key_visible else None,
+        summary=row["summary"] if key_visible else None,
+        key_topics=json_value(row["key_topics"], []) if key_visible else [],
+        transcript_segments=json_value(row["transcript_segments"], []) if key_visible else [],
+        syllabus_outline=json_value(row["syllabus_outline"]) if key_visible else None,
         file_url=file_url,
         file_url_expires_at=expires_at,
-        document=await document_detail(database, upload_id),
+        document=await document_detail(database, upload_id) if key_visible else None,
     )
 
 
@@ -686,12 +905,26 @@ async def download_upload_file(
     storage = private_storage(request)
     if not storage.verify_url(upload_id, expires, signature):
         raise ApiError(403, "file_link_expired", "This file link is invalid or has expired.")
+    user_id = await enforce_sqlite_api_policy(request, request.app.state.settings)
     db = database(request)
     row = await db.fetchrow(
-        "SELECT storage_key, original_filename, mime_type FROM course_notes WHERE id = ?1",
+        "SELECT n.storage_key,n.original_filename,n.mime_type,n.class_id,n.created_by,"
+        "n.publication_state,n.release_at,n.resource_scope,a.id AS assessment_id,a.owner_id AS assessment_owner,"
+        "a.answer_key_release_state,a.answer_key_release_at,a.has_student_responses,a.score_percent,a.grading_result "
+        "FROM course_notes n LEFT JOIN uploaded_assessments a ON a.note_id=n.id WHERE n.id=?1",
         upload_id,
     )
     if row is None or not row["storage_key"]:
+        raise ApiError(404, "not_found", "The requested resource was not found.")
+    access = await _owned_class(db, row["class_id"], user_id)
+    if is_private_assessment(row) and str(row["assessment_owner"]) != str(user_id):
+        raise ApiError(404, "not_found", "The requested resource was not found.")
+    if (
+        not is_effectively_published(row["publication_state"], row["release_at"])
+        and not can_view_unreleased(access, user_id, row["created_by"])
+    ):
+        raise ApiError(404, "not_found", "The requested resource was not found.")
+    if row["assessment_id"] is not None and not can_view_assessment_key(row, access, user_id):
         raise ApiError(404, "not_found", "The requested resource was not found.")
     path = storage.path_for(row["storage_key"])
     if not path.is_file():
@@ -717,17 +950,13 @@ async def patch_upload(
         raise ApiError(400, "invalid_upload_update", "Provide one or more non-empty upload fields.")
     if "extracted_text" in patch and not patch["extracted_text"].strip():
         raise ApiError(400, "invalid_upload_update", "Extracted text cannot be empty.")
-    current = await database.fetchrow(
-        "SELECT n.* FROM course_notes n "
-        "JOIN course_classes c ON c.id = n.class_id "
-        "WHERE n.id = ?1 AND c.owner_id = ?2",
-        upload_id,
-        user_id,
-    )
+    current = await database.fetchrow("SELECT n.* FROM course_notes n WHERE n.id=?1", upload_id)
     if current is None:
         raise ApiError(404, "not_found", "The requested resource was not found.")
+    access = await _owned_class(database, current["class_id"], user_id)
+    require_resource_mutation(access, user_id, current["created_by"], "edit")
     fields: list[str] = []
-    values: list[Any] = [upload_id, user_id]
+    values: list[Any] = [upload_id]
     kind = patch.get("kind", current["kind"])
     if kind not in NOTE_KINDS:
         raise ApiError(400, "invalid_upload_kind", "This upload kind is not supported.")
@@ -759,8 +988,7 @@ async def patch_upload(
     fields.append("updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')")
     query = (
         "UPDATE course_notes SET " + ", ".join(fields)
-        + " WHERE id = ?1 AND class_id IN "
-        "(SELECT id FROM course_classes WHERE owner_id = ?2) RETURNING *"
+        + " WHERE id = ?1 RETURNING *"
     )
     async with database.acquire() as connection:
         async with connection.transaction():
@@ -795,14 +1023,35 @@ async def delete_upload(upload_id: UUID, request: Request) -> Response:
     async with database.acquire() as connection:
         async with connection.transaction():
             row = await connection.fetchrow(
-                "SELECT n.storage_key FROM course_notes n "
-                "JOIN course_classes c ON c.id = n.class_id "
-                "WHERE n.id = ?1 AND c.owner_id = ?2",
+                "SELECT n.storage_key,n.class_id,n.created_by,n.resource_scope,n.publication_state,"
+                "n.release_at,a.owner_id AS assessment_owner,a.has_student_responses,"
+                "a.score_percent,a.grading_result FROM course_notes n "
+                "LEFT JOIN uploaded_assessments a ON a.note_id=n.id WHERE n.id=?1",
                 upload_id,
-                user_id,
             )
             if row is None:
                 raise ApiError(404, "not_found", "The requested resource was not found.")
+            access = await class_access(connection, row["class_id"], user_id)
+            if (
+                not access["is_owner"]
+                and (row["created_by"] is None or str(row["created_by"]) != str(user_id))
+                and is_private_assessment({
+                    "owner_id": row["assessment_owner"],
+                    "has_student_responses": row["has_student_responses"],
+                    "score_percent": row["score_percent"],
+                    "grading_result": row["grading_result"],
+                })
+            ):
+                raise ApiError(404, "not_found", "The requested resource was not found.")
+            require_resource_mutation(
+                access,
+                user_id,
+                row["created_by"],
+                "delete",
+                resource_scope=row["resource_scope"],
+                publication_state=row["publication_state"],
+                release_at=row["release_at"],
+            )
             await connection.execute("DELETE FROM course_notes WHERE id = ?1", upload_id)
     private_storage(request).delete(row["storage_key"])
     return Response(status_code=204)
@@ -816,15 +1065,14 @@ async def retry_upload(upload_id: UUID, request: Request, background_tasks: Back
     async with database.acquire() as connection:
         async with connection.transaction():
             current = await connection.fetchrow(
-                "SELECT n.status, a.id AS assessment_id FROM course_notes n "
-                "JOIN course_classes c ON c.id = n.class_id "
-                "LEFT JOIN uploaded_assessments a ON a.note_id = n.id "
-                "WHERE n.id = ?1 AND c.owner_id = ?2",
-                upload_id,
-                user_id,
+                "SELECT n.status,n.class_id,n.created_by,a.id AS assessment_id "
+                "FROM course_notes n LEFT JOIN uploaded_assessments a ON a.note_id=n.id "
+                "WHERE n.id=?1", upload_id,
             )
             if current is None:
                 raise ApiError(404, "not_found", "The requested resource was not found.")
+            access = await class_access(connection, current["class_id"], user_id)
+            require_resource_mutation(access, user_id, current["created_by"], "edit")
             if current["status"] != "failed":
                 raise ApiError(409, "upload_not_failed", "Only failed uploads can be retried.")
             row = await connection.fetchrow(
@@ -928,7 +1176,7 @@ async def _process_assessment_job(
     note_id = None
     try:
         row = await database.fetchrow(
-            "SELECT a.id AS assessment_id, a.class_id, a.note_id, n.kind, n.storage_key, "
+            "SELECT a.id AS assessment_id,a.class_id,a.note_id,a.owner_id,n.kind,n.storage_key, "
             "n.mime_type, n.extracted_text, n.processing_revision AS note_revision "
             "FROM uploaded_assessments a "
             "JOIN course_notes n ON n.id = a.note_id AND n.class_id = a.class_id "
@@ -938,6 +1186,15 @@ async def _process_assessment_job(
         if row is None:
             return
         note_id = row["note_id"]
+        # Older uploaded assessment rows have no submitter attribution. Their
+        # processing may use the stable class owner's access, but the resulting
+        # response/grade remains unattributed and private.
+        actor_id = row["owner_id"] or await database.fetchval(
+            "SELECT owner_id FROM course_classes WHERE id=?1", row["class_id"]
+        )
+        if actor_id is None:
+            raise RuntimeError("assessment owner is unavailable")
+        access = await class_access(database, row["class_id"], actor_id, required="read")
         active_revision = row["note_revision"]
         if expected_revision is not None and active_revision != expected_revision:
             return
@@ -975,13 +1232,20 @@ async def _process_assessment_job(
         active_revision = progress["processing_revision"]
 
         class_note_rows = await database.fetch(
-            "SELECT n.id, n.title, n.extracted_text, n.summary FROM course_notes n "
+            "SELECT n.id,n.title,n.extracted_text,n.summary,n.created_by,n.publication_state,n.release_at "
+            "FROM course_notes n "
             "WHERE n.class_id = ?1 AND n.status = 'ready' "
             "AND (n.extracted_text IS NOT NULL OR n.summary IS NOT NULL) "
             "AND NOT EXISTS (SELECT 1 FROM uploaded_assessments a WHERE a.note_id = n.id) "
             "ORDER BY n.updated_at DESC, n.id",
             row["class_id"],
         )
+        access = await class_access(database, row["class_id"], actor_id, required="read")
+        class_note_rows = [
+            note for note in class_note_rows
+            if is_effectively_published(note["publication_state"], note["release_at"])
+            or can_view_unreleased(access, actor_id, note["created_by"])
+        ]
         analysis = await asyncio.to_thread(
             content_service.process_assessment,
             extracted["extracted_text"],
@@ -994,6 +1258,7 @@ async def _process_assessment_job(
                     "UPDATE course_notes SET extracted_text = ?2, summary = ?3, "
                     "key_topics = ?4, transcript_segments = ?5, "
                     "duration_seconds = ?6, syllabus_outline = ?7, status = 'ready', "
+                    "publication_state = CASE WHEN ?9=1 THEN 'draft' ELSE publication_state END, "
                     "processing_progress = 100, failure_code = NULL, processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
                     "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
                     "WHERE id = ?1 AND status = 'processing' AND processing_revision = ?8 RETURNING id",
@@ -1007,6 +1272,7 @@ async def _process_assessment_job(
                     if extracted["syllabus_outline"] is not None
                     else None,
                     active_revision,
+                    int(is_private_assessment(analysis)),
                 )
                 if saved_note is None:
                     return
@@ -1134,12 +1400,16 @@ async def _reprocess_upload_job(
 @router.get("/api/classes/{class_id}/syllabus")
 async def get_syllabus(class_id: UUID, request: Request) -> SyllabusOutline:
     user_id, database, _ = await _authorize(request)
-    await _owned_class(database, class_id, user_id)
+    access = await _owned_class(database, class_id, user_id)
     row = await database.fetchrow(
-        "SELECT n.id, n.syllabus_outline FROM course_notes n "
+        "SELECT n.id,n.syllabus_outline,n.created_by,n.publication_state,n.release_at FROM course_notes n "
         "WHERE n.class_id = ?1 AND n.kind = 'syllabus' AND n.status = 'ready' "
+        "AND (n.publication_state='published' OR (n.publication_state='scheduled' "
+        "AND n.release_at <= strftime('%Y-%m-%dT%H:%M:%fZ','now')) OR n.created_by=?2 OR ?3=1) "
         "ORDER BY n.updated_at DESC LIMIT 1",
         class_id,
+        user_id,
+        int(is_class_manager(access)),
     )
     if row is None:
         return SyllabusOutline(note_id=None, topics=[], exams=[])
@@ -1156,7 +1426,7 @@ async def update_syllabus(
     request: Request,
 ) -> SyllabusOutline:
     user_id, database, _ = await _authorize(request)
-    await _owned_class(database, class_id, user_id)
+    await _owned_class(database, class_id, user_id, required="manage_permissions")
     row = await database.fetchrow(
         "SELECT id FROM course_notes WHERE class_id = ?1 AND kind = 'syllabus' "
         "AND status = 'ready' ORDER BY updated_at DESC LIMIT 1",
@@ -1179,38 +1449,151 @@ async def update_syllabus(
     return SyllabusOutline(note_id=row["id"], **outline)
 
 
+@router.patch("/api/resources/{resource_type}/{resource_id}/publication")
+async def update_resource_publication(
+    resource_type: Literal["uploads", "study_materials"],
+    resource_id: UUID,
+    payload: ResourcePublicationUpdate,
+    request: Request,
+) -> dict[str, Any]:
+    user_id, db, _ = await _authorize(request)
+    if resource_type == "uploads":
+        row = await db.fetchrow(
+            "SELECT n.id,n.class_id,n.created_by,a.owner_id AS assessment_owner,"
+            "a.has_student_responses,a.score_percent,a.grading_result FROM course_notes n "
+            "LEFT JOIN uploaded_assessments a ON a.note_id=n.id WHERE n.id=?1", resource_id
+        )
+    else:
+        row = await db.fetchrow(
+            "SELECT id,class_id,created_by,resource_scope FROM study_materials WHERE id=?1",
+            resource_id,
+        )
+    if row is None or row["class_id"] is None:
+        raise ApiError(404, "not_found", "The requested resource was not found.")
+    if resource_type == "uploads" and is_private_assessment({
+        "has_student_responses": row.get("has_student_responses"),
+        "score_percent": row.get("score_percent"),
+        "grading_result": row.get("grading_result"),
+        "owner_id": row.get("assessment_owner"),
+    }):
+        raise ApiError(409, "private_assessment", "Student-submitted assessments cannot be published to a class.")
+    if resource_type == "study_materials" and row.get("resource_scope") == "personal":
+        raise ApiError(409, "personal_resource_private", "Personal study materials cannot be published directly.")
+    access = await _owned_class(db, row["class_id"], user_id)
+    if not is_class_manager(access):
+        if str(row["created_by"]) != str(user_id):
+            raise ApiError(403, "insufficient_permission", "You do not have permission to publish this resource.")
+        require_capability(access, "create")
+    release_at = payload.release_at.isoformat(timespec="milliseconds").replace("+00:00", "Z") \
+        if payload.release_at else None
+    published_at = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z") \
+        if payload.state == "published" else None
+    table = "course_notes" if resource_type == "uploads" else "study_materials"
+    updated = await db.fetchrow(
+        f"UPDATE {table} SET publication_state=?2,release_at=?3,published_at=?4, "
+        "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 "
+        "RETURNING id,publication_state,release_at,published_at",
+        resource_id, payload.state, release_at, published_at,
+    )
+    return dict(updated)
+
+
+@router.patch("/api/assessments/{assessment_id}/answer-key-release")
+async def update_assessment_answer_key_release(
+    assessment_id: UUID,
+    payload: ResourcePublicationUpdate,
+    request: Request,
+) -> dict[str, Any]:
+    user_id, db, _ = await _authorize(request)
+    row = await db.fetchrow(
+        "SELECT a.id,a.class_id,a.owner_id,a.has_student_responses,a.score_percent,a.grading_result,"
+        "n.created_by,n.resource_scope FROM uploaded_assessments a "
+        "JOIN course_notes n ON n.id=a.note_id WHERE a.id=?1", assessment_id,
+    )
+    if row is None:
+        raise ApiError(404, "not_found", "The requested resource was not found.")
+    if is_private_assessment(row):
+        raise ApiError(409, "private_assessment", "Student-submitted assessment results cannot be released to a class.")
+    access = await _owned_class(db, row["class_id"], user_id)
+    if not is_class_manager(access):
+        if str(row["owner_id"]) != str(user_id) or str(row["created_by"]) != str(user_id):
+            raise ApiError(403, "insufficient_permission", "You do not have permission to release this answer key.")
+        require_capability(access, "create")
+    release_at = payload.release_at.isoformat(timespec="milliseconds").replace("+00:00", "Z") \
+        if payload.release_at else None
+    updated = await db.fetchrow(
+        "UPDATE uploaded_assessments SET answer_key_release_state=?2,answer_key_release_at=?3, "
+        "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 "
+        "RETURNING id,answer_key_release_state,answer_key_release_at",
+        assessment_id, payload.state, release_at,
+    )
+    return dict(updated)
+
+
 async def _resolve_material_sources(
     database: SQLiteDatabase,
     class_id: UUID,
     scope: dict,
+    user_id: UUID,
+    access: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict]:
+    def visible(row: dict[str, Any]) -> bool:
+        if not (
+            is_effectively_published(row.get("publication_state"), row.get("release_at"))
+            or can_view_unreleased(access, user_id, row.get("created_by"))
+        ):
+            return False
+        if row.get("assessment_id") is not None and not (
+            can_view_assessment_key(row, access, user_id)
+        ):
+            return False
+        return True
+
     scope_kind = scope.get("kind")
     if scope_kind == "all":
         rows = await database.fetch(
-            "SELECT id, title, kind, extracted_text, summary, status FROM course_notes "
-            "WHERE class_id = ?1 AND status = 'ready' ORDER BY created_at",
+            "SELECT n.id,n.title,n.kind,n.extracted_text,n.summary,n.status,n.created_by,"
+            "n.publication_state,n.release_at,n.resource_scope,a.id AS assessment_id,a.owner_id AS assessment_owner,"
+            "a.has_student_responses,a.score_percent,a.grading_result,"
+            "a.answer_key_release_state,a.answer_key_release_at FROM course_notes n "
+            "LEFT JOIN uploaded_assessments a ON a.note_id=n.id "
+            "WHERE n.class_id=?1 AND n.status='ready' ORDER BY n.created_at",
             class_id,
         )
+        rows = [row for row in rows if visible(row)]
     elif scope_kind == "uploads":
         ids = [UUID(value) for value in scope.get("upload_ids", [])]
         placeholders = ", ".join(f"?{index + 2}" for index in range(len(ids)))
         rows = await database.fetch(
-            "SELECT id, title, kind, extracted_text, summary, status FROM course_notes "
-            f"WHERE class_id = ?1 AND id IN ({placeholders}) ORDER BY created_at",
+            "SELECT n.id,n.title,n.kind,n.extracted_text,n.summary,n.status,n.created_by,"
+            "n.publication_state,n.release_at,n.resource_scope,a.id AS assessment_id,a.owner_id AS assessment_owner,"
+            "a.has_student_responses,a.score_percent,a.grading_result,"
+            "a.answer_key_release_state,a.answer_key_release_at FROM course_notes n "
+            "LEFT JOIN uploaded_assessments a ON a.note_id=n.id "
+            f"WHERE n.class_id=?1 AND n.id IN ({placeholders}) ORDER BY n.created_at",
             class_id,
             *ids,
         )
-        if len(rows) != len(ids):
+        if len(rows) != len(ids) or any(not visible(row) for row in rows):
             raise ApiError(404, "not_found", "The requested resource was not found.")
         if any(row["status"] != "ready" for row in rows):
             raise ApiError(409, "uploads_not_ready", "Wait for the selected uploads to finish processing.")
     elif scope_kind in {"topics", "exam"}:
         syllabus = await database.fetchrow(
-            "SELECT syllabus_outline FROM course_notes WHERE class_id = ?1 "
-            "AND kind = 'syllabus' AND status = 'ready' ORDER BY updated_at DESC LIMIT 1",
+            "SELECT n.syllabus_outline,n.created_by,n.publication_state,n.release_at,n.resource_scope,"
+            "a.id AS assessment_id,a.owner_id AS assessment_owner,a.has_student_responses,"
+            "a.score_percent,a.grading_result,a.answer_key_release_state,"
+            "a.answer_key_release_at FROM course_notes n "
+            "LEFT JOIN uploaded_assessments a ON a.note_id=n.id "
+            "WHERE n.class_id=?1 AND n.kind='syllabus' AND n.status='ready' "
+            "AND (n.publication_state='published' OR (n.publication_state='scheduled' "
+            "AND n.release_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now')) OR n.created_by=?2 OR ?3=1) "
+            "ORDER BY n.updated_at DESC LIMIT 1",
             class_id,
+            user_id,
+            int(is_class_manager(access)),
         )
-        if syllabus is None:
+        if syllabus is None or not visible(syllabus):
             raise ApiError(409, "syllabus_not_ready", "Process a syllabus before using a syllabus scope.")
         outline = json_value(syllabus["syllabus_outline"], {})
         outline = outline if isinstance(outline, dict) else {}
@@ -1237,10 +1620,15 @@ async def _resolve_material_sources(
                 raise ApiError(400, "invalid_scope", "The selected exam is not in this class syllabus.")
             scope = {"kind": "exam", "exam_name": found_exam["name"]}
         rows = await database.fetch(
-            "SELECT id, title, kind, extracted_text, summary, status FROM course_notes "
-            "WHERE class_id = ?1 AND status = 'ready' ORDER BY created_at",
+            "SELECT n.id,n.title,n.kind,n.extracted_text,n.summary,n.status,n.created_by,"
+            "n.publication_state,n.release_at,n.resource_scope,a.id AS assessment_id,a.owner_id AS assessment_owner,"
+            "a.has_student_responses,a.score_percent,a.grading_result,"
+            "a.answer_key_release_state,a.answer_key_release_at FROM course_notes n "
+            "LEFT JOIN uploaded_assessments a ON a.note_id=n.id "
+            "WHERE n.class_id=?1 AND n.status='ready' ORDER BY n.created_at",
             class_id,
         )
+        rows = [row for row in rows if visible(row)]
     else:
         raise ApiError(400, "invalid_scope", "The requested study scope is not supported.")
     if not rows:
@@ -1260,20 +1648,61 @@ async def _create_material_job(
         return
     try:
         material = await database.fetchrow(
-            "SELECT m.id, m.class_id, m.kind, m.scope, m.options, c.name AS class_name "
-            "FROM study_materials m JOIN course_classes c ON c.id = m.class_id "
+            "SELECT m.id,m.class_id,m.origin_class_id,m.owner_id,m.created_by,m.kind,m.scope,m.options,m.generation_instructions, "
+            "c.name AS class_name "
+            "FROM study_materials m LEFT JOIN course_classes c ON c.id = COALESCE(m.class_id,m.origin_class_id) "
             "WHERE m.id = ?1 AND m.status = 'generating'",
             material_id,
         )
         if material is None:
             return
         source_rows = await database.fetch(
-            "SELECT n.id, n.title, n.extracted_text, n.summary FROM study_material_sources s "
-            "JOIN course_notes n ON n.id = s.note_id AND n.class_id = s.class_id "
+            "SELECT COALESCE(n.id,s.source_note_id,s.note_id) AS id,"
+            "COALESCE(n.title,s.source_title) AS title,COALESCE(n.kind,s.source_kind) AS kind,"
+            "COALESCE(n.class_id,s.source_class_id,s.class_id) AS class_id,n.created_by,"
+            "n.publication_state,n.release_at,n.resource_scope,n.extracted_text,n.summary,a.id AS assessment_id,"
+            "a.owner_id AS assessment_owner,a.has_student_responses,a.score_percent,a.grading_result,"
+            "a.answer_key_release_state,a.answer_key_release_at "
+            "FROM study_material_sources s LEFT JOIN course_notes n "
+            "ON n.id=COALESCE(s.source_note_id,s.note_id) "
+            "AND n.class_id=COALESCE(s.source_class_id,s.class_id) "
+            "LEFT JOIN uploaded_assessments a ON a.note_id=n.id "
             "WHERE s.material_id = ?1 ORDER BY s.position",
             material_id,
         )
-        sources = [dict(row) for row in source_rows]
+        sources = []
+        actor_id = material.get("created_by") or material.get("owner_id")
+        if actor_id is None:
+            actor_class_id = material.get("class_id") or material.get("origin_class_id")
+            if actor_class_id is not None:
+                actor_id = await database.fetchval(
+                    "SELECT owner_id FROM course_classes WHERE id=?1", actor_class_id
+                )
+        for row in source_rows:
+            if actor_id is None or row.get("class_id") is None or row.get("id") is None:
+                continue
+            try:
+                source_access = await class_access(
+                    database, row["class_id"], actor_id, required="read"
+                )
+            except ApiError:
+                continue
+            if not (
+                is_effectively_published(row.get("publication_state"), row.get("release_at"))
+                or can_view_unreleased(source_access, actor_id, row.get("created_by"))
+            ):
+                continue
+            if row.get("assessment_id") is not None and not can_view_assessment_key(
+                row, source_access, actor_id
+            ):
+                continue
+            sources.append({key: value for key, value in row.items() if key not in {
+                "class_id", "created_by", "publication_state", "release_at", "assessment_id",
+                "assessment_owner", "has_student_responses", "score_percent", "grading_result",
+                "answer_key_release_state", "answer_key_release_at",
+            }})
+        if not sources or len(sources) != len(source_rows):
+            raise RuntimeError("no generation sources remain accessible")
         await database.execute(
             "UPDATE study_materials SET context_truncated = ?2 WHERE id = ?1",
             material_id,
@@ -1282,9 +1711,10 @@ async def _create_material_job(
         title, content = await asyncio.to_thread(
             service.generate_material,
             kind=material["kind"],
-            class_name=material["class_name"],
+            class_name=material["class_name"] or "Personal study materials",
             scope=json_value(material["scope"], {}),
             options=json_value(material["options"], {}),
+            additional_instructions=material["generation_instructions"],
             sources=sources,
         )
         files = {}
@@ -1293,7 +1723,7 @@ async def _create_material_job(
                 create_guide_files,
                 application.state.settings,
                 title=title,
-                class_name=material["class_name"],
+                class_name=material["class_name"] or "Personal study materials",
                 material_id=UUID(str(material_id)),
                 content=content,
                 sources=sources,
@@ -1335,7 +1765,10 @@ async def create_study_material(
     background_tasks: BackgroundTasks,
 ) -> MaterialSummary:
     user_id, database, settings = await _authorize(request)
-    class_row = await _owned_class(database, class_id, user_id)
+    access = await _owned_class(database, class_id, user_id)
+    if payload.destination == "class_contribution":
+        require_capability(access, "create")
+    class_row = access
     if getattr(request.app.state, "gemini_content_service", None) is None:
         raise ApiError(
             503, "content_processing_unavailable", "Study material generation is unavailable."
@@ -1353,26 +1786,39 @@ async def create_study_material(
             "invalid_options",
             "Question types are available only for quizzes and practice exams.",
         )
-    sources, scope = await _resolve_material_sources(database, class_id, scope)
+    sources, scope = await _resolve_material_sources(database, class_id, scope, user_id, access)
     title = f"{payload.kind.replace('_', ' ').title()}: {class_row['name']}"
+    personal = payload.destination == "personal"
+    resource_scope = "personal" if personal else "student_contribution"
+    material_class_id = None if personal else class_id
+    publication_state = None if personal else "draft"
     async with database.acquire() as connection:
         async with connection.transaction():
             row = await connection.fetchrow(
-                "INSERT INTO study_materials (id, class_id, kind, title, status, scope, options) "
-                "VALUES (?1, ?2, ?3, ?4, 'generating', ?5, ?6) "
-                "RETURNING id, class_id, kind, title, scope, options, status, failure_code, created_at, generated_at",
+                "INSERT INTO study_materials "
+                "(id,class_id,origin_class_id,resource_scope,owner_id,created_by,publication_state, "
+                "kind,title,status,scope,options,generation_instructions) "
+                "VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'generating',?10,?11,?12) "
+                "RETURNING *",
                 uuid4(),
+                material_class_id,
                 class_id,
+                resource_scope,
+                user_id if personal else None,
+                user_id,
+                publication_state,
                 payload.kind,
                 title,
                 json.dumps(scope),
                 json.dumps(options),
+                payload.additional_instructions,
             )
             await connection.executemany(
-                "INSERT INTO study_material_sources (material_id, class_id, note_id, position) "
-                "VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO study_material_sources "
+                "(material_id,source_class_id,source_note_id,source_title,source_kind,position,class_id,note_id) "
+                "VALUES (?1,?2,?3,?4,?5,?6,?2,?3)",
                 [
-                    (row["id"], class_id, source["id"], index)
+                    (row["id"], class_id, source["id"], source["title"], source["kind"], index)
                     for index, source in enumerate(sources)
                 ],
             )
@@ -1380,6 +1826,11 @@ async def create_study_material(
     return MaterialSummary(
         id=row["id"],
         class_id=row["class_id"],
+        origin_class_id=row["origin_class_id"],
+        resource_scope=row["resource_scope"],
+        created_by=row["created_by"],
+        publication_state=row["publication_state"],
+        release_at=row["release_at"],
         kind=row["kind"],
         title=row["title"],
         scope=json_value(row["scope"], {}),
@@ -1397,16 +1848,43 @@ async def list_study_materials(
     class_id: UUID, request: Request
 ) -> dict[str, list[MaterialSummary]]:
     user_id, database, _ = await _authorize(request)
-    await _owned_class(database, class_id, user_id)
+    access = await _owned_class(database, class_id, user_id)
     rows = await database.fetch(
         "SELECT m.*, COALESCE(json_extract(m.options, '$.count'), 0) AS requested_count, "
-        "(SELECT a.score_percent FROM study_material_attempts a WHERE a.material_id = m.id "
+        "(SELECT a.score_percent FROM study_material_attempts a WHERE a.material_id = m.id AND a.owner_id=?2 "
         "ORDER BY a.completed_at DESC LIMIT 1) AS latest_score, "
-        "(SELECT a.completed_at FROM study_material_attempts a WHERE a.material_id = m.id "
+        "(SELECT a.completed_at FROM study_material_attempts a WHERE a.material_id = m.id AND a.owner_id=?2 "
         "ORDER BY a.completed_at DESC LIMIT 1) AS latest_completed_at "
         "FROM study_materials m "
-        "WHERE m.class_id = ?1 ORDER BY m.created_at DESC, m.id",
+        "WHERE (m.class_id = ?1 OR (m.resource_scope='personal' AND m.origin_class_id=?1 AND m.owner_id=?2)) "
+        "ORDER BY m.created_at DESC, m.id",
         class_id,
+        user_id,
+    )
+    visible = []
+    for row in rows:
+        if row["resource_scope"] == "personal":
+            visible.append(_material_summary(row))
+        elif (
+            is_effectively_published(row["publication_state"], row["release_at"])
+            or can_view_unreleased(access, user_id, row["created_by"])
+        ):
+            visible.append(_material_summary(row))
+    return {"items": visible}
+
+
+@router.get("/api/me/study-materials")
+async def list_personal_study_materials(request: Request) -> dict[str, list[MaterialSummary]]:
+    user_id, database, _ = await _authorize(request)
+    rows = await database.fetch(
+        "SELECT m.*,COALESCE(json_extract(m.options,'$.count'),0) AS requested_count, "
+        "(SELECT a.score_percent FROM study_material_attempts a WHERE a.material_id=m.id "
+        "AND a.owner_id=?1 ORDER BY a.completed_at DESC LIMIT 1) AS latest_score, "
+        "(SELECT a.completed_at FROM study_material_attempts a WHERE a.material_id=m.id "
+        "AND a.owner_id=?1 ORDER BY a.completed_at DESC LIMIT 1) AS latest_completed_at "
+        "FROM study_materials m WHERE m.resource_scope='personal' AND m.owner_id=?1 "
+        "ORDER BY m.created_at DESC,m.id",
+        user_id,
     )
     return {"items": [_material_summary(row) for row in rows]}
 
@@ -1414,23 +1892,24 @@ async def list_study_materials(
 @router.get("/api/study-materials/{material_id}")
 async def get_study_material(material_id: UUID, request: Request) -> MaterialDetail:
     user_id, database, _ = await _authorize(request)
+    material, access = await material_access(database, material_id, user_id)
     row = await database.fetchrow(
-        "SELECT m.*, COALESCE(json_extract(m.options, '$.count'), 0) AS requested_count, "
-        "(SELECT a.score_percent FROM study_material_attempts a WHERE a.material_id = m.id "
-        "ORDER BY a.completed_at DESC LIMIT 1) AS latest_score, "
-        "(SELECT a.completed_at FROM study_material_attempts a WHERE a.material_id = m.id "
-        "ORDER BY a.completed_at DESC LIMIT 1) AS latest_completed_at "
-        "FROM study_materials m JOIN course_classes c ON c.id = m.class_id "
-        "WHERE m.id = ?1 AND c.owner_id = ?2",
-        material_id,
-        user_id,
+        "SELECT m.*,COALESCE(json_extract(m.options,'$.count'),0) AS requested_count, "
+        "(SELECT a.score_percent FROM study_material_attempts a WHERE a.material_id=m.id "
+        "AND a.owner_id=?2 ORDER BY a.completed_at DESC LIMIT 1) AS latest_score, "
+        "(SELECT a.completed_at FROM study_material_attempts a WHERE a.material_id=m.id "
+        "AND a.owner_id=?2 ORDER BY a.completed_at DESC LIMIT 1) AS latest_completed_at "
+        "FROM study_materials m WHERE m.id=?1", material_id, user_id,
     )
-    if row is None:
-        raise ApiError(404, "not_found", "The requested resource was not found.")
+    visible_source_ids = await _visible_material_source_ids(
+        database, material_id, user_id, material, access
+    )
     summary = _material_summary(row)
     return MaterialDetail(
         **summary.model_dump(),
-        content=_public_material_content(row["kind"], row["content"]),
+        content=_public_material_content(
+            row["kind"], row["content"], visible_source_ids=visible_source_ids
+        ),
         download_urls={
             format: f"/api/study-materials/{material_id}/files/{format}"
             for format in ("pdf", "latex")
@@ -1448,11 +1927,11 @@ async def download_study_file(
 ) -> Response:
     user_id, database, settings = await _authorize(request)
     material = await database.fetchrow(
-        "SELECT m.*, c.name AS class_name FROM study_materials m "
-        "JOIN course_classes c ON c.id = m.class_id WHERE m.id = ?1 AND c.owner_id = ?2",
+        "SELECT m.*,c.name AS class_name FROM study_materials m "
+        "LEFT JOIN course_classes c ON c.id=COALESCE(m.class_id,m.origin_class_id) WHERE m.id=?1",
         material_id,
-        user_id,
     )
+    await material_access(database, material_id, user_id)
     if material is None:
         raise ApiError(404, "not_found", "The requested resource was not found.")
     if material["kind"] != "study_guide":
@@ -1469,7 +1948,9 @@ async def download_study_file(
     if file is None:
         # Backfill guides saved before file exports existed, without another model request.
         sources = await database.fetch(
-            "SELECT n.id, n.title FROM study_material_sources s JOIN course_notes n ON n.id = s.note_id "
+            "SELECT COALESCE(n.id,s.source_note_id) AS id,COALESCE(n.title,s.source_title) AS title "
+            "FROM study_material_sources s LEFT JOIN course_notes n "
+            "ON n.id=COALESCE(s.source_note_id,s.note_id) "
             "WHERE s.material_id = ?1 ORDER BY s.position",
             material_id,
         )
@@ -1478,7 +1959,7 @@ async def download_study_file(
                 create_guide_files,
                 settings,
                 title=material["title"],
-                class_name=material["class_name"],
+                class_name=material["class_name"] or "Personal study materials",
                 material_id=material_id,
                 content=json_value(material["content"], {}),
                 sources=sources,
@@ -1522,12 +2003,28 @@ async def download_study_file(
 @router.delete("/api/study-materials/{material_id}", status_code=204)
 async def delete_study_material(material_id: UUID, request: Request) -> Response:
     user_id, database, _ = await _authorize(request)
-    result = await database.execute(
-        "DELETE FROM study_materials WHERE id = ?1 AND class_id IN "
-        "(SELECT id FROM course_classes WHERE owner_id = ?2)",
-        material_id,
-        user_id,
-    )
+    material, access = await material_access(database, material_id, user_id)
+    if access is not None:
+        require_resource_mutation(
+            access,
+            user_id,
+            material["created_by"],
+            "delete",
+            resource_scope=material["resource_scope"],
+            publication_state=material["publication_state"],
+            release_at=material["release_at"],
+        )
+        if material["kind"] in {"quiz", "practice_exam"}:
+            attempts = await database.fetchval(
+                "SELECT count(*) FROM quiz_runs WHERE material_id=?1", material_id
+            )
+            if attempts:
+                raise ApiError(
+                    409,
+                    "assessment_has_attempts",
+                    "This shared assessment has student history and cannot be deleted.",
+                )
+    result = await database.execute("DELETE FROM study_materials WHERE id=?1", material_id)
     if result == "DELETE 0":
         raise ApiError(404, "not_found", "The requested resource was not found.")
     return Response(status_code=204)
@@ -1546,15 +2043,7 @@ async def submit_attempt(
     request: Request,
 ) -> AttemptResult:
     user_id, database, _ = await _authorize(request)
-    row = await database.fetchrow(
-        "SELECT m.id, m.kind, m.status, m.content FROM study_materials m "
-        "JOIN course_classes c ON c.id = m.class_id "
-        "WHERE m.id = ?1 AND c.owner_id = ?2",
-        material_id,
-        user_id,
-    )
-    if row is None:
-        raise ApiError(404, "not_found", "The requested resource was not found.")
+    row, access = await material_access(database, material_id, user_id)
     if row["kind"] not in {"quiz", "practice_exam"}:
         raise ApiError(409, "attempt_not_supported", "Only quizzes and practice exams can be submitted.")
     if row["status"] != "ready":
@@ -1587,6 +2076,12 @@ async def submit_attempt(
     else:
         # Keep the old standard-mode API usable, while preventing it from
         # bypassing an explicitly started Reasoning Mode run.
+        if access is not None and not access["is_owner"]:
+            raise ApiError(
+                409,
+                "quiz_run_required",
+                "Start a quiz run before submitting an answer in a shared class.",
+            )
         active_reasoning_run = await database.fetchval(
             "SELECT count(*) FROM quiz_runs WHERE material_id = ?1 AND owner_id = ?2 "
             "AND mode = 'reasoning' AND status = 'in_progress'",
@@ -1601,6 +2096,9 @@ async def submit_attempt(
         raise ApiError(400, "invalid_answers", "The submission contains an unknown question.")
 
     results: list[QuestionAttemptResult] = []
+    visible_source_ids = await _visible_material_source_ids(
+        database, material_id, user_id, row, access
+    )
     correct_count = 0
     for question_id, question in question_by_id.items():
         submitted = payload.answers.get(question_id)
@@ -1627,16 +2125,19 @@ async def submit_attempt(
                 submitted_answer=submitted,
                 correct_answer=correct_answer,
                 explanation=question.get("explanation", ""),
-                sources=question.get("sources", []),
+                sources=[
+                    source for source in question.get("sources", [])
+                    if str(source.get("upload_id")) in visible_source_ids
+                ],
             )
         )
     score = round(correct_count * 100 / len(question_by_id), 2)
     attempt_id = payload.run_id or uuid4()
     if run is None:
         attempt_id = await database.fetchval(
-            "INSERT INTO study_material_attempts (id, material_id, answers, score_percent) "
-            "VALUES (?1, ?2, ?3, ?4) RETURNING id",
-            attempt_id, material_id, json.dumps(payload.answers), score,
+            "INSERT INTO study_material_attempts (id,material_id,owner_id,answers,score_percent) "
+            "VALUES (?1,?2,?3,?4,?5) RETURNING id",
+            attempt_id, material_id, user_id, json.dumps(payload.answers), score,
         )
     else:
         async with database.acquire() as connection:
@@ -1663,9 +2164,9 @@ async def submit_attempt(
                     if changed is None:
                         raise ApiError(409, "answer_immutable", "This quiz run already has a submitted answer.")
                     await connection.execute(
-                        "INSERT INTO study_material_attempts (id, material_id, answers, score_percent) "
-                        "VALUES (?1, ?2, ?3, ?4)",
-                        payload.run_id, material_id, json.dumps(payload.answers), score,
+                        "INSERT INTO study_material_attempts (id,material_id,owner_id,answers,score_percent) "
+                        "VALUES (?1,?2,?3,?4,?5)",
+                        payload.run_id, material_id, user_id, json.dumps(payload.answers), score,
                     )
     return AttemptResult(
         attempt_id=attempt_id,
@@ -1682,15 +2183,9 @@ async def flag_study_item(
     request: Request,
 ) -> dict[str, Any]:
     user_id, database, _ = await _authorize(request)
-    row = await database.fetchrow(
-        "SELECT m.class_id, m.kind, m.status, m.content FROM study_materials m "
-        "JOIN course_classes c ON c.id = m.class_id "
-        "WHERE m.id = ?1 AND c.owner_id = ?2",
-        material_id,
-        user_id,
-    )
-    if row is None:
-        raise ApiError(404, "not_found", "The requested resource was not found.")
+    row, access = await material_access(database, material_id, user_id)
+    if row["class_id"] is None:
+        raise ApiError(409, "flag_not_supported", "Private study materials cannot be flagged for class review.")
     content = json_value(row["content"], {})
     items = []
     if isinstance(content, dict):

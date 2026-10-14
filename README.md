@@ -16,7 +16,7 @@ Jot (working name: Screen Tutor) is a HackRU Fall 2026 project for the **Educati
 - **Hints before answers.** The tutor nudges with questions first and explains a prerequisite or a small worked example only when hints aren't working.
 - **Check my steps.** Turn it on before sharing, and Jot follows along as the student works. It speaks a short hint only when it sees a clear mistake, and stays quiet for correct, unfinished, or unclear work.
 - **Language lock.** Keeps the tutor in one of 11 languages, even when the materials are in another.
-- **Quick tutor for guests.** Anyone can try tutoring without an account.
+- **Configurable guest access.** Guest pages are disabled by default and can be enabled by the operator.
 
 **Built around the student's course** (requires an account)
 
@@ -57,7 +57,16 @@ You need Python 3.12, Node.js 18 or newer, and a [Gemini API key](https://aistud
    npm run dev
    ```
 
-4. **Open** http://127.0.0.1:5173. Use **Quick tutor** as a guest, or create an account to make classes.
+4. **Create an admin** before accepting new users:
+
+   ```bash
+   cd backend
+   .venv/bin/python -m app.scripts.create_admin YOUR_USERNAME   # macOS/Linux
+   .venv/Scripts/python.exe -m app.scripts.create_admin YOUR_USERNAME   # Windows
+   ```
+
+   New account requests are closed by default. Set `SIGNUP_MODE=approval` to accept administrator-reviewed requests, or `SIGNUP_MODE=open` for immediate public signup. Guest pages remain off unless `ALLOW_GUEST_ACCESS=true`.
+5. **Open** http://127.0.0.1:5173 and log in with the admin account. Approve later account requests from **Signup requests** in the account menu.
 
 The SQLite database and uploaded files live under `backend/.local/`. Optional extras are covered in the [backend README](backend/README.md): Lean proof checking, and Tectonic for saving study guides as PDF.
 

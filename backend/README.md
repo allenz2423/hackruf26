@@ -75,9 +75,18 @@ The server instruction adapts between focused hints, direct prerequisite explana
 
 Accounts live in SQLite (`users`, `user_sessions`). Passwords are stored as salted scrypt hashes. A login sets an HttpOnly, SameSite=Lax `jot_session` cookie; only a hash of the session token is stored. Every class-library row belongs to the logged-in account, and the backend never accepts an owner from the client.
 
-- **Guests** (no session) may use quick tutoring (`POST /api/live-sessions` without `class_id`), the calculator, and the Lean checker. They cannot read or write class-library data, and cannot start a class tutor session.
+- **Guests** are denied by default. Set `ALLOW_GUEST_ACCESS=true` to allow quick tutoring, calculator/Lean tools, and local study pages without a session. Guest access never includes class-library data or class tutoring.
 - **Logged-in accounts** get their own class library. Another account's classes return 404, and class-library endpoints return 401 without a session.
-- `POST /api/auth/signup`, `POST /api/auth/login`, and `POST /api/auth/logout` need an allowed `Origin` and are rate limited (`AUTH_RATE_LIMIT` per `AUTH_RATE_WINDOW_SECONDS`). `GET /api/auth/me` returns `{"user": null}` for a guest. A logged-in account can change its details and saved avatar with `PATCH /api/auth/me` and its password with `POST /api/auth/password`.
+- `SIGNUP_MODE=closed` (the default) disables new account requests; `approval` creates pending requests for administrator review, and `open` enables immediate public signups. Signup/login/logout require an allowed `Origin` and are rate limited. `GET /api/auth/me` returns the current user plus access settings. A logged-in account can change its details and saved avatar with `PATCH /api/auth/me` and its password with `POST /api/auth/password`.
+
+Create the first administrator from the backend directory. This prompts for the password twice and refuses to create another administrator:
+
+```bash
+.venv/bin/python -m app.scripts.create_admin YOUR_USERNAME   # macOS/Linux
+.venv/Scripts/python.exe -m app.scripts.create_admin YOUR_USERNAME   # Windows
+```
+
+Administrators can approve or reject pending requests in the **Signup requests** page. There is no public admin bootstrap route. Guest access and signup policy are independent configuration choices; `.env.example` documents their closed-by-default values.
 
 Create a local test account (refused when `APP_ENV=production`):
 
@@ -90,7 +99,7 @@ python -m app.scripts.seed_user USERNAME PASSWORD [--display-name NAME] [--demo]
 
 `--adopt-local-data` gives that account any classes saved under the old `LOCAL_OWNER_ID` before accounts existed.
 
-In production, also configure a strong `DEMO_GATE_TOKEN` to protect session-ticket and tool endpoints, and serve over HTTPS so the session cookie is sent with the `Secure` flag.
+For production, keep `ALLOW_GUEST_ACCESS=false`, choose `SIGNUP_MODE=approval` or `closed` unless public registration is intended, set the correct HTTPS `APP_ORIGINS`, and serve over HTTPS so the session cookie is sent with the `Secure` flag.
 
 ## API
 

@@ -79,6 +79,10 @@ class LiveSessionTicket:
     mode: TutorMode = TutorMode.CONVERSATION
     language: TutorLanguage = TutorLanguage.AUTO
     memory_target: MemoryTarget | None = None
+    class_id: str | None = None
+    user_id: str | None = None
+    membership_generation: int = 0
+    class_generation: int = 0
 
 
 class LiveSessionTicketStore:
@@ -86,6 +90,9 @@ class LiveSessionTicketStore:
 
     def __init__(self) -> None:
         self._tickets: dict[str, LiveSessionTicket] = {}
+        self._membership_generations: dict[tuple[str, str], int] = {}
+        self._class_generations: dict[str, int] = {}
+        self._active: dict[tuple[str, str], set[WebSocket]] = {}
         self._lock = asyncio.Lock()
 
     async def issue(
@@ -95,13 +102,27 @@ class LiveSessionTicketStore:
         mode: TutorMode = TutorMode.CONVERSATION,
         language: TutorLanguage = TutorLanguage.AUTO,
         memory_target: MemoryTarget | None = None,
+        class_id: UUID | str | None = None,
+        user_id: UUID | str | None = None,
     ) -> tuple[str, datetime]:
         now = datetime.now(UTC)
         expires_at = now + timedelta(seconds=TICKET_TTL_SECONDS)
         ticket = secrets.token_urlsafe(32)
         async with self._lock:
             self._remove_expired(now)
-            self._tickets[ticket] = LiveSessionTicket(class_context, expires_at, mode, language, memory_target)
+            member_key = (str(class_id), str(user_id)) if class_id is not None and user_id is not None else None
+            generation = self._membership_generations.get(member_key, 0) if member_key else 0
+            self._tickets[ticket] = LiveSessionTicket(
+                class_context,
+                expires_at,
+                mode,
+                language,
+                memory_target,
+                str(class_id) if class_id is not None else None,
+                str(user_id) if user_id is not None else None,
+                generation,
+                self._class_generations.get(str(class_id), 0) if class_id is not None else 0,
+            )
         return ticket, expires_at
 
     async def consume(self, ticket: str) -> LiveSessionTicket | None:
@@ -112,6 +133,70 @@ class LiveSessionTicketStore:
         if value is None or value.expires_at <= now:
             return None
         return value
+
+    async def revoke_ticket(self, ticket: str) -> None:
+        async with self._lock:
+            self._tickets.pop(ticket, None)
+
+    async def register_active(self, ticket: LiveSessionTicket, websocket: WebSocket) -> bool:
+        if ticket.class_id is None or ticket.user_id is None:
+            return True
+        key = (ticket.class_id, ticket.user_id)
+        async with self._lock:
+            if (
+                ticket.membership_generation != self._membership_generations.get(key, 0)
+                or ticket.class_generation != self._class_generations.get(ticket.class_id, 0)
+            ):
+                return False
+            self._active.setdefault(key, set()).add(websocket)
+        return True
+
+    async def unregister_active(self, ticket: LiveSessionTicket, websocket: WebSocket) -> None:
+        if ticket.class_id is None or ticket.user_id is None:
+            return
+        key = (ticket.class_id, ticket.user_id)
+        async with self._lock:
+            sockets = self._active.get(key)
+            if sockets is not None:
+                sockets.discard(websocket)
+                if not sockets:
+                    self._active.pop(key, None)
+
+    async def revoke_member(self, class_id: UUID | str, user_id: UUID | str) -> None:
+        key = (str(class_id), str(user_id))
+        async with self._lock:
+            self._membership_generations[key] = self._membership_generations.get(key, 0) + 1
+            for token, ticket in list(self._tickets.items()):
+                if ticket.class_id == key[0] and ticket.user_id == key[1]:
+                    self._tickets.pop(token, None)
+            sockets = list(self._active.pop(key, set()))
+        for websocket in sockets:
+            try:
+                await websocket.close(code=1008, reason="Class access was revoked")
+            except (RuntimeError, WebSocketDisconnect):
+                pass
+
+    async def revoke_class(self, class_id: UUID | str) -> None:
+        class_key = str(class_id)
+        async with self._lock:
+            self._class_generations[class_key] = self._class_generations.get(class_key, 0) + 1
+            member_keys = {
+                (ticket.class_id, ticket.user_id)
+                for ticket in self._tickets.values()
+                if ticket.class_id == class_key and ticket.user_id is not None
+            }
+            member_keys.update(key for key in self._active if key[0] == class_key)
+            for key in member_keys:
+                self._membership_generations[key] = self._membership_generations.get(key, 0) + 1
+            for token, ticket in list(self._tickets.items()):
+                if ticket.class_id == class_key:
+                    self._tickets.pop(token, None)
+            sockets = [socket for key in member_keys for socket in self._active.pop(key, set())]
+        for websocket in sockets:
+            try:
+                await websocket.close(code=1008, reason="Class access was revoked")
+            except (RuntimeError, WebSocketDisconnect):
+                pass
 
     def _remove_expired(self, now: datetime) -> None:
         expired = [key for key, value in self._tickets.items() if value.expires_at <= now]

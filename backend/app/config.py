@@ -51,7 +51,8 @@ class Settings(BaseSettings):
     app_origins: str = (
         "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000"
     )
-    demo_gate_token: SecretStr | None = None
+    allow_guest_access: bool = False
+    signup_mode: Literal["approval", "open", "closed"] = "closed"
 
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-3.8-live"
@@ -159,12 +160,6 @@ class Settings(BaseSettings):
         if not 1 <= self.max_class_name_length <= 200:
             raise ValueError("MAX_CLASS_NAME_LENGTH must be between 1 and 200.")
 
-        if (
-            self.demo_gate_token is not None
-            and len(self.demo_gate_token.get_secret_value().strip()) < 32
-        ):
-            raise ValueError("DEMO_GATE_TOKEN must contain at least 32 characters when configured.")
-
         if not self.sqlite_path.strip():
             raise ValueError("SQLITE_PATH must be a file path or :memory:.")
         if (
@@ -183,9 +178,6 @@ class Settings(BaseSettings):
             origins = self.allowed_origins
             if any(not origin.startswith("https://") for origin in origins):
                 raise ValueError("Production APP_ORIGINS must use HTTPS.")
-            gate = self.demo_gate_token.get_secret_value().strip() if self.demo_gate_token else ""
-            if len(gate) < 32:
-                raise ValueError("Production requires a high-entropy DEMO_GATE_TOKEN.")
         return self
 
     @property

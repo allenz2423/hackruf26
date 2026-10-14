@@ -15,6 +15,13 @@ from app.api.dependencies import database, enforce_sqlite_api_policy
 from app.api.errors import ApiError
 from app.api.schemas import DocumentDetailLevel, UploadDocumentContent, UploadDocumentRequest
 from app.services.database import SQLiteDatabase, json_value
+from app.services.class_access import (
+    can_view_assessment_key,
+    can_view_unreleased,
+    class_access,
+    is_effectively_published,
+    is_private_assessment,
+)
 from app.services.study_files import compiler_path, create_guide_files
 
 router = APIRouter(tags=["upload-documents"])
@@ -43,14 +50,29 @@ async def _owned_upload(request: Request, upload_id: UUID) -> tuple[SQLiteDataba
     owner = await enforce_sqlite_api_policy(request, settings)
     db = database(request)
     note = await db.fetchrow(
-        "SELECT n.*, c.name AS class_name FROM course_notes n JOIN "
-        "course_classes c ON c.id = n.class_id "
-        "WHERE n.id = ?1 AND c.owner_id = ?2",
+        "SELECT n.*,c.name AS class_name FROM course_notes n JOIN course_classes c ON c.id=n.class_id "
+        "WHERE n.id=?1",
         upload_id,
-        owner,
     )
     if note is None:
         raise ApiError(404, "not_found", "The requested resource was not found.")
+    access = await class_access(db, note["class_id"], owner, required="read")
+    if not is_effectively_published(note["publication_state"], note["release_at"]) and not can_view_unreleased(
+        access, owner, note["created_by"]
+    ):
+        raise ApiError(404, "not_found", "The requested resource was not found.")
+    assessment = await db.fetchrow(
+        "SELECT a.owner_id,a.answer_key_release_state,a.answer_key_release_at,a.has_student_responses,"
+        "a.score_percent,a.grading_result,n.created_by,n.resource_scope "
+        "FROM uploaded_assessments a JOIN course_notes n ON n.id=a.note_id WHERE a.note_id=?1",
+        upload_id,
+    )
+    if assessment and is_private_assessment(assessment) and str(assessment["owner_id"]) != str(owner):
+        raise ApiError(404, "not_found", "The requested resource was not found.")
+    if assessment and not can_view_assessment_key({**assessment, "created_by": assessment["created_by"]}, access, owner):
+        raise ApiError(404, "not_found", "The requested resource was not found.")
+    note["class_capabilities"] = access["capabilities"]
+    note["class_is_manager"] = access["is_owner"] or "manage_permissions" in access["capabilities"]
     return db, note
 
 
@@ -242,10 +264,12 @@ async def create_upload_document(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> dict:
-    db, _ = await _owned_upload(request, upload_id)
+    db, note = await _owned_upload(request, upload_id)
     existing = await document_detail(db, upload_id, payload.detail_level)
     if existing["status"] in {"ready", "generating"}:
         return existing
+    if not note.get("class_is_manager") and "create" not in note.get("class_capabilities", []):
+        raise ApiError(403, "insufficient_permission", "You need class create permission to generate a shared study document.")
     if (
         not compiler_path(request.app.state.settings)
         or getattr(request.app.state, "gemini_content_service", None) is None
@@ -254,7 +278,7 @@ async def create_upload_document(
             503, "document_generation_unavailable", "Upload document generation is unavailable."
         )
     retry_after = await request.app.state.generation_rate_limiter.check(
-        str(request.app.state.settings.local_owner_id)
+        str(await enforce_sqlite_api_policy(request, request.app.state.settings))
     )
     if retry_after is not None:
         raise ApiError(

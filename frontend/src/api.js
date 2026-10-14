@@ -1,4 +1,14 @@
 const authListeners = new Set();
+let authOptions = { guestAccessEnabled: false, signupMode: "closed" };
+
+function syncAuthOptions(payload) {
+  authOptions = {
+    guestAccessEnabled: payload.guest_access_enabled === true,
+    signupMode: ["approval", "open", "closed"].includes(payload.signup_mode)
+      ? payload.signup_mode
+      : "closed"
+  };
+}
 
 // The login session lives in an HttpOnly cookie, so scripts never see or store a token.
 export async function getAccessToken() {
@@ -9,10 +19,15 @@ export async function getAccessToken() {
 export async function getCurrentUser() {
   try {
     const payload = await apiFetch("/api/auth/me");
+    syncAuthOptions(payload);
     return payload.user || null;
   } catch {
     return null;
   }
+}
+
+export function getAuthOptions() {
+  return { ...authOptions };
 }
 
 export async function signIn(identifier, password) {
@@ -20,11 +35,12 @@ export async function signIn(identifier, password) {
     method: "POST",
     body: JSON.stringify({ identifier, password })
   });
+  syncAuthOptions(payload);
   return payload.user;
 }
 
 export async function signUp({ username, password, email = "", displayName = "" }) {
-  const payload = await apiFetch("/api/auth/signup", {
+  return apiFetch("/api/auth/signup", {
     method: "POST",
     body: JSON.stringify({
       username,
@@ -33,7 +49,24 @@ export async function signUp({ username, password, email = "", displayName = "" 
       display_name: displayName || null
     })
   });
-  return payload.user;
+}
+
+export function getSignupRequestsApi() {
+  return apiFetch("/api/admin/signup-requests");
+}
+
+export function approveSignupRequestApi(requestId) {
+  return apiFetch(`/api/admin/signup-requests/${encodeURIComponent(requestId)}/approve`, {
+    method: "POST",
+    body: "{}"
+  });
+}
+
+export function rejectSignupRequestApi(requestId) {
+  return apiFetch(`/api/admin/signup-requests/${encodeURIComponent(requestId)}/reject`, {
+    method: "POST",
+    body: "{}"
+  });
 }
 
 export async function updateProfile(changes) {
@@ -232,6 +265,57 @@ export async function deleteClassApi(classId) {
   });
 }
 
+export async function createClassInvitationApi(classId, { expiresInDays = 7, maxUses = 1, capabilities = ["read"] } = {}) {
+  return apiFetch(`/api/classes/${encodeURIComponent(classId)}/invitations`, {
+    method: "POST",
+    body: JSON.stringify({ expires_in_days: expiresInDays, max_uses: maxUses, capabilities })
+  });
+}
+
+export async function getClassInvitationsApi(classId) {
+  const res = await apiFetch(`/api/classes/${encodeURIComponent(classId)}/invitations`);
+  return res.items || [];
+}
+
+export async function revokeClassInvitationApi(classId, invitationId) {
+  return apiFetch(`/api/classes/${encodeURIComponent(classId)}/invitations/${encodeURIComponent(invitationId)}`, { method: "DELETE" });
+}
+
+export async function redeemClassInvitationApi(code) {
+  return apiFetch("/api/class-invitations/redeem", {
+    method: "POST",
+    body: JSON.stringify({ code: String(code || "").trim() })
+  });
+}
+
+export async function getClassMembersApi(classId) {
+  const res = await apiFetch(`/api/classes/${encodeURIComponent(classId)}/members`);
+  return res.items || [];
+}
+
+export async function updateClassMemberCapabilitiesApi(classId, memberId, capabilities) {
+  return apiFetch(`/api/classes/${encodeURIComponent(classId)}/members/${encodeURIComponent(memberId)}/capabilities`, {
+    method: "PATCH",
+    body: JSON.stringify({ capabilities })
+  });
+}
+
+export async function removeClassMemberApi(classId, memberId) {
+  return apiFetch(`/api/classes/${encodeURIComponent(classId)}/members/${encodeURIComponent(memberId)}`, { method: "DELETE" });
+}
+
+export async function leaveClassApi(classId) {
+  return apiFetch(`/api/classes/${encodeURIComponent(classId)}/leave`, { method: "POST" });
+}
+
+export async function updateResourcePublicationApi(resourceType, resourceId, { state, releaseAt = null }) {
+  if (!["uploads", "study_materials"].includes(resourceType)) throw new Error("Unsupported resource type.");
+  return apiFetch(`/api/resources/${resourceType}/${encodeURIComponent(resourceId)}/publication`, {
+    method: "PATCH",
+    body: JSON.stringify({ state, ...(state === "scheduled" ? { release_at: releaseAt } : {}) })
+  });
+}
+
 // Uploads endpoints
 export async function getUploadsApi(classId) {
   const res = await apiFetch(`/api/classes/${encodeURIComponent(classId)}/uploads`);
@@ -303,10 +387,25 @@ export async function getStudyMaterialsApi(classId) {
   return res.items || [];
 }
 
-export async function createStudyMaterialApi(classId, { kind, scope = { kind: "all" }, options = { count: 10, difficulty: "mixed" } }) {
+export async function getMyStudyMaterialsApi() {
+  const res = await apiFetch("/api/me/study-materials");
+  return res.items || [];
+}
+
+export async function createStudyMaterialApi(classId, {
+  kind,
+  scope = { kind: "all" },
+  options = { count: 10, difficulty: "mixed" },
+  additionalInstructions = "",
+  destination = "personal"
+}) {
+  const body = { kind, scope, options, destination };
+  if (typeof additionalInstructions === "string" && additionalInstructions.trim()) {
+    body.additional_instructions = additionalInstructions.trim();
+  }
   return await apiFetch(`/api/classes/${encodeURIComponent(classId)}/study-materials`, {
     method: "POST",
-    body: JSON.stringify({ kind, scope, options })
+    body: JSON.stringify(body)
   });
 }
 

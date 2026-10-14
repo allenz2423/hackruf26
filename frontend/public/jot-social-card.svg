@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="page" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#f4efe3"/>
+      <stop offset="1" stop-color="#ebe5d6"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#d8edf3"/>
+      <stop offset="1" stop-color="#b8dbe4"/>
+    </linearGradient>
+    <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.2" fill="#3f6577" opacity=".15"/>
+    </pattern>
+    <filter id="shadow" x="-.3" y="-.3" width="1.7" height="1.7">
+      <feDropShadow dx="0" dy="22" stdDeviation="24" flood-color="#1c2e37" flood-opacity=".18"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="630" fill="url(#page)"/>
+  <path d="M0 0h620v630H0z" fill="url(#dots)" opacity=".55"/>
+  <circle cx="1090" cy="-20" r="240" fill="#86c9e0" opacity=".22"/>
+  <circle cx="1070" cy="650" r="170" fill="#3f6577" opacity=".10"/>
+
+  <g transform="translate(82 74)">
+    <rect width="48" height="48" rx="15" fill="#3f6577"/>
+    <path d="M12 15c2-3 5-4 9-4h14c5 0 9 4 9 9l1 12c1 8-4 13-12 14l-10 1c-7 0-12-4-13-11l-2-10c-1-5 1-9 4-11Z" fill="#86c9e0"/>
+    <circle cx="19" cy="25" r="2.4" fill="#1c2e37"/>
+    <circle cx="31" cy="25" r="2.4" fill="#1c2e37"/>
+    <path d="M22 32c2 2 5 2 7 0" fill="none" stroke="#1c2e37" stroke-linecap="round" stroke-width="2.2"/>
+    <text x="62" y="35" fill="#1c2e37" font-family="DejaVu Sans, sans-serif" font-size="31" font-weight="700" letter-spacing="-.7">Jot</text>
+  </g>
+
+  <g fill="#1c2e37" font-family="DejaVu Sans, sans-serif">
+    <text x="86" y="252" font-size="69" font-weight="700" letter-spacing="-3">A better way</text>
+    <text x="86" y="333" font-size="69" font-weight="700" letter-spacing="-3">to learn.</text>
+  </g>
+  <text x="90" y="399" fill="#3f6577" font-family="DejaVu Sans, sans-serif" font-size="25" font-weight="700">Your AI study partner.</text>
+  <text x="90" y="448" fill="#455963" font-family="DejaVu Sans, sans-serif" font-size="21">Understand class material, practice with purpose,</text>
+  <text x="90" y="480" fill="#455963" font-family="DejaVu Sans, sans-serif" font-size="21">and get unstuck with Jot.</text>
+
+  <g transform="translate(87 534)">
+    <rect width="356" height="48" rx="24" fill="#fffdf7"/>
+    <circle cx="25" cy="24" r="6" fill="#3f6577"/>
+    <text x="44" y="31" fill="#3f6577" font-family="DejaVu Sans, sans-serif" font-size="15" font-weight="700" letter-spacing="1.1">TUTOR  ·  STUDY  ·  PRACTICE</text>
+  </g>
+
+  <rect x="692" y="50" width="438" height="530" rx="52" fill="url(#panel)" filter="url(#shadow)"/>
+  <path d="M728 117c43-37 91-43 143-24" fill="none" stroke="#fffdf7" stroke-linecap="round" stroke-width="8" opacity=".75"/>
+  <circle cx="1080" cy="111" r="10" fill="#fffdf7" opacity=".85"/>
+  <g transform="rotate(-7 920 335)">
+    <path d="M812 187c24-24 56-31 91-24l112 23c48 10 74 43 79 91l13 111c7 61-30 102-91 109l-126 15c-57 7-97-24-108-80l-25-126c-10-53 8-95 55-119Z" fill="#3f6577"/>
+    <path d="M800 252c17-32 42-50 73-57 16-4 27 7 18 24-16 30-41 57-66 75-21 15-38-10-25-42Z" fill="#86c9e0"/>
+    <ellipse cx="856" cy="338" rx="15" ry="25" fill="#86c9e0"/>
+    <ellipse cx="1013" cy="326" rx="15" ry="25" fill="#86c9e0"/>
+    <path d="M903 392c13 18 31 26 52 24s39-13 48-32" fill="none" stroke="#86c9e0" stroke-linecap="round" stroke-width="19"/>
+  </g>
+  <g transform="translate(804 516) rotate(-4)">
+    <rect width="207" height="42" rx="21" fill="#fffdf7"/>
+    <text x="103.5" y="27" text-anchor="middle" fill="#3f6577" font-family="DejaVu Sans, sans-serif" font-size="15" font-weight="700">Think it through</text>
+  </g>
+</svg>

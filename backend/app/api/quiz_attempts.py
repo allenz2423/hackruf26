@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.api.dependencies import database, enforce_sqlite_api_policy
 from app.api.errors import ApiError
 from app.services.database import SQLiteConnection, SQLiteDatabase, json_value
+from app.services.class_access import material_access
 from app.services.quiz_reasoning import QuizReasoningService
 from app.services.study_prompts import (
     QUIZ_REASONING_EVALUATOR_VERSION,
@@ -77,15 +78,7 @@ async def _authorize(request: Request) -> tuple[UUID, SQLiteDatabase]:
 async def _owned_material(
     db: SQLiteDatabase, material_id: UUID, owner_id: UUID, *, require_ready: bool = True
 ) -> dict[str, Any]:
-    row = await db.fetchrow(
-        "SELECT m.id, m.kind, m.status, m.content, c.owner_id "
-        "FROM study_materials m JOIN course_classes c ON c.id = m.class_id "
-        "WHERE m.id = ?1 AND c.owner_id = ?2",
-        material_id,
-        owner_id,
-    )
-    if row is None:
-        raise ApiError(404, "not_found", "The requested resource was not found.")
+    row, _ = await material_access(db, material_id, owner_id)
     if row["kind"] not in {"quiz", "practice_exam"}:
         raise ApiError(
             409, "attempt_not_supported", "Only quizzes and practice tests can be started."
@@ -122,10 +115,9 @@ def _question(material: dict[str, Any], question_id: str) -> dict[str, Any]:
 async def _owned_run(
     db: SQLiteDatabase, material_id: UUID, run_id: UUID, owner_id: UUID
 ) -> dict[str, Any]:
+    await _owned_material(db, material_id, owner_id, require_ready=False)
     row = await db.fetchrow(
-        "SELECT r.* FROM quiz_runs r JOIN study_materials m ON m.id = r.material_id "
-        "JOIN course_classes c ON c.id = m.class_id "
-        "WHERE r.id = ?1 AND r.material_id = ?2 AND r.owner_id = ?3 AND c.owner_id = ?3",
+        "SELECT r.* FROM quiz_runs r WHERE r.id=?1 AND r.material_id=?2 AND r.owner_id=?3",
         run_id,
         material_id,
         owner_id,
@@ -363,12 +355,13 @@ async def _complete_run_if_ready(
         "WHERE run_id = ?1 AND final_answer IS NOT NULL",
         run_id,
     )
-    run = await conn.fetchrow("SELECT material_id FROM quiz_runs WHERE id = ?1", run_id)
+    run = await conn.fetchrow("SELECT material_id,owner_id FROM quiz_runs WHERE id = ?1", run_id)
     await conn.execute(
-        "INSERT OR IGNORE INTO study_material_attempts (id, material_id, answers, score_percent) "
-        "VALUES (?1, ?2, ?3, ?4)",
+        "INSERT OR IGNORE INTO study_material_attempts "
+        "(id,material_id,owner_id,answers,score_percent) VALUES (?1,?2,?3,?4,?5)",
         run_id,
         run["material_id"],
+        run["owner_id"],
         json.dumps({row["question_id"]: row["final_answer"] for row in answers}),
         score,
     )

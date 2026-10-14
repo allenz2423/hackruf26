@@ -93,6 +93,7 @@ class HttpTests(unittest.TestCase):
             sqlite_path=":memory:",
             storage_dir=self.storage.name,
             lean_tool_enabled=False,
+            allow_guest_access=True,
         )
         self.client = TestClient(create_app(settings_override=settings), headers={"origin": ORIGIN})
         self.client.__enter__()

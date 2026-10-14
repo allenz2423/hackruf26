@@ -32,7 +32,8 @@ The class library stores classes, uploaded course materials, extracted text, lec
 | `STUDY_TUTOR_RATE_LIMIT`, `STUDY_TUTOR_RATE_WINDOW_SECONDS` | No | In-page quiz review chat requests per account or guest IP, default 30 per 60 seconds |
 | `STUDY_PDF_EXECUTABLE`, `STUDY_PDF_TIMEOUT_SECONDS` | No | Tectonic executable (PATH or `backend/.local/bin/tectonic`) and bounded PDF compilation timeout, default 60 seconds |
 | `APP_ORIGINS` | Deployment-dependent | Allowed browser origins |
-| `DEMO_GATE_TOKEN` | Production | Optional private bearer token gate for session-ticket/tool endpoints; required in production |
+| `ALLOW_GUEST_ACCESS` | No | Enables unauthenticated quick tutoring, tools, and local study; defaults to `false` |
+| `SIGNUP_MODE` | No | `closed` (default), `open` for immediate registration, or `approval` for admin-reviewed requests |
 | `LIVE_SESSION_RATE_LIMIT`, `LIVE_SESSION_RATE_WINDOW_SECONDS` | No | Session-ticket issuance limits |
 | `LIVE_REVIEW_TIMEOUT_SECONDS` | No | Total automatic-review deadline, including tools; defaults to 60 seconds, valid range 1–180 |
 | `LOCAL_OWNER_ID` | No | Legacy owner UUID; only used to migrate pre-account data |
@@ -47,9 +48,9 @@ The class library stores classes, uploaded course materials, extracted text, lec
 
 ## Request Policy
 
-API and WebSocket requests are origin-checked. Class-library requests require a logged-in account. Production must configure a high-entropy `DEMO_GATE_TOKEN` for session-ticket and tool endpoints. The backend never accepts `owner_id` from the client.
+API and WebSocket requests are origin-checked. Class-library requests always require a logged-in account. Quick tutoring, calculator/Lean tools, and local study-tutor APIs also require an account unless `ALLOW_GUEST_ACCESS=true`. The backend never accepts `owner_id` from the client.
 
-Class-library routes always scope reads and writes to the configured owner UUID. This keeps the SQLite schema ready for future multi-owner deployments without depending on an external account service in the hackathon build.
+Class-library routes use `class_access.py` to resolve an active membership, capabilities, resource ownership, and effective publication state. Personal study materials remain owner-only. The original class owner retains full control and is the only identity allowed to delete the class.
 
 ## HTTP API
 
@@ -61,11 +62,16 @@ Class-library routes always scope reads and writes to the configured owner UUID.
 - `POST /api/tools/verify-lean`
 - `GET|POST /api/classes` (create takes `name` and optional `color`/`icon`)
 - `PATCH|DELETE /api/classes/{class_id}` (PATCH changes any of `name`, `color`, `icon`; omitted fields stay, `null` resets the look to the default)
+- `GET /api/classes/{class_id}/members`
+- `POST|GET /api/classes/{class_id}/invitations`, `DELETE /api/classes/{class_id}/invitations/{invitation_id}`
+- `POST /api/class-invitations/redeem`
+- `PATCH /api/classes/{class_id}/members/{member_id}/capabilities`, `DELETE /api/classes/{class_id}/members/{member_id}`, `POST /api/classes/{class_id}/leave`
 - `POST|GET /api/classes/{class_id}/uploads`
 - `GET|PATCH|DELETE /api/uploads/{upload_id}`
 - `POST /api/uploads/{upload_id}/retry`
 - `GET|PUT /api/classes/{class_id}/syllabus`
 - `POST|GET /api/classes/{class_id}/study-materials`
+- `GET /api/me/study-materials` (the caller's private study-material library)
 - `POST /api/classes/{class_id}/assessments`
 - `GET /api/classes/{class_id}/assessments`
 - `GET /api/assessments/{assessment_id}`
@@ -99,14 +105,14 @@ Local/sample reviews omit those IDs and send `question: {prompt, choices, submit
 ## Live Session Flow
 
 1. The student starts screen sharing explicitly in the browser.
-2. The frontend calls `POST /api/live-sessions`; the backend checks origin, access policy, rate limit, and optional class ownership, then issues a random in-memory ticket that expires after 45 seconds and can be consumed once.
+2. The frontend calls `POST /api/live-sessions`; the backend checks origin, access policy, rate limit, and optional class read membership, then issues a random in-memory ticket that expires after 45 seconds and can be consumed once.
 3. The browser opens same-origin `WS /api/live` and presents the ticket as a WebSocket subprotocol. The backend checks the origin and consumes the ticket before opening the session.
 4. The backend opens a Live API connection with its server-only key and fixed server-owned model, instructions, class context, modalities, and tool declarations.
 5. The browser sends typed questions, JPEG frames (at most one per second), and enabled 16 kHz PCM audio. The backend forwards them in memory and streams audio/transcript events back. No media or raw transcript is logged or persisted. Opted-in accounts may save a bounded session recap as described below.
 
 The SDK's `session.receive()` iterator ends after each completed model turn. The backend starts another receive iteration for the next turn, keeping the same Live connection open until the student ends it or a real disconnection occurs.
 
-If `class_id` is supplied, the backend checks ownership in SQLite and builds class context from ready uploads. The client cannot choose the provider, model, system instructions, modalities, or tool declarations. Tickets contain no provider credential and do not grant direct model access.
+If `class_id` is supplied, the backend checks current membership and filters ready class context by publication and answer-key release. Tickets are bound to the requesting user/class; removing the member revokes unused tickets and closes that member's active class sessions. The client cannot choose the provider, model, system instructions, modalities, or tool declarations. Tickets contain no provider credential and do not grant direct model access.
 
 ### Check my steps mode
 
@@ -132,7 +138,7 @@ The Live SDK uses `v1beta`. Its setup omits `proactivity`, `thinking_config`, an
 
 ### Class Tutor integration
 
-The class Tutor sends the backend class UUID from the persisted `backendId` mapping, resolved by `getBackendClassId(klass)`, to `POST /api/live-sessions`. Its browser route slug is not a backend ID. Before opening Live, `prepareTutorClass()` reconciles the class and actual source files through the existing class/upload APIs and waits for processing to finish. Empty classes are created without requiring an upload. Navigation or End cancels client preparation and prevents a late connection. Quick Tutor omits `class_id` and works without a class. Both paths send the selected predefined mode. The backend retains UUID validation and ownership checks.
+The class Tutor sends the backend class UUID from the persisted `backendId` mapping, resolved by `getBackendClassId(klass)`, to `POST /api/live-sessions`. Its browser route slug is not a backend ID. Before opening Live, `prepareTutorClass()` reconciles the class and actual source files through the existing class/upload APIs and waits for processing to finish. Empty classes are created without requiring an upload. Navigation or End cancels client preparation and prevents a late connection. Quick Tutor omits `class_id` and works without a class. Both paths send the selected predefined mode. The backend retains UUID validation and checks current class membership and release permissions.
 
 ### Changing screen content and corrections
 
@@ -231,6 +237,7 @@ The schema in `backend/app/services/sqlite_schema.sql` defines:
 - `course_classes` (includes the card look: `color` and `icon`, ids from the fixed `ClassColor`/`ClassIcon` lists in `schemas.py`, or NULL for the default)
 - `course_notes`
 - `study_materials`
+- private `study_materials.generation_instructions` for reproducible quiz/practice-exam generation; omitted from public material response models
 - `study_material_sources`
 - `study_material_attempts`
 - `quiz_runs` (the selected `standard` or `reasoning` mode is persisted per run)
@@ -239,7 +246,7 @@ The schema in `backend/app/services/sqlite_schema.sql` defines:
 - `uploaded_assessments`
 - `study_material_flags`
 
-Class deletion cascades through notes, generated materials, attempts, and related records. Original files are stored privately and served only through short-lived signed URLs after ownership validation.
+Class deletion remains owner-only and cascades through class-scoped notes, materials, and attempts. Personal study materials have no class foreign key, so their owner can continue accessing them after leaving or deletion of the source class. Original files are stored privately and signed downloads recheck current membership, resource release, and assessment-key visibility at fetch time. See [Shared classes design](shared-classes-design.md).
 
 ## Processing Jobs
 
@@ -253,7 +260,7 @@ Background jobs are in-process for the hackathon build. On startup, the single b
 
 ### Saved study-guide documents
 
-Every newly generated study guide saves structured JSON, a LaTeX `.tex` file, and a compiled PDF. SQLite's `study_material_files` table stores file bytes privately under the material ID. Content and files commit together before the guide becomes `ready`. PDFs include a title, reference ID, contents, numbered sections, key terms, and source references with page/slide/timestamp locators. Ready guide detail includes `download_urls.pdf` and `download_urls.latex`, pointing to `/api/study-materials/{id}/files/pdf` and `/files/latex`. Downloads check app policy, ownership, kind, and readiness, and return attachments with private/no-store headers. Existing guides export from stored content on first download without another Gemini request. Deletion cascades to files.
+Every newly generated study guide saves structured JSON, a LaTeX `.tex` file, and a compiled PDF. SQLite's `study_material_files` table stores file bytes privately under the material ID. Content and files commit together before the guide becomes `ready`. PDFs include a title, reference ID, contents, numbered sections, key terms, and source references with page/slide/timestamp locators. Ready guide detail includes `download_urls.pdf` and `download_urls.latex`, pointing to `/api/study-materials/{id}/files/pdf` and `/files/latex`. Downloads check app policy, current resource access, kind, and readiness, and return attachments with private/no-store headers. Existing guides export from stored content on first download without another Gemini request. Deletion cascades to files.
 
 Run `backend/.venv/bin/python backend/scripts/install-study-pdf.py` once. It installs pinned Tectonic under ignored `backend/.local/`, checks its release checksum, and warms packages/fonts with synthetic content. Compilation then uses cached resources offline, server-owned templates, escaped text, allow-listed math, `--untrusted`, a timeout, serialized compilation, and bounded output. Malformed equations fall back to literal notation without discarding valid guide content. Arbitrary model-generated TeX programs are never executed. Tectonic is an external runtime dependency, separate from Python requirements. See [Tectonic installation](https://tectonic-typesetting.github.io/en-US/install.html).
 
@@ -304,11 +311,12 @@ The Study tab now replaces the coarse scope dropdown with a checklist of actual 
     "count": 10,
     "difficulty": "mixed",
     "question_types": ["multiple_choice", "true_false", "short_answer"]
-  }
+  },
+  "additional_instructions": "Focus on chapters 3–5 and emphasize application questions."
 }
 ```
 
-Use actual UUID values in requests. Supported material kinds are `quiz`, `practice_exam`, `study_guide`, and `flashcards`. `count` must be 4–100; difficulty must be `mixed`, `easier`, or `harder`. `question_types` is optional and applies only to quizzes and practice exams; when omitted, all three question kinds are requested. `time_limit_minutes` is optional, must be 1–300, and applies only to `practice_exam`. Extra request fields are rejected.
+Use actual UUID values in requests. Supported material kinds are `quiz`, `practice_exam`, `study_guide`, and `flashcards`. `count` must be 4–100; difficulty must be `mixed`, `easier`, or `harder`. `question_types` is optional and applies only to quizzes and practice exams; when omitted, all three question kinds are requested. `time_limit_minutes` is optional, must be 1–300, and applies only to `practice_exam`. `additional_instructions` is optional, trimmed, and limited to 2,000 characters; a nonblank value is accepted only for quizzes and practice exams. Blank or omitted instructions preserve the pre-existing prompt and system instruction. When present, instructions are passed as separate untrusted, lower-priority user preferences; they cannot override source grounding, safety, or the response schema. Unsupported requested topics must not be invented and should be identified in quiz explanations or practice-exam instructions. The text is stored in a private database column for reproducibility and omitted from all material summaries and details. Extra request fields are rejected.
 
 The response is HTTP `202` with a material summary containing `id`, `class_id`, `kind`, `status`, `item_count`, `scope`, and `options`. It acknowledges a background job; it does not include completed questions. Poll `GET /api/study-materials/{id}` without a token prerequisite. Use sequential polling to avoid overlapping requests:
 
@@ -320,6 +328,10 @@ The response is HTTP `202` with a material summary containing `id`, `class_id`, 
 | Network error or client polling deadline | Retain the pending ID and offer another status check; a polling deadline does not mean the server job failed. |
 
 The backend's `_create_material_job()` calls `GeminiContentService.generate_material()` with the ready source text, server-owned system prompt, and a response schema for the requested format. It validates the exact item count, unique question IDs, requested question kinds, answer keys, and source citations before saving `ready`. Failure saves `failed` with `failure_code: "generation_failed"`; the backend never creates placeholder quizzes.
+
+### Shared classes and resource authorization
+
+`class_access.py` is the shared authorization layer for class membership, capabilities, publication state, and resource ownership. Existing owners are backfilled as owner/admin members and keep the owner-only class deletion path. Invitations store a digest, expire, and enforce a maximum successful-use count transactionally. Capabilities are independent; `edit` and `delete` are author-scoped, while `delete_others` allows a delegated moderator to delete another member's published contribution with known authorship. It does not grant editing or deletion of class-owned resources. Class reads, upload/file requests, study-material generation, quiz attempts, and live tutor retrieval recheck current membership. Personal study materials are owner-only and may be generated from readable class materials without shared `create`; shared contributions are drafts until explicitly released. Scheduled resources become visible at the release instant. Exam answer keys are separately gated, and assessment responses/legacy unattributed attempts remain private. `quiz_runs.owner_id` and reasoning attempts isolate progress by user. See [Shared classes design](shared-classes-design.md). Forking, leaderboards, and organization hierarchies are deferred.
 
 ### Quiz rendering and scoring
 
@@ -397,16 +409,22 @@ The student approved session memory on 2026-10-11. Memory is off by default and 
 
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /api/auth/signup` | Create an account (`username`, `password`, optional `email` and `display_name`) and log in. `409 username_taken` / `email_taken` if already used. |
+| `POST /api/auth/signup` | Depending on `SIGNUP_MODE`, return `403 signup_closed`, create a pending request (`202`, no session), or create and log in an account (`201`). |
 | `POST /api/auth/login` | Log in with `identifier` (username or email) and `password`. Always `401 invalid_credentials` with one generic message on failure. |
 | `POST /api/auth/logout` | End the session and clear the cookie. Safe when already logged out. |
-| `GET /api/auth/me` | `{"user": {...}}` for a logged-in account, `{"user": null}` for a guest. The user includes `is_demo`. |
+| `GET /api/auth/me` | `{"user": {...}}` for a logged-in account, `{"user": null}` for a guest, plus `guest_access_enabled` and `signup_mode`. Users include `is_demo` and `is_admin`. |
 | `PATCH /api/auth/me` | Change `username`, `email` (send `null` or `""` to remove it), and/or `avatar`. Only sent fields change. `409 username_taken` / `email_taken` if already used; a display name that was just the old username follows the new one. |
 | `POST /api/auth/password` | Body `current_password`, `new_password` (8 to 128 characters). `400 incorrect_password` if the current one is wrong, `400 password_unchanged` if the new one is the same. On success every other session of the account is ended and this one stays; responds `204`. Rate limited like login. |
 
 - Usernames are 3 to 32 characters (letters, numbers, `.`, `_`, `-`) and unique ignoring case. Passwords are 8 to 128 characters and stored only as salted scrypt hashes.
 - The session cookie is `jot_session` (HttpOnly, SameSite=Lax, `Secure` in production). The database stores only a SHA-256 hash of the token. Logout deletes the server-side session, so a copied cookie stops working.
-- **Guest boundary:** with no session, `POST /api/live-sessions` works only without `class_id`; with `class_id` it returns `401`. A `class_id` owned by another account returns `404`. All `/api/classes`, upload, study-material, and attempt endpoints return `401`.
+- **Guest boundary:** with no session, all app APIs except health and auth require an account unless `ALLOW_GUEST_ACCESS=true`. When enabled, quick tutoring/tools/local study are available, while class-library APIs still return `401`. A class ID owned by another account returns `404`.
+
+### Signup requests and administrator setup
+
+`SIGNUP_MODE=closed` (the default) rejects new account requests. `SIGNUP_MODE=approval` stores a pending signup request with a salted password hash; no session is issued. Administrators review only username, optional email/display name, and request time through `GET /api/admin/signup-requests`, then approve or reject with the matching `POST /api/admin/signup-requests/{id}/approve|reject` route. Password hashes are cleared when a request is resolved. Every route checks the session's `users.is_admin` flag; the browser cannot grant itself privileges.
+
+Create the first administrator from the backend directory with `python -m app.scripts.create_admin USERNAME`. The command prompts for and confirms a password, refuses to create a second administrator, and is the only administrator bootstrap path. Signup mode and guest access are independent: `SIGNUP_MODE=closed` (default) disables account requests, `SIGNUP_MODE=approval` lets visitors request admin review, `SIGNUP_MODE=open` enables immediate registration, and `ALLOW_GUEST_ACCESS=true` separately enables unauthenticated quick pages.
 
 ### Demo account
 

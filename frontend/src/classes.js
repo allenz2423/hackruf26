@@ -42,6 +42,8 @@ function normalizeClass(klass) {
     focus: "",
     updatedAt: new Date().toISOString(),
     ...klass,
+    isOwner: klass.isOwner ?? !klass.backendId,
+    capabilities: Array.isArray(klass.capabilities) ? klass.capabilities : (klass.backendId ? [] : ["read", "create", "edit", "delete", "invite", "manage_members", "manage_permissions"]),
     color: LEGACY_CLASS_COLORS[klass.color] || klass.color,
     focus: PLACEHOLDER_FOCUS.has(klass.focus) ? "" : klass.focus || "",
     uploads: Array.isArray(klass.uploads) ? klass.uploads : [],
@@ -170,6 +172,10 @@ export function getClassById(classId) {
   return readClasses().find((item) => item.id === classId) || null;
 }
 
+export function classHasCapability(klass, capability) {
+  return Boolean(klass?.isOwner || klass?.capabilities?.includes(capability));
+}
+
 /**
  * Synchronize classes from backend API while strictly preserving
  * all local classes and added materials so no user-created classes are lost.
@@ -216,14 +222,17 @@ export async function syncClassesFromApi() {
         materials: local.materials || [],
         uploadCount: rc.upload_count ?? (local.uploads?.length || 0),
         materialCount: rc.material_count ?? (local.materials?.length || 0),
+        isOwner: rc.is_owner === true,
+        capabilities: Array.isArray(rc.capabilities) ? rc.capabilities : (rc.is_owner ? ["read", "create", "edit", "delete", "invite", "manage_members", "manage_permissions"] : []),
         updatedAt: rc.updated_at || new Date().toISOString()
       };
     });
 
     const remoteIds = new Set(mergedRemote.map((rc) => rc.id));
 
-    // Keep all existing classes that aren't on remote so newly added classes always stay!
-    const preservedLocal = current.filter((c) => !remoteIds.has(c.id) && !matchedLocalIds.has(c.id));
+    // Preserve only browser-only classes. A backend-backed class missing from the
+    // authoritative membership list may have been removed or left and must disappear.
+    const preservedLocal = current.filter((c) => !getBackendClassId(c) && !remoteIds.has(c.id) && !matchedLocalIds.has(c.id));
 
     const combined = [...mergedRemote, ...preservedLocal];
     saveClasses(combined);
@@ -257,6 +266,8 @@ export async function createClass(name) {
       focus: "",
       uploads: [],
       materials: [],
+      isOwner: remote.is_owner !== false,
+      capabilities: remote.capabilities || ["read", "create", "edit", "delete", "invite", "manage_members", "manage_permissions"],
       updatedAt: remote.updated_at || new Date().toISOString()
     };
   } catch (e) {
@@ -274,6 +285,8 @@ export async function createClass(name) {
       focus: "",
       uploads: [],
       materials: [],
+      isOwner: true,
+      capabilities: ["read", "create", "edit", "delete", "invite", "manage_members", "manage_permissions"],
       updatedAt: new Date().toISOString()
     };
   }

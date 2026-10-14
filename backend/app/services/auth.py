@@ -20,7 +20,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from app.api.errors import ApiError
-from app.services.database import SQLiteDatabase
+from app.services.database import SQLiteConnection, SQLiteDatabase
 
 SESSION_COOKIE = "jot_session"
 
@@ -105,6 +105,7 @@ def public_user(row: dict[str, Any]) -> dict[str, Any]:
         "display_name": row["display_name"],
         "email": row.get("email"),
         "is_demo": bool(row.get("is_demo")),
+        "is_admin": bool(row.get("is_admin")),
         "avatar": _stored_avatar(row.get("avatar")),
     }
 
@@ -118,30 +119,185 @@ async def create_user(
     display_name: str | None = None,
     user_id: UUID | None = None,
     is_demo: bool = False,
+    is_admin: bool = False,
 ) -> dict[str, Any]:
     """Create an account or raise a 409 naming the field that is already taken."""
+    return await create_user_with_hash(
+        database,
+        username=username,
+        password_hash=await hash_password(password),
+        email=email,
+        display_name=display_name,
+        user_id=user_id,
+        is_demo=is_demo,
+        is_admin=is_admin,
+    )
+
+
+async def create_user_with_hash(
+    database: SQLiteDatabase | SQLiteConnection,
+    *,
+    username: str,
+    password_hash: str,
+    email: str | None = None,
+    display_name: str | None = None,
+    user_id: UUID | None = None,
+    is_demo: bool = False,
+    is_admin: bool = False,
+) -> dict[str, Any]:
+    """Insert an account atomically, reusing an outer transaction when provided."""
+    if isinstance(database, SQLiteDatabase):
+        async with database.acquire() as connection:
+            async with connection.transaction():
+                return await _insert_user_with_hash(
+                    connection,
+                    username=username,
+                    password_hash=password_hash,
+                    email=email,
+                    display_name=display_name,
+                    user_id=user_id,
+                    is_demo=is_demo,
+                    is_admin=is_admin,
+                )
+    return await _insert_user_with_hash(
+        database,
+        username=username,
+        password_hash=password_hash,
+        email=email,
+        display_name=display_name,
+        user_id=user_id,
+        is_demo=is_demo,
+        is_admin=is_admin,
+    )
+
+
+async def _insert_user_with_hash(
+    database: SQLiteConnection,
+    *,
+    username: str,
+    password_hash: str,
+    email: str | None,
+    display_name: str | None,
+    user_id: UUID | None,
+    is_demo: bool,
+    is_admin: bool,
+) -> dict[str, Any]:
     if await database.fetchrow("SELECT 1 FROM users WHERE username = ?1", username):
         raise ApiError(409, "username_taken", "That username is already taken.")
     if email and await database.fetchrow("SELECT 1 FROM users WHERE email = ?1", email):
         raise ApiError(409, "email_taken", "An account with that email already exists.")
 
     new_id = user_id or uuid4()
-    password_hash = await hash_password(password)
     await database.execute(
-        "INSERT INTO users (id, username, email, display_name, password_hash, is_demo) "
-        "VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO users (id, username, email, display_name, password_hash, is_demo, is_admin) "
+        "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         new_id,
         username,
         email or None,
         (display_name or username).strip() or username,
         password_hash,
         1 if is_demo else 0,
+        1 if is_admin else 0,
     )
     row = await database.fetchrow(
-        "SELECT id, username, email, display_name, is_demo, avatar FROM users WHERE id = ?1", new_id
+        "SELECT id, username, email, display_name, is_demo, is_admin, avatar "
+        "FROM users WHERE id = ?1",
+        new_id,
     )
     assert row is not None
     return row
+
+
+async def create_signup_request(
+    database: SQLiteDatabase,
+    *,
+    username: str,
+    password: str,
+    email: str | None = None,
+    display_name: str | None = None,
+) -> dict[str, Any]:
+    """Store a pending request with a password hash, never the submitted password."""
+    request_id = uuid4()
+    password_hash = await hash_password(password)
+    try:
+        async with database.acquire() as connection:
+            async with connection.transaction():
+                if await connection.fetchrow("SELECT 1 FROM users WHERE username = ?1", username):
+                    raise ApiError(409, "username_taken", "That username is already taken.")
+                if email and await connection.fetchrow(
+                    "SELECT 1 FROM users WHERE email = ?1", email
+                ):
+                    raise ApiError(409, "email_taken", "An account with that email already exists.")
+                await connection.execute(
+                    "INSERT INTO signup_requests "
+                    "(id, username, email, display_name, password_hash) "
+                    "VALUES (?1, ?2, ?3, ?4, ?5)",
+                    request_id,
+                    username,
+                    email or None,
+                    display_name,
+                    password_hash,
+                )
+    except sqlite3.IntegrityError:
+        raise ApiError(
+            409, "signup_details_unavailable", "Those signup details are already in use."
+        ) from None
+    return {"id": request_id, "status": "pending"}
+
+
+async def pending_signup_requests(database: SQLiteDatabase) -> list[dict[str, Any]]:
+    """Return only fields an administrator needs to review pending requests."""
+    return await database.fetch(
+        "SELECT id, username, email, display_name, created_at FROM signup_requests "
+        "WHERE status = 'pending' ORDER BY created_at, id"
+    )
+
+
+async def decide_signup_request(
+    database: SQLiteDatabase,
+    request_id: UUID,
+    reviewer_id: UUID | str,
+    *,
+    approve: bool,
+) -> dict[str, Any]:
+    """Atomically approve or reject a request, clearing its pending password hash."""
+    status = "approved" if approve else "rejected"
+    async with database.acquire() as connection:
+        async with connection.transaction():
+            row = await connection.fetchrow(
+                "SELECT id, username, email, display_name, password_hash, status "
+                "FROM signup_requests WHERE id = ?1",
+                request_id,
+            )
+            if row is None:
+                raise ApiError(
+                    404, "signup_request_not_found", "That signup request was not found."
+                )
+            if row["status"] == status:
+                return {"id": request_id, "status": status, "username": row["username"]}
+            if row["status"] != "pending" or not row["password_hash"]:
+                raise ApiError(
+                    409, "signup_request_resolved", "That signup request has already been reviewed."
+                )
+
+            if approve:
+                await create_user_with_hash(
+                    connection,
+                    username=row["username"],
+                    password_hash=row["password_hash"],
+                    email=row["email"],
+                    display_name=row["display_name"],
+                )
+
+            await connection.execute(
+                "UPDATE signup_requests SET status = ?1, password_hash = NULL, "
+                "reviewed_by = ?2, reviewed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE id = ?3 AND status = 'pending'",
+                status,
+                str(reviewer_id),
+                request_id,
+            )
+    return {"id": request_id, "status": status, "username": row["username"]}
 
 
 async def authenticate(
@@ -150,7 +306,8 @@ async def authenticate(
     """Return the matching account for a username-or-email login, else None."""
     column = "email" if "@" in identifier else "username"
     row = await database.fetchrow(
-        f"SELECT id, username, email, display_name, is_demo, avatar, password_hash FROM users WHERE {column} = ?1",
+        f"SELECT id, username, email, display_name, is_demo, is_admin, avatar, password_hash "
+        f"FROM users WHERE {column} = ?1",
         identifier,
     )
     if row is None:
@@ -158,7 +315,12 @@ async def authenticate(
         return None
     if not await verify_password(password, row["password_hash"]):
         return None
-    return {key: row[key] for key in ("id", "username", "email", "display_name", "is_demo", "avatar")}
+    return {
+        key: row[key]
+        for key in (
+            "id", "username", "email", "display_name", "is_demo", "is_admin", "avatar"
+        )
+    }
 
 
 async def create_session(
@@ -183,7 +345,7 @@ async def user_for_token(database: SQLiteDatabase, token: str) -> dict[str, Any]
     if not token or len(token) > 128:
         return None
     return await database.fetchrow(
-        "SELECT u.id, u.username, u.email, u.display_name, u.is_demo, u.avatar "
+        "SELECT u.id, u.username, u.email, u.display_name, u.is_demo, u.is_admin, u.avatar "
         "FROM user_sessions s JOIN users u ON u.id = s.user_id "
         "WHERE s.token_hash = ?1 AND s.expires_at > ?2",
         token_hash(token),
@@ -200,7 +362,9 @@ async def update_profile(
 ) -> dict[str, Any]:
     """Change username, email, and/or avatar; `None` removes an email or avatar. 409 if taken."""
     current = await database.fetchrow(
-        "SELECT id, username, email, display_name, is_demo, avatar FROM users WHERE id = ?1", str(user_id)
+        "SELECT id, username, email, display_name, is_demo, is_admin, avatar "
+        "FROM users WHERE id = ?1",
+        str(user_id),
     )
     if current is None:
         raise ApiError(401, "authentication_required", "Please log in again.")
@@ -236,7 +400,9 @@ async def update_profile(
         raise ApiError(409, "username_taken", "That username or email is already in use.") from None
 
     row = await database.fetchrow(
-        "SELECT id, username, email, display_name, is_demo, avatar FROM users WHERE id = ?1", str(user_id)
+        "SELECT id, username, email, display_name, is_demo, is_admin, avatar "
+        "FROM users WHERE id = ?1",
+        str(user_id),
     )
     assert row is not None
     return row

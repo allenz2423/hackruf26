@@ -1,6 +1,11 @@
 -- SQLite schema for backend-owned class library data.
 -- Owner IDs are stored as TEXT so local/demo deployments can use a stable UUID.
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version     INTEGER PRIMARY KEY,
+    applied_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 CREATE TABLE IF NOT EXISTS course_classes (
     id          TEXT PRIMARY KEY,
     owner_id    TEXT NOT NULL,
@@ -12,9 +17,67 @@ CREATE TABLE IF NOT EXISTS course_classes (
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+CREATE TABLE IF NOT EXISTS class_memberships (
+    class_id    TEXT NOT NULL REFERENCES course_classes(id) ON DELETE CASCADE,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'left', 'removed')),
+    joined_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    added_by    TEXT REFERENCES users(id) ON DELETE SET NULL,
+    ended_at    TEXT,
+    PRIMARY KEY (class_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS class_membership_capabilities (
+    class_id    TEXT NOT NULL,
+    user_id     TEXT NOT NULL,
+    capability  TEXT NOT NULL CHECK (capability IN (
+        'read', 'create', 'edit', 'delete', 'delete_others', 'invite', 'manage_members',
+        'manage_permissions'
+    )),
+    granted_by  TEXT REFERENCES users(id) ON DELETE SET NULL,
+    granted_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (class_id, user_id, capability),
+    FOREIGN KEY (class_id, user_id)
+        REFERENCES class_memberships(class_id, user_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS class_invitations (
+    id               TEXT PRIMARY KEY,
+    class_id         TEXT NOT NULL REFERENCES course_classes(id) ON DELETE CASCADE,
+    code_digest      TEXT NOT NULL UNIQUE,
+    created_by       TEXT NOT NULL REFERENCES users(id),
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    expires_at       TEXT NOT NULL,
+    max_uses         INTEGER NOT NULL CHECK (max_uses BETWEEN 1 AND 100),
+    successful_uses  INTEGER NOT NULL DEFAULT 0 CHECK (successful_uses >= 0),
+    revoked_at       TEXT,
+    CHECK (successful_uses <= max_uses)
+);
+
+CREATE TABLE IF NOT EXISTS class_invitation_capabilities (
+    invitation_id TEXT NOT NULL REFERENCES class_invitations(id) ON DELETE CASCADE,
+    capability    TEXT NOT NULL CHECK (capability IN (
+        'read', 'create', 'edit', 'delete', 'delete_others', 'invite', 'manage_members',
+        'manage_permissions'
+    )),
+    PRIMARY KEY (invitation_id, capability)
+);
+
+CREATE INDEX IF NOT EXISTS class_memberships_user_status_idx
+    ON class_memberships (user_id, status, joined_at DESC);
+CREATE INDEX IF NOT EXISTS class_invitations_class_created_idx
+    ON class_invitations (class_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS course_notes (
     id                      TEXT PRIMARY KEY,
     class_id                TEXT NOT NULL REFERENCES course_classes(id) ON DELETE CASCADE,
+    resource_scope          TEXT NOT NULL DEFAULT 'class_owned'
+        CHECK (resource_scope IN ('class_owned', 'student_contribution')),
+    created_by              TEXT REFERENCES users(id) ON DELETE SET NULL,
+    publication_state       TEXT NOT NULL DEFAULT 'published'
+        CHECK (publication_state IN ('draft', 'scheduled', 'published')),
+    release_at              TEXT,
+    published_at            TEXT,
     title                   TEXT NOT NULL CHECK (trim(title) <> ''),
     kind                    TEXT NOT NULL DEFAULT 'notes'
         CHECK (kind IN ('notes', 'document', 'syllabus', 'slides', 'lecture_video', 'lecture_audio')),
@@ -51,12 +114,22 @@ CREATE TABLE IF NOT EXISTS course_notes (
         (source_type = 'pasted_text' AND storage_key IS NULL AND original_filename IS NULL
             AND mime_type IS NULL AND file_size_bytes IS NULL)
     ),
-    CHECK (source_type <> 'pasted_text' OR (extracted_text IS NOT NULL AND trim(extracted_text) <> ''))
+    CHECK (source_type <> 'pasted_text' OR (extracted_text IS NOT NULL AND trim(extracted_text) <> '')),
+    CHECK ((publication_state = 'scheduled' AND release_at IS NOT NULL) OR
+        (publication_state <> 'scheduled' AND release_at IS NULL))
 );
 
 CREATE TABLE IF NOT EXISTS study_materials (
     id              TEXT PRIMARY KEY,
-    class_id        TEXT NOT NULL REFERENCES course_classes(id) ON DELETE CASCADE,
+    class_id        TEXT REFERENCES course_classes(id) ON DELETE CASCADE,
+    origin_class_id TEXT,
+    resource_scope  TEXT NOT NULL DEFAULT 'class_owned'
+        CHECK (resource_scope IN ('class_owned', 'personal', 'student_contribution')),
+    owner_id        TEXT REFERENCES users(id) ON DELETE CASCADE,
+    created_by      TEXT REFERENCES users(id) ON DELETE SET NULL,
+    publication_state TEXT,
+    release_at      TEXT,
+    published_at    TEXT,
     kind            TEXT NOT NULL CHECK (kind IN ('quiz', 'practice_exam', 'study_guide', 'flashcards')),
     title           TEXT NOT NULL CHECK (trim(title) <> ''),
     status          TEXT NOT NULL DEFAULT 'generating'
@@ -65,6 +138,8 @@ CREATE TABLE IF NOT EXISTS study_materials (
         CHECK (json_valid(scope) AND json_type(scope) = 'object'),
     options         TEXT NOT NULL DEFAULT '{}'
         CHECK (json_valid(options) AND json_type(options) = 'object'),
+    generation_instructions TEXT
+        CHECK (generation_instructions IS NULL OR length(generation_instructions) <= 2000),
     content         TEXT
         CHECK (content IS NULL OR (json_valid(content) AND json_type(content) = 'object')),
     failure_code    TEXT,
@@ -75,6 +150,12 @@ CREATE TABLE IF NOT EXISTS study_materials (
     sources_missing INTEGER NOT NULL DEFAULT 0 CHECK (sources_missing IN (0, 1)),
     context_truncated INTEGER NOT NULL DEFAULT 0 CHECK (context_truncated IN (0, 1)),
     UNIQUE (id, class_id),
+    CHECK ((resource_scope = 'personal' AND class_id IS NULL AND owner_id IS NOT NULL
+            AND publication_state IS NULL AND release_at IS NULL)
+        OR (resource_scope IN ('class_owned', 'student_contribution') AND class_id IS NOT NULL
+            AND owner_id IS NULL AND publication_state IN ('draft', 'scheduled', 'published'))),
+    CHECK ((publication_state = 'scheduled' AND release_at IS NOT NULL) OR
+        (publication_state <> 'scheduled' AND release_at IS NULL)),
     CHECK (status <> 'ready' OR content IS NOT NULL),
     CHECK (status = 'failed' OR failure_code IS NULL)
 );
@@ -113,20 +194,22 @@ CREATE TABLE IF NOT EXISTS study_material_files (
 
 CREATE TABLE IF NOT EXISTS study_material_sources (
     material_id TEXT NOT NULL,
-    class_id    TEXT NOT NULL,
-    note_id     TEXT NOT NULL,
+    source_class_id TEXT,
+    source_note_id  TEXT REFERENCES course_notes(id) ON DELETE SET NULL,
+    source_title    TEXT NOT NULL DEFAULT '',
+    source_kind     TEXT NOT NULL DEFAULT 'notes',
     position    INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
-    PRIMARY KEY (material_id, note_id),
-    UNIQUE (material_id, position),
-    FOREIGN KEY (material_id, class_id)
-        REFERENCES study_materials(id, class_id) ON DELETE CASCADE,
-    FOREIGN KEY (note_id, class_id)
-        REFERENCES course_notes(id, class_id) ON DELETE CASCADE
+    -- Compatibility aliases for older integrations and stored-source triggers.
+    class_id    TEXT,
+    note_id     TEXT,
+    PRIMARY KEY (material_id, position),
+    FOREIGN KEY (material_id) REFERENCES study_materials(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS study_material_attempts (
     id              TEXT PRIMARY KEY,
     material_id     TEXT NOT NULL REFERENCES study_materials(id) ON DELETE CASCADE,
+    owner_id        TEXT REFERENCES users(id) ON DELETE CASCADE,
     answers         TEXT NOT NULL CHECK (json_valid(answers) AND json_type(answers) = 'object'),
     score_percent   REAL NOT NULL CHECK (score_percent BETWEEN 0 AND 100),
     completed_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
@@ -272,6 +355,10 @@ CREATE TABLE IF NOT EXISTS uploaded_assessments (
     id                      TEXT PRIMARY KEY,
     class_id                TEXT NOT NULL,
     note_id                 TEXT NOT NULL UNIQUE,
+    owner_id                TEXT REFERENCES users(id) ON DELETE CASCADE,
+    answer_key_release_state TEXT NOT NULL DEFAULT 'draft'
+        CHECK (answer_key_release_state IN ('draft', 'scheduled', 'published')),
+    answer_key_release_at   TEXT,
     processing_status       TEXT NOT NULL DEFAULT 'processing'
         CHECK (processing_status IN ('processing', 'ready', 'needs_review', 'failed')),
     has_student_responses   INTEGER NOT NULL DEFAULT 0 CHECK (has_student_responses IN (0, 1)),
@@ -311,7 +398,9 @@ CREATE TABLE IF NOT EXISTS uploaded_assessments (
         OR
         (processing_status = 'needs_review' AND grading_mode = 'needs_review'
             AND score_percent IS NULL AND graded_at IS NULL)
-    )
+    ),
+    CHECK ((answer_key_release_state = 'scheduled' AND answer_key_release_at IS NOT NULL) OR
+        (answer_key_release_state <> 'scheduled' AND answer_key_release_at IS NULL))
 );
 
 CREATE TABLE IF NOT EXISTS study_material_flags (
@@ -355,9 +444,35 @@ CREATE TABLE IF NOT EXISTS users (
     display_name  TEXT NOT NULL,
     password_hash TEXT NOT NULL,
     is_demo       INTEGER NOT NULL DEFAULT 0,
+    is_admin      INTEGER NOT NULL DEFAULT 0 CHECK (is_admin IN (0, 1)),
     avatar        TEXT,
     created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
+
+CREATE TABLE IF NOT EXISTS signup_requests (
+    id            TEXT PRIMARY KEY,
+    username      TEXT NOT NULL COLLATE NOCASE,
+    email         TEXT COLLATE NOCASE,
+    display_name  TEXT,
+    password_hash TEXT,
+    status        TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'rejected')),
+    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    reviewed_by   TEXT REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_at   TEXT,
+    CHECK (
+        (status = 'pending' AND password_hash IS NOT NULL) OR
+        (status <> 'pending' AND password_hash IS NULL)
+    )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS signup_requests_pending_username_idx
+    ON signup_requests (username COLLATE NOCASE) WHERE status = 'pending';
+CREATE UNIQUE INDEX IF NOT EXISTS signup_requests_pending_email_idx
+    ON signup_requests (email COLLATE NOCASE)
+    WHERE status = 'pending' AND email IS NOT NULL;
+CREATE INDEX IF NOT EXISTS signup_requests_pending_created_idx
+    ON signup_requests (status, created_at);
 
 CREATE TABLE IF NOT EXISTS user_sessions (
     token_hash TEXT PRIMARY KEY,

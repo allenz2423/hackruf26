@@ -14,9 +14,9 @@ Read the repository [AGENTS.md](../AGENTS.md) and [backend design](../docs/backe
 - The backend owns provider SDK usage, model selection, instructions, session configuration, and tools. The browser receives only a short-lived, one-use WebSocket ticket from `POST /api/live-sessions`, then connects to `WS /api/live`.
 - The approved Live tools are `google_search`, `calculate_expression`, `verify_lean_proof`, and `add_annotations`. Execute calculations and proof checks on the backend. Send annotation requests to the browser for local frame/geometry validation and rendering.
 - Relay screen frames and enabled microphone audio only while the session is active. Apply strict message size and frame-rate limits. Never log, record, or persist live media, transcripts, or conversations.
-- Add origin checks, rate limits, request-size limits, one-use ticket validation, and sanitized error responses. Public deployments require an authenticated app session or an explicit demo gate.
+- Add origin checks, rate limits, request-size limits, one-use ticket validation, and sanitized error responses. Quick app APIs require an authenticated session unless the operator explicitly enables `ALLOW_GUEST_ACCESS`; account-owned APIs always require a session.
 - The calculator accepts only bounded numeric or symbolic expressions through its allow-listed parser. Never use SymPy's string parser on user input; never log or persist calculator expressions or results.
-- Lean proof checking accepts only a bounded formal proposition and tactic proof, rejects metaprogramming and admission syntax, runs with a timeout and OS resource limits, and never logs or stores submitted proofs. Keep the local runner behind authenticated access; isolate it before public multi-tenant deployment.
+- Lean proof checking accepts only a bounded formal proposition and tactic proof, rejects metaprogramming and admission syntax, runs with a timeout and OS resource limits, and never logs or stores submitted proofs. Keep it behind the configured app access policy; isolate it before public multi-tenant deployment.
 - Keep backend-specific settings and Python dependencies under backend ownership. `.env` is local and ignored; `.env.example` contains names and safe defaults only.
 
 ## Shared API contract

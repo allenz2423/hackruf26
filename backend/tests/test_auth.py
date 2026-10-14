@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import re
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+from app.scripts import create_admin
 from app.services import auth as accounts
 from app.services.auth import hash_password, verify_password
 from app.services.database import create_database
@@ -20,6 +21,9 @@ ORIGIN = "http://localhost:5173"
 
 
 def make_client(storage_dir: str, **overrides: object) -> TestClient:
+    # Preserve the pre-policy fixtures unless a test opts into the secure defaults.
+    options: dict[str, object] = {"allow_guest_access": True, "signup_mode": "open"}
+    options.update(overrides)
     settings = Settings(
         _env_file=None,
         gemini_api_key="test-key-not-used",
@@ -27,7 +31,7 @@ def make_client(storage_dir: str, **overrides: object) -> TestClient:
         sqlite_path=":memory:",
         storage_dir=storage_dir,
         lean_tool_enabled=False,
-        **overrides,
+        **options,
     )
     return TestClient(create_app(settings_override=settings), headers={"origin": ORIGIN})
 
@@ -87,6 +91,7 @@ class AccountBoundaryTests(unittest.TestCase):
             {"username": "Valid_Name", "password": "short"},
             {"username": "Valid_Name", "password": "tutor-pass-1", "email": "nope"},
             {"username": "Valid_Name", "password": "tutor-pass-1", "role": "admin"},
+            {"username": "Valid_Name", "password": "tutor-pass-1", "is_admin": True},
         ):
             with self.subTest(body=body):
                 self.assertEqual(self.client.post("/api/auth/signup", json=body).status_code, 400)
@@ -511,6 +516,202 @@ class ProfileAndPasswordTests(unittest.TestCase):
         self.assertEqual(codes, [400, 400, 400, 429])
 
 
+class SignupApprovalTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.storage = tempfile.TemporaryDirectory()
+        self.addCleanup(self.storage.cleanup)
+        self.client = make_client(
+            self.storage.name,
+            allow_guest_access=False,
+            signup_mode="approval",
+        )
+        self.client.__enter__()
+        self.addCleanup(self.client.__exit__, None, None, None)
+
+    def _create_account(self, username: str, *, is_admin: bool = False) -> dict:
+        async def create_account() -> dict:
+            return await accounts.create_user(
+                self.client.app.state.database,
+                username=username,
+                password="tutor-pass-1",
+                is_admin=is_admin,
+            )
+
+        return self.client.portal.call(create_account)
+
+    def _login_admin(self) -> None:
+        response = self.client.post(
+            "/api/auth/login",
+            json={"identifier": "Site_Admin", "password": "tutor-pass-1"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_access_defaults_are_closed_and_guest_tools_require_opt_in(self) -> None:
+        default_settings = Settings(
+            _env_file=None,
+            file_url_signing_secret="test-signing-secret-with-at-least-32-characters",
+        )
+        self.assertFalse(default_settings.allow_guest_access)
+        self.assertEqual(default_settings.signup_mode, "closed")
+
+        me = self.client.get("/api/auth/me").json()
+        self.assertIsNone(me["user"])
+        self.assertFalse(me["guest_access_enabled"])
+        self.assertEqual(me["signup_mode"], "approval")
+        for response in (
+            self.client.post("/api/live-sessions", json={}),
+            self.client.post("/api/tools/calculate", json={"expression": "1 + 1"}),
+            self.client.post(
+                "/api/tools/verify-lean",
+                json={"proposition": "True", "proof": "by trivial"},
+            ),
+            self.client.post(
+                "/api/study-tutor",
+                json={
+                    "question": {"prompt": "Question", "choices": []},
+                    "messages": [{"role": "user", "text": "Help me understand"}],
+                },
+            ),
+        ):
+            self.assertEqual(response.status_code, 401, response.text)
+            self.assertEqual(response.json()["code"], "authentication_required")
+
+        default_client = make_client(
+            self.storage.name,
+            allow_guest_access=default_settings.allow_guest_access,
+            signup_mode=default_settings.signup_mode,
+        )
+        with default_client:
+            default_me = default_client.get("/api/auth/me").json()
+            self.assertFalse(default_me["guest_access_enabled"])
+            self.assertEqual(default_me["signup_mode"], "closed")
+            closed_signup = default_client.post(
+                "/api/auth/signup",
+                json={"username": "Default_Closed", "password": "tutor-pass-1"},
+            )
+            self.assertEqual(closed_signup.status_code, 403)
+            self.assertEqual(closed_signup.json()["code"], "signup_closed")
+
+    def test_signup_waits_for_admin_and_approved_user_can_log_in(self) -> None:
+        pending = self.client.post(
+            "/api/auth/signup",
+            json={
+                "username": "New_Student",
+                "password": "tutor-pass-1",
+                "email": "student@example.com",
+            },
+        )
+        self.assertEqual(pending.status_code, 202, pending.text)
+        self.assertEqual(pending.json()["status"], "pending")
+        self.assertNotIn("set-cookie", pending.headers)
+        self.assertNotIn("password", str(pending.json()).lower())
+        self.assertEqual(
+            self.client.post(
+                "/api/auth/login",
+                json={"identifier": "New_Student", "password": "tutor-pass-1"},
+            ).status_code,
+            401,
+        )
+
+        self._create_account("Site_Admin", is_admin=True)
+        self._login_admin()
+        listed = self.client.get("/api/admin/signup-requests")
+        self.assertEqual(listed.status_code, 200, listed.text)
+        [request] = listed.json()["requests"]
+        self.assertEqual(request["username"], "New_Student")
+        self.assertNotIn("password_hash", request)
+        decision = self.client.post(f"/api/admin/signup-requests/{request['id']}/approve", json={})
+        self.assertEqual(decision.status_code, 200, decision.text)
+        self.assertEqual(decision.json()["status"], "approved")
+
+        browser = TestClient(self.client.app, headers={"origin": ORIGIN})
+        login = browser.post(
+            "/api/auth/login",
+            json={"identifier": "New_Student", "password": "tutor-pass-1"},
+        )
+        self.assertEqual(login.status_code, 200, login.text)
+        self.assertEqual(login.json()["user"]["username"], "New_Student")
+        row = self.client.portal.call(
+            self.client.app.state.database.fetchrow,
+            "SELECT status, password_hash FROM signup_requests WHERE id = ?1",
+            request["id"],
+        )
+        self.assertEqual((row["status"], row["password_hash"]), ("approved", None))
+
+    def test_rejection_clears_password_hash_and_non_admin_cannot_review(self) -> None:
+        response = self.client.post(
+            "/api/auth/signup",
+            json={"username": "Rejected_User", "password": "tutor-pass-1"},
+        )
+        request_id = self.client.portal.call(
+            self.client.app.state.database.fetchval,
+            "SELECT id FROM signup_requests WHERE username = ?1",
+            "Rejected_User",
+        )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(self.client.get("/api/admin/signup-requests").status_code, 401)
+
+        self._create_account("Ordinary_User")
+        self.client.post(
+            "/api/auth/login",
+            json={"identifier": "Ordinary_User", "password": "tutor-pass-1"},
+        )
+        self.assertEqual(self.client.get("/api/admin/signup-requests").status_code, 403)
+        self.assertEqual(
+            self.client.post(
+                f"/api/admin/signup-requests/{request_id}/reject", json={}
+            ).status_code,
+            403,
+        )
+
+        self.client.post("/api/auth/logout")
+        self._create_account("Site_Admin", is_admin=True)
+        self._login_admin()
+        rejected = self.client.post(f"/api/admin/signup-requests/{request_id}/reject", json={})
+        self.assertEqual(rejected.status_code, 200, rejected.text)
+        self.assertEqual(rejected.json()["status"], "rejected")
+        row = self.client.portal.call(
+            self.client.app.state.database.fetchrow,
+            "SELECT status, password_hash FROM signup_requests WHERE id = ?1",
+            request_id,
+        )
+        self.assertEqual((row["status"], row["password_hash"]), ("rejected", None))
+        repeated = self.client.post(
+            f"/api/admin/signup-requests/{request_id}/reject", json={}
+        )
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(repeated.json()["status"], "rejected")
+        opposite = self.client.post(
+            f"/api/admin/signup-requests/{request_id}/approve", json={}
+        )
+        self.assertEqual(opposite.status_code, 409)
+
+    def test_closed_signup_and_explicit_open_signup(self) -> None:
+        closed = make_client(self.storage.name, allow_guest_access=False, signup_mode="closed")
+        with closed:
+            response = closed.post(
+                "/api/auth/signup",
+                json={"username": "Closed_User", "password": "tutor-pass-1"},
+            )
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.json()["code"], "signup_closed")
+
+        open_mode = make_client(
+            self.storage.name,
+            allow_guest_access=False,
+            signup_mode="open",
+        )
+        with open_mode:
+            response = open_mode.post(
+                "/api/auth/signup",
+                json={"username": "Open_User", "password": "tutor-pass-1"},
+            )
+            self.assertEqual(response.status_code, 201, response.text)
+            self.assertEqual(response.json()["status"], "active")
+            self.assertTrue(response.headers.get("set-cookie"))
+            self.assertFalse(open_mode.get("/api/auth/me").json()["guest_access_enabled"])
+
+
 class DemoAccountTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.storage = tempfile.TemporaryDirectory()
@@ -543,6 +744,53 @@ class DemoAccountTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(accounts.public_user(logged_in)["is_demo"])
 
 
+class AdminBootstrapTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cli_creates_only_the_first_admin_from_confirmed_hidden_password(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            settings = Settings(
+                _env_file=None,
+                file_url_signing_secret="test-signing-secret-with-at-least-32-characters",
+                sqlite_path=f"{folder}/accounts.sqlite3",
+            )
+            with (
+                patch("app.scripts.create_admin.get_settings", return_value=settings),
+                patch(
+                    "app.scripts.create_admin.getpass.getpass",
+                    side_effect=["tutor-pass-1", "tutor-pass-1"],
+                ),
+            ):
+                self.assertEqual(await create_admin.run(["First_Admin"]), 0)
+
+            database = await create_database(settings)
+            try:
+                admin = await accounts.authenticate(database, "First_Admin", "tutor-pass-1")
+                self.assertTrue(admin["is_admin"])
+                self.assertEqual(
+                    await database.fetchval("SELECT COUNT(*) FROM users WHERE is_admin = 1"),
+                    1,
+                )
+            finally:
+                await database.close()
+
+            with (
+                patch("app.scripts.create_admin.get_settings", return_value=settings),
+                patch(
+                    "app.scripts.create_admin.getpass.getpass",
+                    side_effect=["another-pass", "another-pass"],
+                ),
+            ):
+                self.assertEqual(await create_admin.run(["Second_Admin"]), 2)
+
+            database = await create_database(settings)
+            try:
+                self.assertEqual(
+                    await database.fetchval("SELECT COUNT(*) FROM users WHERE is_admin = 1"),
+                    1,
+                )
+            finally:
+                await database.close()
+
+
 class DemoColumnMigrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_database_from_before_the_demo_flag_is_upgraded_in_place(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -569,8 +817,13 @@ class DemoColumnMigrationTests(unittest.IsolatedAsyncioTestCase):
             )
             database = await create_database(settings)
             try:
-                row = await database.fetchrow("SELECT username, is_demo, avatar FROM users")
-                self.assertEqual((row["username"], row["is_demo"], row["avatar"]), ("Old_User", 0, None))
+                row = await database.fetchrow(
+                    "SELECT username, is_demo, is_admin, avatar FROM users"
+                )
+                self.assertEqual(
+                    (row["username"], row["is_demo"], row["is_admin"], row["avatar"]),
+                    ("Old_User", 0, 0, None),
+                )
             finally:
                 await database.close()
 

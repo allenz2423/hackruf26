@@ -19,7 +19,7 @@ export function formatBytes(bytes) {
 
 // Accessible replacement for window.prompt/confirm, built on <dialog>.
 // Resolves with the entered text (prompt), true (confirm), or null when cancelled.
-export function openDialog({ title, message = "", input = null, confirmLabel = "Save", danger = false }) {
+export function openDialog({ title, message = "", input = null, confirmLabel = "Save", confirmIcon = null, danger = false }) {
   return new Promise((resolve) => {
     const dialog = document.createElement("dialog");
     dialog.className = "dialog";
@@ -37,7 +37,7 @@ export function openDialog({ title, message = "", input = null, confirmLabel = "
           </label>` : ""}
         <div class="dialog-actions">
           <button type="button" class="btn btn-secondary" data-cancel>Cancel</button>
-          <button type="submit" class="btn ${danger ? "btn-danger" : "btn-primary"}">${escapeHtml(confirmLabel)}</button>
+          <button type="submit" class="btn ${danger ? "btn-danger" : "btn-primary"}">${confirmIcon ? icon(confirmIcon, { size: 16 }) : ""}${escapeHtml(confirmLabel)}</button>
         </div>
       </form>
     `;

@@ -40,10 +40,16 @@ async def live_session(websocket: WebSocket) -> None:
         return
 
     await websocket.accept(subprotocol=WEBSOCKET_PROTOCOL)
-    await websocket.app.state.live_session_service.run(
-        websocket,
-        session_ticket.class_context,
-        mode=session_ticket.mode,
-        language=session_ticket.language,
-        memory_target=session_ticket.memory_target,
-    )
+    if not await store.register_active(session_ticket, websocket):
+        await websocket.close(code=1008)
+        return
+    try:
+        await websocket.app.state.live_session_service.run(
+            websocket,
+            session_ticket.class_context,
+            mode=session_ticket.mode,
+            language=session_ticket.language,
+            memory_target=session_ticket.memory_target,
+        )
+    finally:
+        await store.unregister_active(session_ticket, websocket)

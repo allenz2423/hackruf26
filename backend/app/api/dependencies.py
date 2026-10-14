@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hmac
 import logging
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -107,34 +106,17 @@ def private_storage(request: Request) -> LocalPrivateStorage:
 
 
 async def enforce_app_request_policy(request: Request, settings: Settings) -> None:
-    """Apply origin checks and optional demo-gate authorization."""
+    """Apply origin checks and enforce the configured guest-access policy."""
     await enforce_origin_policy(request, settings, required=True)
     request_id = getattr(request.state, "request_id", "unknown")
-    # Guests may use the shared tools; only a logged-in account has a user id,
-    # which is what unlocks class materials.
     user = await session_user(request)
     request.state.user_id = UUID(str(user["id"])) if user else None
-
-    if settings.demo_gate_token is not None:
-        authorization = request.headers.get("authorization", "")
-        scheme, separator, supplied_token = authorization.partition(" ")
-        configured_token = settings.demo_gate_token.get_secret_value()
-        authenticated = (
-            separator == " "
-            and scheme.lower() == "bearer"
-            and hmac.compare_digest(supplied_token, configured_token)
+    if user is None and not settings.allow_guest_access:
+        logger.warning(
+            "request_rejected request_id=%s category=authentication_required",
+            request_id,
         )
-        if not authenticated:
-            logger.warning(
-                "request_rejected request_id=%s category=authentication_required",
-                request_id,
-            )
-            raise ApiError(401, "authentication_required", "A valid app session is required.")
-        return
-
-    if settings.app_env == "production":
-        logger.warning("request_rejected request_id=%s category=auth_not_configured", request_id)
-        raise ApiError(503, "auth_not_configured", "A private demo gate must be configured.")
+        raise ApiError(401, "authentication_required", "Please log in to use Jot.")
 
 
 async def enforce_live_session_request_policy(request: Request, settings: Settings) -> None:

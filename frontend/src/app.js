@@ -5,6 +5,7 @@ import { AudioController } from "./audio.js";
 import {
   getClasses,
   getClassById,
+  classHasCapability,
   createClass,
   updateClass,
   deleteClass,
@@ -37,9 +38,21 @@ import { escapeHtml, openDialog, toast } from "./ui.js";
 import { classBadge, classColor, classInitial, openClassEditor } from "./class-style.js";
 import {
   getCurrentUser,
+  getAuthOptions,
   signIn,
   signUp,
   signOut,
+  getSignupRequestsApi,
+  approveSignupRequestApi,
+  rejectSignupRequestApi,
+  createClassInvitationApi,
+  getClassInvitationsApi,
+  revokeClassInvitationApi,
+  redeemClassInvitationApi,
+  getClassMembersApi,
+  updateClassMemberCapabilitiesApi,
+  removeClassMemberApi,
+  leaveClassApi,
   updateProfile,
   changePassword,
   onAuthStateChange
@@ -225,6 +238,7 @@ async function logOut() {
 
 function accountMenuMarkup() {
   const chevron = icon("chevronDown", { size: 16 });
+  const access = getAuthOptions();
 
   if (!currentUser) {
     return `
@@ -234,7 +248,7 @@ function accountMenuMarkup() {
         </button>
         <div class="account-menu-list" id="account-menu-list" role="menu" aria-label="Join Jot" hidden>
           <a role="menuitem" href="#/login">${icon("user", { size: 16 })} Log in</a>
-          <a role="menuitem" href="#/signup">${icon("plus", { size: 16 })} Create account</a>
+          ${access.signupMode !== "closed" ? `<a role="menuitem" href="#/signup">${icon("plus", { size: 16 })} ${access.signupMode === "approval" ? "Request an account" : "Create account"}</a>` : ""}
         </div>
       </div>
     `;
@@ -249,6 +263,7 @@ function accountMenuMarkup() {
         ${chevron}
       </button>
       <div class="account-menu-list" id="account-menu-list" role="menu" aria-label="Account" hidden>
+        ${currentUser.is_admin ? `<a role="menuitem" href="#/admin">${icon("user", { size: 16 })} Signup requests</a>` : ""}
         <a role="menuitem" href="#/account">${icon("user", { size: 16 })} Account</a>
         <a role="menuitem" href="#/classes">${icon("book", { size: 16 })} Your classes</a>
         <button role="menuitem" type="button" data-logout>${icon("logOut", { size: 16 })} Log out</button>
@@ -332,6 +347,7 @@ function wireMenu(menu, { signal, onSelect } = {}) {
 // `section` picks the highlighted nav link; `tutor` marks any tutor page, including a class's Tutor tab.
 function shell(content, { section = "classes", tutor = section === "tutor", compact = tutor } = {}) {
   const isGuest = !currentUser;
+  const guestAccess = getAuthOptions().guestAccessEnabled;
   const brandHref = "#/home";
   const showSessionStatus = tutor || !["idle", "ended"].includes(state.session);
   const sessionStatus = showSessionStatus ? `
@@ -348,12 +364,12 @@ function shell(content, { section = "classes", tutor = section === "tutor", comp
       </a>
       ${compact ? sessionStatus : ""}
       <nav class="primary-nav" aria-label="Primary">
-        ${isGuest ? `
+        ${isGuest && guestAccess ? `
           <a href="#/study" ${section === "study" ? 'aria-current="page"' : ""}>Quick study</a>
-        ` : `
+        ` : currentUser ? `
           <a href="#/classes" ${section === "classes" ? 'aria-current="page"' : ""}>Classes</a>
-        `}
-        <a href="#/tutor" ${section === "tutor" ? 'aria-current="page"' : ""}>Quick tutor</a>
+        ` : ""}
+        ${currentUser || guestAccess ? `<a href="#/tutor" ${section === "tutor" ? 'aria-current="page"' : ""}>Quick tutor</a>` : ""}
       </nav>
       ${themeToggleMarkup()}
       ${accountMenuMarkup()}
@@ -372,6 +388,7 @@ function shell(content, { section = "classes", tutor = section === "tutor", comp
 
 function renderHome() {
   const name = displayName(currentUser);
+  const access = getAuthOptions();
 
   const copy = currentUser
     ? `<p class="home-greeting">Welcome back, ${escapeHtml(name)}! Pick up where you left off, or open a class to study or get tutoring from its materials.</p>
@@ -379,11 +396,15 @@ function renderHome() {
           <a class="btn btn-primary btn-large" href="#/classes">Go to your classes</a>
           <a class="home-guest" href="#/account">Account</a>
         </div>`
-    : `<p class="home-greeting">Welcome! Share your screen and ask me anything out loud, or drop in your notes and lectures and I'll turn them into quizzes, flashcards, and study guides.</p>
+    : `<p class="home-greeting">${access.guestAccessEnabled
+      ? "Welcome! Share your screen and ask me anything out loud, or drop in your notes and lectures and I'll turn them into quizzes, flashcards, and study guides."
+      : "Sign in to use Jot. Your classes and study materials are available only to your account."}</p>
         <div class="home-actions">
           <a class="btn btn-primary btn-large" href="#/login">Log in</a>
-          <a class="home-guest" href="#/study">Continue as guest</a>
-          <p class="home-note">Guests can try everything, but nothing is saved.</p>
+          ${access.signupMode !== "closed" ? `<a class="home-guest" href="#/signup">${access.signupMode === "approval" ? "Request an account" : "Create an account"}</a>` : ""}
+          ${access.guestAccessEnabled
+            ? `<a class="home-guest" href="#/study">Continue as guest</a><p class="home-note">Guests can try quick study and tutoring, but nothing is saved.</p>`
+            : access.signupMode === "approval" ? `<p class="home-note">New accounts require administrator approval.</p>` : ""}
         </div>`;
 
   app.innerHTML = `
@@ -403,6 +424,10 @@ function renderHome() {
 async function renderGuestWorkspace() {
   if (currentUser) {
     window.location.hash = "#/classes";
+    return;
+  }
+  if (!getAuthOptions().guestAccessEnabled) {
+    redirect("#/login", "Guest study is disabled on this Jot server.");
     return;
   }
   shell(`
@@ -435,6 +460,18 @@ async function renderClasses() {
           <button id="new-class" class="btn btn-primary" type="button">${icon("plus", { size: 18 })} New class</button>
         </div>
       </div>
+      <form class="panel class-join-panel" id="join-class-form">
+        <div>
+          <h2>Join a class</h2>
+          <p class="muted">Enter a temporary invitation code from a class manager.</p>
+        </div>
+        <label class="class-join-field" for="class-invitation-code">
+          <span class="visually-hidden">Invitation code</span>
+          <input id="class-invitation-code" name="code" autocomplete="off" required minlength="24" maxlength="128" placeholder="Paste invitation code" />
+        </label>
+        <button class="btn btn-secondary" type="submit">${icon("arrowRight", { size: 16 })} Join class</button>
+        <p class="field-hint class-join-status" id="class-join-status" role="status" aria-live="polite"></p>
+      </form>
       <div class="class-grid" id="class-grid"></div>
     </section>
   `, { section: "classes" });
@@ -475,8 +512,8 @@ async function renderClasses() {
           ${icon("more", { size: 20 })}
         </button>
         <div class="class-menu-list" id="class-menu-${index}" role="menu" aria-label="${escapeHtml(klass.name)} options" hidden>
-          <button role="menuitem" type="button" data-edit="${escapeHtml(klass.id)}">${icon("pencil", { size: 16 })} Edit class</button>
-          <button role="menuitem" type="button" data-delete="${escapeHtml(klass.id)}">${icon("trash", { size: 16 })} Delete</button>
+          ${(klass.isOwner || classHasCapability(klass, "manage_permissions")) ? `<button role="menuitem" type="button" data-edit="${escapeHtml(klass.id)}">${icon("pencil", { size: 16 })} Edit class</button>` : ""}
+          ${klass.isOwner ? `<button role="menuitem" type="button" data-delete="${escapeHtml(klass.id)}">${icon("trash", { size: 16 })} Delete</button>` : `<button role="menuitem" type="button" data-leave="${escapeHtml(klass.id)}">${icon("arrowLeft", { size: 16 })} Leave class</button>`}
         </div>
       </div>
     </article>`;
@@ -492,13 +529,36 @@ async function renderClasses() {
   grid.querySelectorAll("[data-class-menu]").forEach((menu) => wireMenu(menu, { signal: classMenuAbort.signal }));
 
   async function addClass() {
-    const name = await openDialog({ title: "New class", input: { label: "Class name" }, confirmLabel: "Create class" });
+    const name = await openDialog({ title: "New class", input: { label: "Class name" }, confirmLabel: "Create class", confirmIcon: "plus" });
     if (!name) return;
     const nextClass = await createClass(name);
     window.location.hash = `#/classes/${encodeURIComponent(nextClass.id)}/library`;
   }
 
   document.querySelector("#new-class").addEventListener("click", addClass);
+  document.querySelector("#join-class-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const input = form.elements.code;
+    const status = form.querySelector("#class-join-status");
+    const button = form.querySelector('button[type="submit"]');
+    button.disabled = true;
+    status.textContent = "Checking invitation…";
+    try {
+      const result = await redeemClassInvitationApi(input.value);
+      await syncClassesFromApi();
+      const joined = getClasses().find((item) => (item.backendId || item.id) === result.class_id);
+      if (!joined) throw new Error("You joined, but the class list has not refreshed yet. Reload this page to continue.");
+      input.value = "";
+      toast(result.status === "already_member" ? "You already belong to this class." : `Joined ${result.class_name || joined.name}.`);
+      window.location.hash = `#/classes/${encodeURIComponent(joined.id)}/library`;
+    } catch (error) {
+      status.textContent = error.message || "That invitation could not be used.";
+      status.dataset.tone = "bad";
+    } finally {
+      button.disabled = false;
+    }
+  });
   document.querySelector("#restore-sample-data")?.addEventListener("click", async () => {
     const confirmed = await openDialog({
       title: "Restore sample data?",
@@ -519,6 +579,7 @@ async function renderClasses() {
 
     const editId = event.target.closest("[data-edit]")?.dataset.edit;
     const deleteId = event.target.closest("[data-delete]")?.dataset.delete;
+    const leaveId = event.target.closest("[data-leave]")?.dataset.leave;
 
     if (editId) {
       const klass = getClassById(editId);
@@ -554,13 +615,33 @@ async function renderClasses() {
         }
       }
     }
+
+    if (leaveId) {
+      const klass = getClassById(leaveId);
+      const confirmed = await openDialog({
+        title: `Leave ${klass.name}?`,
+        message: "You will immediately lose access to this class and its shared materials. Your personal study materials remain yours.",
+        confirmLabel: "Leave class",
+        danger: true
+      });
+      if (!confirmed) return;
+      try {
+        await leaveClassApi(klass.backendId || klass.id);
+        await syncClassesFromApi();
+        toast(`You left ${klass.name}.`);
+        renderClasses();
+      } catch (error) {
+        toast(`Could not leave this class: ${error.message}`, { tone: "error" });
+      }
+    }
   });
 }
 
 const CLASS_TABS = [
   { id: "library", label: "Library", icon: "book" },
   { id: "study", label: "Study", icon: "sparkles" },
-  { id: "tutor", label: "Tutor", icon: "monitor" }
+  { id: "tutor", label: "Tutor", icon: "monitor" },
+  { id: "people", label: "People", icon: "user" }
 ];
 
 async function renderClassTab({ id, tab }) {
@@ -574,6 +655,10 @@ async function renderClassTab({ id, tab }) {
     return;
   }
   const tutor = tab === "tutor";
+  if (tab === "people" && !classHasCapability(klass, "read")) {
+    window.location.hash = "#/classes";
+    return;
+  }
   const backLink = `<a class="back-link" href="#/classes">${icon("arrowLeft", { size: 16 })} All classes</a>`;
 
   shell(`
@@ -605,7 +690,16 @@ async function renderClassTab({ id, tab }) {
     await renderStudyTab({
       root,
       klass,
+      currentUserId: currentUser?.id || null,
       onMaterialAdded: (material) => {
+        if (material.resourceScope === "personal") {
+          // Personal resources are served from the owner-scoped API and must not
+          // enter the browser's account-agnostic class cache.
+          const index = klass.materials.findIndex((item) => item.id === material.id);
+          if (index >= 0) klass.materials[index] = material;
+          else klass.materials.push(material);
+          return material;
+        }
         const currentClass = getClassById(klass.id) || klass;
         const materials = currentClass.materials.filter((item) => item.id !== material.id);
         klass.materials = [...materials, material];
@@ -628,9 +722,15 @@ async function renderClassTab({ id, tab }) {
     return;
   }
 
+  if (tab === "people") {
+    await renderClassPeople({ root, klass });
+    return;
+  }
+
   await renderLibraryTab({
     root,
     klass,
+    currentUserId: currentUser?.id || null,
     onUploadsAdded: (uploads) => {
       updateClass(klass.id, { uploads: [...klass.uploads, ...uploads] });
       renderClassTab({ id, tab });
@@ -641,6 +741,221 @@ async function renderClassTab({ id, tab }) {
       renderClassTab({ id, tab });
     }
   });
+}
+
+const CLASS_CAPABILITIES = [
+  ["read", "View shared materials"],
+  ["create", "Create class resources"],
+  ["edit", "Edit own contributions"],
+  ["delete", "Delete own contributions"],
+  ["delete_others", "Delete other contributions"],
+  ["invite", "Invite members"],
+  ["manage_members", "Remove members"],
+  ["manage_permissions", "Manage permissions"]
+];
+
+function availableClassCapabilities(klass) {
+  return klass.isOwner
+    ? CLASS_CAPABILITIES.map(([capability]) => capability)
+    : CLASS_CAPABILITIES.map(([capability]) => capability).filter((capability) => klass.capabilities?.includes(capability));
+}
+
+function capabilityInputs(name, selected, available, { disabled = false } = {}) {
+  return CLASS_CAPABILITIES.filter(([capability]) => available.includes(capability)).map(([capability, label]) => `
+    <label class="capability-option">
+      <input type="checkbox" name="${escapeHtml(name)}" value="${capability}" ${selected.includes(capability) || capability === "read" ? "checked" : ""} ${disabled || capability === "read" ? "disabled" : ""} />
+      <span>${escapeHtml(label)}</span>
+    </label>
+  `).join("");
+}
+
+async function renderClassPeople({ root, klass }) {
+  const classId = getBackendClassId(klass);
+  if (!classId) {
+    root.innerHTML = `<div class="panel empty-state"><strong>Class sharing requires a saved class</strong><span>Save this class to your account before inviting members.</span></div>`;
+    return;
+  }
+
+  const canInvite = classHasCapability(klass, "invite");
+  const canManageMembers = classHasCapability(klass, "manage_members");
+  const canManagePermissions = classHasCapability(klass, "manage_permissions");
+  const available = availableClassCapabilities(klass);
+  root.innerHTML = `<div class="panel empty-state" role="status">Loading class members…</div>`;
+
+  const [memberResult, invitationResult] = await Promise.allSettled([
+    getClassMembersApi(classId),
+    canInvite ? getClassInvitationsApi(classId) : Promise.resolve([])
+  ]);
+  const members = memberResult.status === "fulfilled" ? memberResult.value : [];
+  const invitations = invitationResult.status === "fulfilled" ? invitationResult.value : [];
+  const memberError = memberResult.status === "rejected" ? memberResult.reason?.message : "";
+  const invitationError = invitationResult.status === "rejected" ? invitationResult.reason?.message : "";
+
+  root.innerHTML = `
+    <section class="section-stack class-people-page">
+      <div class="panel class-people-panel">
+        <div class="class-people-heading">
+          <div><h2>Class members</h2><p class="muted">Membership controls who can read or contribute to shared class resources.</p></div>
+          <span class="pill no-dot">${members.length} ${members.length === 1 ? "member" : "members"}</span>
+        </div>
+        ${memberError ? `<p class="class-inline-error" role="alert">Could not load members: ${escapeHtml(memberError)}</p>` : ""}
+        ${members.length ? `<ul class="class-member-list">${members.map((member) => {
+          const userId = String(member.user_id);
+          const isSelf = userId === String(currentUser?.id);
+          const isOwner = member.is_owner === true;
+          const current = Array.isArray(member.capabilities) ? member.capabilities : ["read"];
+          const canEditThisMember = canManagePermissions && !isOwner && !isSelf
+            && current.every((capability) => available.includes(capability));
+          const display = member.display_name || member.username || "Class member";
+          return `<li class="class-member-row">
+            <div class="class-member-identity"><span class="member-avatar" aria-hidden="true">${escapeHtml(display.trim().slice(0, 1).toUpperCase() || "?")}</span><div><strong>${escapeHtml(display)}${isSelf ? " (you)" : ""}${isOwner ? " · owner" : ""}</strong><span class="row-meta">${escapeHtml(member.username ? `@${member.username}` : "Member")} · joined ${escapeHtml(formatClassDate(member.joined_at))}</span></div></div>
+            <div class="class-member-capabilities">${current.map((capability) => `<span class="permission-badge">${escapeHtml(CLASS_CAPABILITIES.find(([key]) => key === capability)?.[1] || capability)}</span>`).join("")}</div>
+            ${canEditThisMember ? `<details class="member-permission-editor"><summary class="btn btn-ghost btn-small">Permissions</summary>
+              <form data-member-permissions="${escapeHtml(userId)}">
+                <label class="field"><span>Permission preset</span><select data-permission-preset>
+                  <option value="custom">Custom</option><option value="reader">Read only</option>
+                  ${available.includes("create") ? `<option value="creator">Read + create</option>` : ""}
+                  ${["create", "edit", "delete"].every((capability) => available.includes(capability)) ? `<option value="editor">Contributor with own-resource controls</option>` : ""}
+                </select></label>
+                <div class="capability-grid">${capabilityInputs(`caps-${userId}`, current, available)}</div>
+                <div class="dialog-actions"><button class="btn btn-primary btn-small" type="submit">Save permissions</button>${canManageMembers ? `<button class="btn btn-danger-ghost btn-small" type="button" data-remove-member="${escapeHtml(userId)}">Remove</button>` : ""}</div>
+              </form>
+            </details>` : canManageMembers && !isOwner && !isSelf ? `<button class="btn btn-danger-ghost btn-small" type="button" data-remove-member="${escapeHtml(userId)}">Remove</button>` : ""}
+          </li>`;
+        }).join("")}</ul>` : !memberError ? `<p class="muted">No other members have joined yet.</p>` : ""}
+      </div>
+
+      ${canInvite ? `<div class="panel class-invitations-panel">
+        <div><h2>Invitations</h2><p class="muted">Codes expire or stop working after their use limit. Revoke a code at any time.</p></div>
+        ${invitationError ? `<p class="class-inline-error" role="alert">Could not load invitations: ${escapeHtml(invitationError)}</p>` : ""}
+        <form id="create-class-invitation" class="class-invitation-form">
+          <fieldset>
+            <legend>New invitation permissions</legend>
+            <p class="field-hint class-capability-note">Read access is always included. Select any additional permissions to grant.</p>
+            <div class="capability-grid">${capabilityInputs("invitation-caps", ["read"], available)}</div>
+          </fieldset>
+          <div class="field-grid">
+            <label class="field"><span>Expires in</span><select name="expires_in_days"><option value="1">1 day</option><option value="7" selected>7 days</option><option value="30">30 days</option><option value="90">90 days</option></select></label>
+            <label class="field"><span>Successful uses</span><input name="max_uses" type="number" min="1" max="100" value="1" required /></label>
+          </div>
+          <button class="btn btn-primary" type="submit">${icon("plus", { size: 16 })} Create invitation</button>
+          <p class="field-hint" id="invitation-status" role="status" aria-live="polite"></p>
+          <div id="new-invitation-code" class="invitation-code-result" hidden></div>
+        </form>
+        <ul class="invitation-list">${invitations.map((invitation) => `
+          <li><div><strong>${invitation.active ? "Active invitation" : "Inactive invitation"}</strong><span class="row-meta">Expires ${escapeHtml(formatClassDate(invitation.expires_at))} · ${invitation.successful_uses}/${invitation.max_uses} uses · ${escapeHtml((invitation.capabilities || []).join(", "))}</span></div>${invitation.active ? `<button class="btn btn-ghost btn-small" type="button" data-revoke-invitation="${escapeHtml(invitation.id)}">Revoke</button>` : `<span class="pill no-dot">${invitation.revoked_at ? "Revoked" : "Expired or used"}</span>`}</li>
+        `).join("") || `<li class="muted">No invitations yet.</li>`}</ul>
+      </div>` : ""}
+
+      ${!klass.isOwner ? `<div class="class-leave-row"><button id="leave-class-from-people" class="btn btn-danger-ghost" type="button">Leave ${escapeHtml(klass.name)}</button></div>` : ""}
+    </section>
+  `;
+
+  root.querySelectorAll("[data-member-permissions]").forEach((form) => {
+    const presets = {
+      reader: ["read"],
+      creator: ["read", "create"],
+      editor: ["read", "create", "edit", "delete"]
+    };
+    form.querySelector("[data-permission-preset]").addEventListener("change", (event) => {
+      const preset = presets[event.target.value];
+      if (!preset) return;
+      form.querySelectorAll('input[type="checkbox"]').forEach((checkbox) => { checkbox.checked = preset.includes(checkbox.value); });
+    });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const capabilities = [...form.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value);
+      if (!capabilities.includes("read")) capabilities.push("read");
+      try {
+        await updateClassMemberCapabilitiesApi(classId, form.dataset.memberPermissions, capabilities);
+        toast("Member permissions updated.");
+        await renderClassPeople({ root, klass });
+      } catch (error) {
+        toast(`Could not update permissions: ${error.message}`, { tone: "error" });
+      }
+    });
+  });
+
+  root.querySelectorAll("[data-remove-member]").forEach((button) => button.addEventListener("click", async () => {
+    const member = members.find((item) => String(item.user_id) === button.dataset.removeMember);
+    const name = member?.display_name || member?.username || "this member";
+    const confirmed = await openDialog({ title: `Remove ${name}?`, message: "They will immediately lose access to this class and its shared materials.", confirmLabel: "Remove member", danger: true });
+    if (!confirmed) return;
+    try {
+      await removeClassMemberApi(classId, button.dataset.removeMember);
+      toast(`${name} was removed from the class.`);
+      await renderClassPeople({ root, klass });
+    } catch (error) {
+      toast(`Could not remove member: ${error.message}`, { tone: "error" });
+    }
+  }));
+
+  root.querySelector("#create-class-invitation")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const capabilities = data.getAll("invitation-caps");
+    if (!capabilities.includes("read")) capabilities.push("read");
+    const status = form.querySelector("#invitation-status");
+    const button = form.querySelector('button[type="submit"]');
+    button.disabled = true;
+    status.textContent = "Creating invitation…";
+    try {
+      const invitation = await createClassInvitationApi(classId, {
+        expiresInDays: Number(data.get("expires_in_days")),
+        maxUses: Number(data.get("max_uses")),
+        capabilities
+      });
+      await renderClassPeople({ root, klass });
+      const result = root.querySelector("#new-invitation-code");
+      const refreshedStatus = root.querySelector("#invitation-status");
+      result.hidden = false;
+      result.innerHTML = `<div><strong>Copy this invitation code now</strong><code>${escapeHtml(invitation.code)}</code></div><button class="btn btn-secondary btn-small" type="button" data-copy-invitation>Copy code</button>`;
+      result.querySelector("[data-copy-invitation]").addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(invitation.code);
+          refreshedStatus.textContent = "Invitation code copied.";
+        } catch {
+          refreshedStatus.textContent = "Select and copy the code above.";
+        }
+      });
+      refreshedStatus.textContent = "Invitation created. The code is shown only here.";
+    } catch (error) {
+      status.textContent = error.message || "Could not create this invitation.";
+      status.dataset.tone = "bad";
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  root.querySelectorAll("[data-revoke-invitation]").forEach((button) => button.addEventListener("click", async () => {
+    try {
+      await revokeClassInvitationApi(classId, button.dataset.revokeInvitation);
+      toast("Invitation revoked.");
+      await renderClassPeople({ root, klass });
+    } catch (error) {
+      toast(`Could not revoke invitation: ${error.message}`, { tone: "error" });
+    }
+  }));
+
+  root.querySelector("#leave-class-from-people")?.addEventListener("click", async () => {
+    const confirmed = await openDialog({ title: `Leave ${klass.name}?`, message: "You will immediately lose access to shared class materials. Your personal study materials remain yours.", confirmLabel: "Leave class", danger: true });
+    if (!confirmed) return;
+    try {
+      await leaveClassApi(classId);
+      await syncClassesFromApi();
+      toast(`You left ${klass.name}.`);
+      window.location.hash = "#/classes";
+    } catch (error) {
+      toast(`Could not leave this class: ${error.message}`, { tone: "error" });
+    }
+  });
+}
+
+function formatClassDate(value) {
+  if (!value) return "an unknown date";
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? String(value) : date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
 function appendMessage(role, text) {
@@ -1189,6 +1504,9 @@ const USERNAME_RULE = /^[A-Za-z0-9_.-]{3,32}$/;
 // ever signs anyone in without a successful answer from the backend.
 function renderLogin({ mode = "signin" } = {}) {
   const signup = mode === "signup";
+  const access = getAuthOptions();
+  const signupEnabled = access.signupMode !== "closed";
+  const approvalRequired = access.signupMode === "approval";
   accountMenuAbort?.abort();
 
   const alreadyIn = `
@@ -1202,10 +1520,16 @@ function renderLogin({ mode = "signin" } = {}) {
     </div>
   `;
 
-  const form = `
+  const form = signup && !signupEnabled ? `
     <div class="login-heading">
-      <h1>${signup ? "Join Jot" : "Log in"}</h1>
-      <p class="muted">${signup ? "Create an account to keep your classes, uploads, and study sets." : "Enter your details to open your classes."}</p>
+      <h1>Account requests are closed</h1>
+      <p class="muted">This Jot server is not accepting new accounts right now.</p>
+      <a class="btn btn-primary" href="#/login">Go to log in</a>
+    </div>
+  ` : `
+    <div class="login-heading">
+      <h1>${signup ? (approvalRequired ? "Request an account" : "Join Jot") : "Log in"}</h1>
+      <p class="muted">${signup ? (approvalRequired ? "Submit your details for administrator review. You can sign in after your request is approved." : "Create an account to keep your classes, uploads, and study sets.") : "Enter your details to open your classes."}</p>
     </div>
     <form id="login-form" class="login-form" novalidate>
       <div class="field">
@@ -1228,10 +1552,12 @@ function renderLogin({ mode = "signin" } = {}) {
         <small id="login-password-msg" class="field-hint">${signup ? "At least 8 characters." : ""}</small>
       </div>
       <p id="login-error" class="form-error" role="alert" hidden></p>
-      <button class="btn btn-primary btn-large" type="submit">${signup ? "Create account" : "Log in"}</button>
+      <button class="btn btn-primary btn-large" type="submit">${signup ? (approvalRequired ? "Request account" : "Create account") : "Log in"}</button>
     </form>
-    <p class="login-switch">${signup ? 'Already have an account? <a href="#/login">Log in</a>' : 'New to Jot? <a href="#/signup">Create an account</a>'}</p>
-    <a class="home-guest" href="#/study">Continue as guest</a>
+    <p class="login-switch">${signup
+      ? 'Already have an account? <a href="#/login">Log in</a>'
+      : signupEnabled ? `New to Jot? <a href="#/signup">${approvalRequired ? "Request an account" : "Create an account"}</a>` : ""}</p>
+    ${access.guestAccessEnabled ? `<a class="home-guest" href="#/study">Continue as guest</a>` : ""}
   `;
 
   app.innerHTML = `
@@ -1254,6 +1580,7 @@ function renderLogin({ mode = "signin" } = {}) {
   }
 
   const formEl = document.querySelector("#login-form");
+  if (!formEl) return;
   const errorBox = document.querySelector("#login-error");
   const submit = formEl.querySelector('button[type="submit"]');
   const idleLabel = submit.textContent;
@@ -1296,7 +1623,9 @@ function renderLogin({ mode = "signin" } = {}) {
 
   const setBusy = (busy) => {
     for (const element of formEl.elements) element.disabled = busy;
-    submit.textContent = busy ? (signup ? "Creating your account..." : "Checking your details...") : idleLabel;
+    submit.textContent = busy
+      ? (signup ? (approvalRequired ? "Sending request..." : "Creating your account...") : "Checking your details...")
+      : idleLabel;
   };
 
   formEl.addEventListener("submit", async (event) => {
@@ -1314,9 +1643,21 @@ function renderLogin({ mode = "signin" } = {}) {
     setBusy(true);
     try {
       // The server checks the details. Only a successful answer logs anyone in.
-      const user = signup
+      const result = signup
         ? await signUp({ username: name, password: password.value, email: formEl.elements.email.value.trim() })
-        : await signIn(name, password.value);
+        : { status: "active", user: await signIn(name, password.value) };
+      if (signup && result.status === "pending") {
+        document.querySelector(".login-card").innerHTML = `
+          <div class="login-heading">
+            <h1>Request sent</h1>
+            <p class="muted" role="status">Your account request is waiting for administrator review. Sign in after the administrator approves it.</p>
+          </div>
+          <div class="account-actions"><a class="btn btn-primary" href="#/login">Back to log in</a></div>
+        `;
+        return;
+      }
+      const user = result.user;
+      if (!user) throw new Error("The account could not be created. Please try again.");
       await applyAuth(user);
       toast(signup ? `Welcome to Jot, ${displayName(user)}!` : `Welcome back, ${displayName(user)}!`);
       redirect("#/classes");
@@ -1628,11 +1969,115 @@ function renderAccount() {
   });
 }
 
+function renderAdmin() {
+  shell(`
+    <section class="section-stack admin-page" aria-labelledby="admin-title">
+      <div class="page-heading">
+        <div>
+          <h1 id="admin-title">Signup requests</h1>
+          <p class="muted">Review new account requests. Approved accounts can sign in immediately.</p>
+        </div>
+        <a class="btn btn-secondary" href="#/classes">${icon("book", { size: 18 })} Your classes</a>
+      </div>
+      <div id="signup-requests" class="admin-request-list" aria-live="polite" aria-busy="true">
+        <p class="muted">Loading requests…</p>
+      </div>
+    </section>
+  `, { section: "classes" });
+
+  const list = document.querySelector("#signup-requests");
+  const renderRequests = (requests) => {
+    list.setAttribute("aria-busy", "false");
+    if (!requests.length) {
+      list.innerHTML = `<div class="panel empty-state"><strong>No pending requests</strong><span>New account requests will appear here.</span></div>`;
+      return;
+    }
+    list.innerHTML = requests.map((request) => {
+      const date = new Date(request.created_at);
+      const createdAt = Number.isNaN(date.getTime()) ? "Date unavailable" : date.toLocaleString();
+      return `
+        <article class="panel admin-request" data-request-id="${escapeHtml(request.id)}">
+          <div class="admin-request-details">
+            <h2>${escapeHtml(request.display_name || request.username)}</h2>
+            <p><strong>@${escapeHtml(request.username)}</strong>${request.email ? ` · ${escapeHtml(request.email)}` : ""}</p>
+            <p class="muted">Requested ${escapeHtml(createdAt)}</p>
+          </div>
+          <div class="admin-request-actions">
+            <button class="btn btn-primary" type="button" data-decision="approve">Approve</button>
+            <button class="btn btn-danger-ghost" type="button" data-decision="reject">Reject</button>
+          </div>
+        </article>`;
+    }).join("");
+  };
+
+  const load = async () => {
+    list.setAttribute("aria-busy", "true");
+    list.innerHTML = `<p class="muted">Loading requests…</p>`;
+    try {
+      const result = await getSignupRequestsApi();
+      renderRequests(result.requests || []);
+    } catch (error) {
+      list.setAttribute("aria-busy", "false");
+      list.innerHTML = `<div class="panel empty-state"><strong>Could not load signup requests</strong><span>${escapeHtml(error.message || "Please try again.")}</span><button class="btn btn-secondary" type="button" data-reload-requests>Try again</button></div>`;
+    }
+  };
+
+  list.addEventListener("click", async (event) => {
+    if (event.target.closest("[data-reload-requests]")) {
+      await load();
+      return;
+    }
+    const button = event.target.closest("[data-decision]");
+    const card = button?.closest("[data-request-id]");
+    if (!button || !card) return;
+
+    const approve = button.dataset.decision === "approve";
+    if (!approve) {
+      const confirmed = await openDialog({
+        title: "Reject this account request?",
+        message: `The request from @${card.querySelector("strong").textContent.slice(1)} will be closed.`,
+        confirmLabel: "Reject request",
+        danger: true
+      });
+      if (!confirmed) return;
+    }
+    const buttons = card.querySelectorAll("button");
+    buttons.forEach((item) => { item.disabled = true; });
+    button.textContent = approve ? "Approving…" : "Rejecting…";
+    try {
+      const action = approve ? approveSignupRequestApi : rejectSignupRequestApi;
+      const result = await action(card.dataset.requestId);
+      toast(approve ? `Approved @${result.username}.` : `Rejected @${result.username}.`);
+      await load();
+    } catch (error) {
+      toast(error.message || "Could not review this request.", { tone: "error" });
+      buttons.forEach((item) => { item.disabled = false; });
+      button.textContent = approve ? "Approve" : "Reject";
+    }
+  });
+
+  load();
+}
+
 // Who may open what. The server enforces the same rules; these only keep the UI honest.
 const requireUser = (render, notice = "Log in to see your classes.") => (params) =>
   currentUser ? render(params) : redirect("#/login", notice);
 const requireGuest = (render) => (params) =>
-  currentUser ? redirect("#/classes") : render(params);
+  currentUser
+    ? redirect("#/classes")
+    : getAuthOptions().guestAccessEnabled
+      ? render(params)
+      : redirect("#/login", "Guest pages are disabled on this Jot server.");
+const requireTutorAccess = () =>
+  currentUser || getAuthOptions().guestAccessEnabled
+    ? renderTutor()
+    : redirect("#/login", "Sign in to use Jot on this server.");
+const requireAdmin = (render) => (params) =>
+  !currentUser
+    ? redirect("#/login", "Log in to review signup requests.")
+    : currentUser.is_admin
+      ? render(params)
+      : redirect("#/classes", "Administrator access is required.");
 
 const router = createRouter(
   [
@@ -1644,7 +2089,8 @@ const router = createRouter(
     { path: "/classes", render: requireUser(renderClasses) },
     { path: "/classes/:id/:tab", render: requireUser(renderClassTab) },
     { path: "/account", render: requireUser(renderAccount, "Log in to see your account.") },
-    { path: "/tutor", render: () => renderTutor() },
+    { path: "/admin", render: requireAdmin(renderAdmin) },
+    { path: "/tutor", render: requireTutorAccess },
     { path: "/auth", render: () => redirect(currentUser ? "#/account" : "#/login") }
   ],
   { render: () => (currentUser ? renderClasses() : renderHome()) },

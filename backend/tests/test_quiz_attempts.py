@@ -73,6 +73,7 @@ class ReasoningQuizApiTests(unittest.TestCase):
             sqlite_path=":memory:",
             storage_dir=self.storage.name,
             lean_tool_enabled=False,
+            signup_mode="open",
         )
         self.client = TestClient(create_app(settings_override=settings), headers={"origin": ORIGIN})
         self.client.__enter__()

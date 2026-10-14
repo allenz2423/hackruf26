@@ -34,7 +34,8 @@ Students can also upload their own course materials (notes, documents, syllabi, 
 - Editing the student's document, code, or application for them.
 - Clicking, typing, scrolling, or running commands on the student's behalf.
 - Recording a lesson, retaining screenshots or audio, or building behavioral student profiles. (Notes and study materials that the student explicitly uploads or saves are stored; see [Notes and study materials](#notes-and-study-materials).)
-- Supporting multiple students, classrooms, teacher dashboards, or assignment grading.
+- Shared classes support multiple members, temporary invitations, per-member capabilities, private study materials, shared contributions, publication schedules, and owner-private attempts. Class forking, leaderboards, and organization hierarchies are deferred. See [Shared classes design](shared-classes-design.md).
+- Teacher dashboards or assignment grading.
 - Guaranteeing perfect OCR or pixel-precise visual grounding. The student can correct or dismiss a mark.
 
 ## Primary user flow
@@ -83,7 +84,7 @@ Remote quizzes also offer an optional **Reasoning Mode** at start; Standard mode
 
 ### Notes and study materials
 
-**Classes.** Every note and generated material belongs to exactly one class. The student can create, rename, and delete classes, and move notes between them. Deleting a class deletes its notes and materials after a confirmation.
+**Classes.** A class has one owner and may have additional members. Owners retain administrative control; members receive explicit capabilities through an invitation and can leave. Class resources have separate ownership and publication state. Students can create private study materials from class resources they can read without class-wide create permission. Personal materials survive membership removal and are visible only to their owner. Shared student contributions start as drafts and retain creator attribution. Deleting a class remains owner-only and deletes class-owned resources after confirmation; personal study materials are independent of the source class.
 
 **Course materials.** In this doc, “notes” means any material the student uploads to a class. Each upload has a kind:
 
@@ -118,9 +119,13 @@ The app keeps the original file and the extracted text or transcript. The studen
 | Practice exam | Longer, timed mix of question types (including worked/free-response problems) with a scoring rubric | Length, time limit, topics, difficulty |
 | Flashcards | Term/definition or question/answer cards | Number of cards, topics |
 
-Each question or section links back to the upload it was drawn from (page or slide number, or lecture timestamp). Materials are saved to the class so the student can retake or regenerate them. Generated content can be wrong, so the UI labels it as AI-generated and lets the student flag an incorrect question.
+Each question or section links back to the upload it was drawn from (page or slide number, or lecture timestamp). Students can keep generated materials private or explicitly create a class contribution. A student with read access can generate personal quizzes and exams without class-wide create permission. Quizzes and practice exams accept optional additional instructions for topics, difficulty, or question style. Those preferences are lower-trust than source grounding and required output rules, are stored privately for reproducibility, and have no effect when omitted. Unsupported requested topics are not invented and should be identified in generated explanations or exam instructions. Generated content can be wrong, so the UI labels it as AI-generated and lets the student flag an incorrect question.
 
-Editing or deleting a source upload preserves saved study sets, downloadable guide files, and attempt history. The app marks changed or missing sources so the student knows when to regenerate. Large selected sources share a bounded excerpt budget, and partial coverage is disclosed. Deleting a whole class still removes its uploads and study materials.
+Editing or deleting a source upload preserves saved study sets, downloadable guide files, and attempt history. The app marks changed or missing sources so the student knows when to regenerate. Large selected sources share a bounded excerpt budget, and partial coverage is disclosed. Removing a class member immediately revokes class access; personal materials remain private to their owner. Deleting a whole class remains an owner action and removes its class-scoped resources.
+
+### Shared classes
+
+Class membership and resource access are enforced by the backend on every request. Invitation codes are temporary, usage-limited, stored as digests, and redeemed atomically. Capabilities are independent: `edit` and `delete` apply to a member's own contributions, while a separate `delete_others` grant can remove another member's published contribution. Class-owned resources and class deletion remain owner-controlled. Drafts and future scheduled releases are filtered from student-facing resource APIs, generation, files, and tutor context. Answer keys have their own release state, and assessment attempts and reasoning traces remain scoped to the submitting user. Legacy attempts without reliable attribution remain unassigned and private. See [Shared classes design](shared-classes-design.md) for the schema and migration details. Forking, leaderboards, and organization hierarchies are deferred.
 
 ## System design
 
@@ -159,7 +164,7 @@ flowchart LR
 **Live session gateway**
 
 - Holds the long-lived Gemini API key and owns provider SDK use, model selection, system instructions, class context, and tool execution.
-- Issues a short-lived, one-use WebSocket ticket after origin, access, rate-limit, and optional class-ownership checks. The ticket is not a provider credential and cannot be used to call the provider directly.
+- Issues a short-lived, one-use WebSocket ticket after origin, access, rate-limit, and optional class-membership checks. Removing a member revokes unused tickets and closes active class-context sessions. The ticket is not a provider credential and cannot be used to call the provider directly.
 - Receives sampled frames, enabled microphone audio, and typed questions over the browser's same-origin WebSocket, then forwards them in memory to the Live API.
 - Streams audio, transcripts, and frame-bound annotation requests back to the browser. It does not record or persist live media or raw conversation data; only explicitly enabled derived session recaps persist.
 - For a public deployment, apply rate limits and abuse controls to ticket issuance and active WebSocket sessions.
@@ -189,7 +194,7 @@ Attempt        { id, material_id, answers, score, completed_at } // legacy stand
 QuestionAttempt { id, quiz_run_id, question_id, state, reasoning_turns[], accepted_snapshot, submitted_snapshot, final_answer, grade, feedback }
 ```
 
-The hackathon build stores application data in SQLite. Accounts (username or email plus password) and login sessions are handled by the backend itself, with no external account provider. Guests can use quick tutoring and local study, but class libraries require an account.
+The hackathon build stores application data in SQLite. Accounts (username or email plus password) and login sessions are handled by the backend itself, with no external account provider. Deployments deny guest access and close new account requests by default. Operators can independently enable guest pages, immediate public signup, or administrator-reviewed account requests in configuration; class libraries always require an account.
 
 **Generated material format (quiz example)**
 

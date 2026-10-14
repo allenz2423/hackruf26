@@ -1,0 +1,60 @@
+name: jotai
+
+services:
+  app:
+    build: .
+    image: jotai-app:local
+    container_name: jotai-app
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env.runtime
+    environment:
+      APP_ENV: production
+      APP_ORIGINS: https://jotai.tech
+      ALLOW_GUEST_ACCESS: "false"
+      SIGNUP_MODE: approval
+      LEAN_TOOL_ENABLED: "false"
+      SQLITE_PATH: /data/screen_tutor.sqlite3
+      STORAGE_DIR: /data/private_uploads
+      FRONTEND_DIST: /app/frontend/dist
+      STUDY_PDF_EXECUTABLE: /opt/tectonic/tectonic
+      STUDY_PDF_TIMEOUT_SECONDS: "120"
+    volumes:
+      - /srv/jotai/data:/data
+      - /srv/jotai/tectonic/tectonic:/opt/tectonic/tectonic:ro
+      - /srv/jotai/tectonic-cache/tectonic:/opt/tectonic-cache/tectonic:ro
+    expose:
+      - "8000"
+    networks:
+      - npm_proxy
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=1073741824
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: 4g
+    cpus: 2.0
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).read()
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  npm_proxy:
+    external: true
+    name: nginx-proxy-manager_default

@@ -149,6 +149,65 @@ class ClassSummary(BaseModel):
     updated_at: datetime
     upload_count: int = 0
     material_count: int = 0
+    is_owner: bool = False
+    capabilities: list[str] = Field(default_factory=list)
+
+
+ClassCapability = Literal[
+    "read", "create", "edit", "delete", "delete_others", "invite", "manage_members",
+    "manage_permissions"
+]
+
+
+class InvitationCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    expires_in_days: int = Field(default=7, ge=1, le=90)
+    max_uses: int = Field(default=1, ge=1, le=100)
+    capabilities: list[ClassCapability] = Field(default_factory=lambda: ["read"], min_length=1)
+
+    @field_validator("capabilities")
+    @classmethod
+    def unique_capabilities(cls, value: list[ClassCapability]) -> list[ClassCapability]:
+        if len(value) != len(set(value)):
+            raise ValueError("Invitation capabilities must be unique.")
+        if "read" not in value:
+            raise ValueError("Every class invitation must include read access.")
+        return value
+
+
+class InvitationRedeem(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+    code: str = Field(min_length=24, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class MemberCapabilitiesUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    capabilities: list[ClassCapability] = Field(min_length=1)
+
+    @field_validator("capabilities")
+    @classmethod
+    def unique_capabilities(cls, value: list[ClassCapability]) -> list[ClassCapability]:
+        if len(value) != len(set(value)):
+            raise ValueError("Capabilities must be unique.")
+        if "read" not in value:
+            raise ValueError("Active class members must retain read access.")
+        return value
+
+
+class ResourcePublicationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    state: Literal["draft", "scheduled", "published"]
+    release_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_release(self) -> ResourcePublicationUpdate:
+        if self.state == "scheduled":
+            if self.release_at is None or self.release_at.tzinfo is None:
+                raise ValueError("A scheduled release requires a timezone-aware release_at.")
+            object.__setattr__(self, "release_at", self.release_at.astimezone(UTC))
+        elif self.release_at is not None:
+            raise ValueError("release_at is only valid for scheduled resources.")
+        return self
 
 
 NoteKind = Literal["notes", "document", "syllabus", "slides", "lecture_video", "lecture_audio"]
@@ -184,6 +243,10 @@ class UploadSummary(BaseModel):
     failure_code: str | None = None
     created_at: datetime
     updated_at: datetime
+    resource_scope: Literal["class_owned", "student_contribution"] = "class_owned"
+    created_by: UUID | None = None
+    publication_state: Literal["draft", "scheduled", "published"] = "published"
+    release_at: datetime | None = None
 
 
 class UploadDetail(UploadSummary):
@@ -288,6 +351,24 @@ class StudyMaterialCreate(BaseModel):
     kind: StudyMaterialKind
     scope: MaterialsScope = Field(default_factory=lambda: AllMaterialsScope(kind="all"))
     options: StudyOptions = Field(default_factory=StudyOptions)
+    additional_instructions: str | None = Field(default=None, max_length=2000)
+    destination: Literal["personal", "class_contribution"] = "personal"
+
+    @field_validator("additional_instructions", mode="before")
+    @classmethod
+    def normalize_additional_instructions(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return value
+
+    @model_validator(mode="after")
+    def instructions_only_apply_to_assessments(self) -> StudyMaterialCreate:
+        if self.additional_instructions and self.kind not in {"quiz", "practice_exam"}:
+            raise ValueError(
+                "Additional instructions are available only for quizzes and practice exams."
+            )
+        return self
 
 
 class LatestAttempt(BaseModel):
@@ -297,7 +378,12 @@ class LatestAttempt(BaseModel):
 
 class MaterialSummary(BaseModel):
     id: UUID
-    class_id: UUID
+    class_id: UUID | None = None
+    origin_class_id: UUID | None = None
+    resource_scope: Literal["class_owned", "personal", "student_contribution"] = "class_owned"
+    created_by: UUID | None = None
+    publication_state: Literal["draft", "scheduled", "published"] | None = "published"
+    release_at: datetime | None = None
     kind: StudyMaterialKind
     title: str
     scope: dict
@@ -698,7 +784,18 @@ class AuthUser(BaseModel):
     display_name: str
     email: str | None = None
     is_demo: bool = False
+    is_admin: bool = False
     avatar: Avatar | None = None
+
+
+class SignupResponse(BaseModel):
+    """Account creation or an administrator-reviewed signup request."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal["active", "pending"]
+    user: AuthUser | None = None
+    message: str | None = None
 
 
 class MeResponse(BaseModel):
@@ -707,6 +804,34 @@ class MeResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     user: AuthUser | None = None
+    guest_access_enabled: bool = False
+    signup_mode: Literal["approval", "open", "closed"] = "closed"
+
+
+class SignupRequestSummary(BaseModel):
+    """Public-safe signup request fields visible only to administrators."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: UUID
+    username: str
+    email: str | None = None
+    display_name: str | None = None
+    created_at: datetime
+
+
+class SignupRequestsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    requests: list[SignupRequestSummary]
+
+
+class SignupRequestDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: UUID
+    status: Literal["approved", "rejected"]
+    username: str
 
 
 class ProfileUpdate(BaseModel):

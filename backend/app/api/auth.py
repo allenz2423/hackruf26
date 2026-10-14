@@ -16,6 +16,7 @@ from app.api.schemas import (
     PasswordChange,
     ProfileUpdate,
     SignupRequest,
+    SignupResponse,
 )
 from app.config import Settings
 from app.security.rate_limit import InMemoryRateLimiter
@@ -72,14 +73,32 @@ def _clear_session_cookie(response: Response, settings: Settings) -> None:
     )
 
 
-@router.post("/signup", response_model=MeResponse, status_code=201)
-async def signup(request: Request, response: Response, payload: SignupRequest) -> MeResponse:
-    """Create an account and start a session."""
+@router.post("/signup", response_model=SignupResponse, status_code=201)
+async def signup(request: Request, response: Response, payload: SignupRequest) -> SignupResponse:
+    """Create an account or submit an administrator-reviewed signup request."""
     settings: Settings = request.app.state.settings
     await enforce_origin_policy(request, settings, required=True)
     await _limit_attempts(request, f"signup:{_client_host(request)}")
 
     db = database(request)
+    if settings.signup_mode == "closed":
+        raise ApiError(403, "signup_closed", "New account requests are currently closed.")
+
+    if settings.signup_mode == "approval":
+        await accounts.create_signup_request(
+            db,
+            username=payload.username,
+            password=payload.password,
+            email=payload.email,
+            display_name=payload.display_name,
+        )
+        response.status_code = 202
+        _no_store(response)
+        return SignupResponse(
+            status="pending",
+            message="Your account request was sent for administrator review.",
+        )
+
     user = await accounts.create_user(
         db,
         username=payload.username,
@@ -90,7 +109,7 @@ async def signup(request: Request, response: Response, payload: SignupRequest) -
     token, _ = await accounts.create_session(db, user["id"], settings.session_ttl_days)
     _set_session_cookie(response, token, settings)
     _no_store(response)
-    return MeResponse(user=AuthUser(**accounts.public_user(user)))
+    return SignupResponse(status="active", user=AuthUser(**accounts.public_user(user)))
 
 
 @router.post("/login", response_model=MeResponse)
@@ -108,7 +127,11 @@ async def login(request: Request, response: Response, payload: LoginRequest) -> 
     token, _ = await accounts.create_session(db, user["id"], settings.session_ttl_days)
     _set_session_cookie(response, token, settings)
     _no_store(response)
-    return MeResponse(user=AuthUser(**accounts.public_user(user)))
+    return MeResponse(
+        user=AuthUser(**accounts.public_user(user)),
+        guest_access_enabled=settings.allow_guest_access,
+        signup_mode=settings.signup_mode,
+    )
 
 
 @router.post("/logout", status_code=204)
@@ -139,8 +162,16 @@ async def me(request: Request, response: Response) -> MeResponse:
     if user is None:
         if session_token(request):
             _clear_session_cookie(response, settings)
-        return MeResponse(user=None)
-    return MeResponse(user=AuthUser(**accounts.public_user(user)))
+        return MeResponse(
+            user=None,
+            guest_access_enabled=settings.allow_guest_access,
+            signup_mode=settings.signup_mode,
+        )
+    return MeResponse(
+        user=AuthUser(**accounts.public_user(user)),
+        guest_access_enabled=settings.allow_guest_access,
+        signup_mode=settings.signup_mode,
+    )
 
 
 async def _require_user(request: Request) -> dict:
@@ -172,7 +203,12 @@ async def update_me(request: Request, response: Response, payload: ProfileUpdate
 
     updated = await accounts.update_profile(database(request), user["id"], changes)
     _no_store(response)
-    return MeResponse(user=AuthUser(**accounts.public_user(updated)))
+    settings: Settings = request.app.state.settings
+    return MeResponse(
+        user=AuthUser(**accounts.public_user(updated)),
+        guest_access_enabled=settings.allow_guest_access,
+        signup_mode=settings.signup_mode,
+    )
 
 
 @router.post("/password", status_code=204)

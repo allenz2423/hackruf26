@@ -34,6 +34,12 @@ from app.services.lean_proofs import (
 )
 from app.services.live_sessions import LiveSessionTicketStore
 from app.services.source_context import source_excerpts
+from app.services.class_access import (
+    can_view_assessment_key,
+    can_view_unreleased,
+    class_access,
+    is_effectively_published,
+)
 
 logger = logging.getLogger("screen_tutor.api")
 router = APIRouter()
@@ -55,7 +61,7 @@ async def health_check() -> HealthResponse:
     tags=["live"],
     responses={
         400: {"description": "Malformed request or unexpected fields."},
-        401: {"description": "The configured demo gate was not satisfied."},
+        401: {"description": "A login is required unless guest access is enabled."},
         403: {"description": "The request origin is not allow-listed."},
         413: {"description": "The request body exceeds the configured limit."},
         429: {"description": "The session creation rate limit was reached."},
@@ -77,27 +83,35 @@ async def create_live_session_ticket(
         if user_id is None:
             raise ApiError(401, "authentication_required", "Please sign in to use class materials.")
         database_connection = database(request)
-        class_row = await database_connection.fetchrow(
-            "SELECT id, name FROM course_classes WHERE id = ?1 AND owner_id = ?2",
-            payload.class_id,
-            user_id,
-        )
-        if class_row is None:
-            raise ApiError(404, "not_found", "The requested resource was not found.")
+        access = await class_access(database_connection, payload.class_id, user_id, required="read")
+        class_row = access
         # The student may limit context to chosen uploads; ids outside this class match nothing.
         selected = ""
         upload_ids = tuple(dict.fromkeys(payload.upload_ids or ()))
         if payload.upload_ids is not None:
             placeholders = ", ".join(f"?{index}" for index in range(2, len(upload_ids) + 2))
-            selected = f"AND id IN ({placeholders}) " if upload_ids else "AND 0 "
+            selected = f"AND n.id IN ({placeholders}) " if upload_ids else "AND 0 "
         notes = await database_connection.fetch(
-            "SELECT id, title, extracted_text, summary "
-            "FROM course_notes "
-            f"WHERE class_id = ?1 AND status = 'ready' {selected}ORDER BY "
-            "CASE WHEN kind = 'syllabus' THEN 0 ELSE 1 END, created_at",
+            "SELECT n.id,n.title,n.extracted_text,n.summary,n.created_by,n.publication_state,n.release_at,n.resource_scope,"
+            "a.id AS assessment_id,a.owner_id AS assessment_owner,a.answer_key_release_state,"
+            "a.answer_key_release_at,a.has_student_responses,a.score_percent,a.grading_result FROM course_notes n "
+            "LEFT JOIN uploaded_assessments a ON a.note_id=n.id "
+            f"WHERE n.class_id=?1 AND n.status='ready' {selected}ORDER BY "
+            "CASE WHEN n.kind='syllabus' THEN 0 ELSE 1 END,n.created_at",
             payload.class_id,
             *upload_ids,
         )
+        notes = [
+            note for note in notes
+            if (
+                is_effectively_published(note["publication_state"], note["release_at"])
+                or can_view_unreleased(access, user_id, note["created_by"])
+            )
+            and (
+                note["assessment_id"] is None
+                or can_view_assessment_key(note, access, user_id)
+            )
+        ]
         context_parts = [f"Class: {class_row['name']}\n"]
         for excerpt in source_excerpts(notes, 40_000):
             coverage = " (partial excerpt; omitted text is unavailable)" if excerpt["truncated"] else ""
@@ -122,8 +136,19 @@ async def create_live_session_ticket(
             user_id, payload.class_id, use_saved_memory=payload.use_saved_memory,
         )
     ticket, expires_at = await store.issue(
-        class_context, mode=payload.mode, language=payload.language, memory_target=memory_target,
+        class_context,
+        mode=payload.mode,
+        language=payload.language,
+        memory_target=memory_target,
+        class_id=payload.class_id,
+        user_id=user_id,
     )
+    if payload.class_id is not None:
+        try:
+            await class_access(database(request), payload.class_id, user_id, required="read")
+        except ApiError:
+            await store.revoke_ticket(ticket)
+            raise
     return LiveSessionTicketResponse(ticket=ticket, expires_at=expires_at)
 
 
@@ -133,7 +158,7 @@ async def create_live_session_ticket(
     tags=["tools"],
     responses={
         400: {"description": "The expression is invalid or outside calculator limits."},
-        401: {"description": "The configured app gate was not satisfied."},
+        401: {"description": "A login is required unless guest access is enabled."},
         403: {"description": "The request origin is not allow-listed."},
         413: {"description": "The request body exceeds the configured limit."},
         429: {"description": "The calculator rate limit was reached."},
@@ -165,7 +190,7 @@ async def calculate_expression(
     tags=["tools"],
     responses={
         400: {"description": "The Lean request contains unsupported syntax."},
-        401: {"description": "The configured app gate was not satisfied."},
+        401: {"description": "A login is required unless guest access is enabled."},
         403: {"description": "The request origin is not allow-listed."},
         413: {"description": "The request body exceeds the configured Lean limit."},
         429: {"description": "The Lean proof-check rate or concurrency limit was reached."},

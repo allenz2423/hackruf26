@@ -99,7 +99,7 @@ The local SQLite workspace calls class/upload APIs without an access-token prere
 
 ### Study tab (generated materials)
 
-- **Generate panel:** pick a type (Quiz, Practice test, Study guide, Flashcards); a scope (whole class, selected uploads, syllabus topics, or an upcoming exam such as “Midterm 1”); and options (4–100 questions, sections, or cards depending on the selected type; difficulty; and time limit for practice tests). The default practice-test timer scales at 45 seconds per item with a 15-minute minimum. Show a generating state and allow cancel.
+- **Generate panel:** pick a type (Quiz, Practice test, Study guide, Flashcards); a scope (whole class, selected uploads, syllabus topics, or an upcoming exam such as “Midterm 1”); and options (4–100 questions, sections, or cards depending on the selected type; difficulty; and time limit for practice tests). Quizzes and practice tests show an optional, 2,000-character **Additional instructions** field; guides and flashcards do not. The default practice-test timer scales at 45 seconds per item with a 15-minute minimum. Show a generating state and allow cancel.
 - **Saved materials list:** every generated item with type, scope, date, and last score. The student can open, retake, regenerate, or delete it.
 - **Quiz / practice test player:** one question at a time or full-page mode, multiple-choice, true/false, and short/free-response inputs, an optional timer for practice tests, and Submit. The results page shows the score, correct answers, explanations, and source links (page/slide number or lecture timestamp that opens the upload detail view). Each missed question has **Ask tutor about this**, which opens a text chat beneath that question in the same results page.
 - **Study guide view:** rendered headings, key terms, formulas (use KaTeX or MathJax for math), and source links; printable.
@@ -120,6 +120,10 @@ Class-library calls use same-origin HTTP without requiring a bearer token in loc
 Before generation, `course-sync.js` accepts the explicit browser IDs as `selectedUploadIds`, validates that they still belong to the class, maps only those records to backend UUIDs, retrieves their original files from IndexedDB (or uses pasted source text), and waits only for those uploads to be `ready`. Empty or stale explicit selections fail without falling back to the whole class. Unselected uploads are neither submitted nor polled. Local IDs remain stable for routing and file previews; backend UUIDs are persisted as `backendId` fields. Saved generated materials show their selected source filenames.
 
 Study generation submits an explicit upload scope, keeps the returned pending material ID, and polls status sequentially. Pending and failed items remain visible for recovery; generation errors do not create template quizzes. Navigation stops client polling without claiming to cancel the server job. Old browser-only templates remain labeled as local drafts.
+
+For quizzes and practice tests, the optional **Additional instructions** textarea is shown only for those types and is limited to 2,000 characters. The client trims it and omits the request field when blank. These preferences guide topic emphasis and style without changing the selected source scope. The server stores them separately from public material options and does not return them in material summaries or detail responses.
+
+The class library supports inviting and joining members, leaving a class, and owner/manager membership controls. Invitation creation exposes expiration, use limits, and permission choices; backend capabilities remain independent. `Delete own contributions` and `Delete other contributions` are separate grants, and the latter applies only to another member's published contribution. Resource cards show personal versus shared scope and publication state, with author-scoped edit/delete controls, explicit publishing, and scheduled release where authorized. Students can create personal quizzes from readable class uploads without publishing them. Their personal materials are fetched from the owner-only library and remain available after leaving the source class; they are not copied into the shared browser cache. The UI hides unavailable actions, while all access and release rules remain enforced server-side. Forking and leaderboards are deferred. See [Shared classes design](shared-classes-design.md).
 
 Remote quiz detail omits answer keys. Submit choice IDs, true/false values, and short-answer text to the backend attempts endpoint for scoring and answer explanations. A submission failure keeps the student's answers available for retry instead of displaying a fabricated local score. Remote flags and mapped upload preview/retry/delete actions also call the backend without a token prerequisite. See [the backend integration contract](backend-design.md#quiz-generation-integration-for-the-frontend-agent) for request formats and recovery rules.
 
@@ -146,17 +150,20 @@ Guests and logged-in users never share a screen or a cache. The backend enforces
 
 | Route | Who | Behavior |
 | --- | --- | --- |
-| `#/home` | Everyone | Welcome page. Guests see Log in and Continue as guest; logged-in users see Welcome back and Go to your classes. |
-| `#/login`, `#/signup` | Guests | Standalone Log in and Join Jot screens with no app header. They always ask for credentials, show "Checking your details..." while the server answers, and show inline errors for wrong or missing details. Only a successful server response logs anyone in. A visitor who is already logged in sees who they are logged in as, with Go to your classes and Log out, instead of being redirected. |
+| `#/home` | Everyone | Welcome page. Guests see Log in and the configured account-request/guest options; logged-in users see Welcome back and Go to your classes. |
+| `#/login`, `#/signup` | Guests | Standalone Log in and account request/create screens with no app header. The server decides whether signup is closed, pending admin approval, or immediate. A pending request never creates a browser session. A visitor who is already logged in sees who they are logged in as, with Go to your classes and Log out. |
 | `#/account` | Logged-in only | Change username and email, change password (current password required; other devices are logged out), and Log out. A guest is sent to `#/login`. |
 | `#/classes`, `#/classes/:id/:tab` | Logged-in only | Class library, study, and class tutor. A guest is sent to `#/login`. |
-| `#/study` | Guests only | Local quick study. A logged-in visitor is sent to their classes. |
-| `#/tutor` | Everyone | Quick tutor without class materials. |
+| `#/study`, `#/guest` | Guests only when enabled | Local quick study. A logged-in visitor is sent to their classes; if guest access is disabled, guests are sent to log in. |
+| `#/tutor` | Logged-in users, or guests when enabled | Quick tutor without class materials. |
+| `#/admin` | Administrators only | Lists pending signup requests and supports approve/reject. The backend checks the account's admin flag on every operation. |
 
 The header's top-right control depends on who is looking:
 
-- **Guest:** a **Join Jot** menu with only *Log in* and *Create account*.
-- **Logged in:** the account name with a menu of *Account*, *Your classes*, and *Log out*.
+- **Guest:** a **Join Jot** menu with *Log in* and the configured signup action. Guest links appear only when guest access is enabled.
+- **Logged in:** the account name with a menu of *Account*, *Your classes*, and *Log out*; administrators also see *Signup requests*.
+
+Guest pages are hidden and rejected by the backend by default. `ALLOW_GUEST_ACCESS=true` opts into quick tutoring and local study pages. `SIGNUP_MODE` is `closed` by default; `approval` accepts requests for administrator review, and `open` enables immediate registration. The first administrator is created by an operator using `python -m app.scripts.create_admin USERNAME`; there is no public administrator bootstrap endpoint.
 
 Only the demo account (`is_demo` from the server) starts with the built-in sample classes and study sets and sees *Restore sample data*. Every other account starts with an empty class list and a *Create your first class* empty state; any sample classes cached by earlier builds are removed from their view.
 

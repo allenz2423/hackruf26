@@ -2,7 +2,7 @@ import { icon } from "./icons.js";
 import { escapeHtml, formatBytes, openDialog, toast } from "./ui.js";
 import { saveUploadedFile } from "./file-store.js";
 import { getBackendClassId, getBackendUploadId, waitForUpload } from "./course-sync.js";
-import { updateClass } from "./classes.js";
+import { classHasCapability, updateClass } from "./classes.js";
 import {
   getUploadsApi,
   uploadFileApi,
@@ -10,7 +10,8 @@ import {
   getUploadDetailApi,
   deleteUploadApi,
   retryUploadApi,
-  getSyllabusApi
+  getSyllabusApi,
+  updateResourcePublicationApi
 } from "./api.js";
 
 const ACCEPTED_EXTENSIONS = new Set(["pdf", "docx", "pptx", "txt", "md", "png", "jpg", "jpeg", "mp4", "webm", "mov", "mp3", "m4a", "wav"]);
@@ -95,7 +96,7 @@ export function createLocalUpload(file) {
   };
 }
 
-export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRemoved }) {
+export async function renderLibraryTab({ root, klass, currentUserId = null, onUploadsAdded, onUploadRemoved }) {
   // SQLite APIs use the local workspace owner and do not require a bearer token.
   let syllabusData = null;
   const backendClassId = getBackendClassId(klass);
@@ -118,6 +119,10 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
           status: item.status || "ready",
           progress: item.processing_progress ?? 100,
           createdAt: item.created_at || new Date().toISOString(),
+          resourceScope: item.resource_scope || "class_owned",
+          createdBy: item.created_by || null,
+          publicationState: item.publication_state || "published",
+          releaseAt: item.release_at || null,
           isRemote: true
         }));
         const mappedIds = new Set(remoteList.map((item) => item.id));
@@ -186,7 +191,7 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
           </div>
         </section>
       ` : ""}
-      <div class="upload-zone-wrapper">
+      ${classHasCapability(klass, "create") ? `<div class="upload-zone-wrapper">
         <label class="upload-zone" for="upload-input">
           <span class="upload-zone-icon">${icon("upload", { size: 26 })}</span>
           <strong>Drop files here or <span class="browse">browse</span></strong>
@@ -200,7 +205,7 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
             ${icon("pencil", { size: 16 })} Paste text notes
           </button>
         </div>
-      </div>
+      </div>` : `<div class="account-status-banner guest-banner"><div><strong>Read-only class access</strong><span>You can study and tutor from released class materials. A class manager can grant permission to add shared resources.</span></div></div>`}
       ${!backendClassId ? `
         <div class="account-status-banner guest-banner">
           ${icon("alert", { size: 20 })}
@@ -255,26 +260,34 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
       return;
     }
 
-    list.innerHTML = visible.map((upload) => `
+    list.innerHTML = visible.map((upload) => {
+      const isAuthor = upload.createdBy && String(upload.createdBy) === String(currentUserId);
+      const canEdit = klass.isOwner || (isAuthor && classHasCapability(klass, "edit"));
+      const canDelete = klass.isOwner || (isAuthor && classHasCapability(klass, "delete"));
+      const canPublish = klass.isOwner || classHasCapability(klass, "manage_permissions")
+        || (isAuthor && classHasCapability(klass, "create"));
+      return `
       <li>
         <span class="kind-icon" data-kind="${escapeHtml(upload.kind)}">${icon(KIND_ICONS[upload.kind] || "file")}</span>
         <span class="row-main">
           <button class="file-name" type="button" data-preview="${escapeHtml(upload.id)}" title="Preview ${escapeHtml(upload.name)}">${escapeHtml(upload.name)}</button>
           <span class="row-meta">${escapeHtml(upload.kind)}${upload.isSample ? " - Built-in sample content" : ` - ${formatBytes(upload.size || 0)} - added ${formatDate(upload.createdAt)}`}</span>
           ${upload.summary ? `<span class="row-summary">${escapeHtml(upload.summary)}</span>` : ""}
+          ${upload.resourceScope === "student_contribution" ? `<span class="permission-badge">Shared contribution</span>` : ""}
+          ${upload.publicationState && upload.resourceScope !== "personal" ? `<span class="permission-badge" data-publication="${escapeHtml(upload.publicationState)}">${upload.publicationState === "scheduled" ? `Scheduled for ${escapeHtml(formatDate(upload.releaseAt))}` : escapeHtml(upload.publicationState)}</span>` : ""}
           ${upload.sources?.length ? `<span class="source-chips">${upload.sources.map((source) => `<span>${escapeHtml(source)}</span>`).join("")}</span>` : ""}
           ${(upload.progress < 100 && upload.status !== "failed") ? `<span class="progress" aria-label="${escapeHtml(upload.status)} ${upload.progress}% complete"><span style="width: ${upload.progress}%"></span></span>` : ""}
         </span>
         <span class="pill" data-tone="${STATUS_TONES[upload.status] || ""}"><strong>${escapeHtml(upload.status)}</strong></span>
         <span class="row-actions">
-          ${upload.status === "failed" ? `<button class="btn btn-secondary btn-small" type="button" data-retry="${escapeHtml(upload.id)}">${icon("sparkles", { size: 16 })} Retry</button>` : ""}
+          ${upload.status === "failed" && canEdit ? `<button class="btn btn-secondary btn-small" type="button" data-retry="${escapeHtml(upload.id)}">${icon("sparkles", { size: 16 })} Retry</button>` : ""}
           <button class="btn btn-secondary btn-small" type="button" data-preview="${escapeHtml(upload.id)}">${icon("file", { size: 16 })} View</button>
-          <button class="btn btn-ghost btn-icon" type="button" data-remove="${upload.id}" aria-label="Remove ${escapeHtml(upload.name)}">
-            ${icon("trash", { size: 18 })}
-          </button>
+          ${canDelete ? `<button class="btn btn-ghost btn-icon" type="button" data-remove="${escapeHtml(upload.id)}" aria-label="Remove ${escapeHtml(upload.name)}">${icon("trash", { size: 18 })}</button>` : ""}
         </span>
+        ${upload.isRemote && upload.resourceScope !== "personal" && canPublish ? `<details class="resource-release-control"><summary>Manage release</summary><form data-upload-publication="${escapeHtml(upload.id)}"><label class="field"><span>Visibility</span><select name="state"><option value="draft" ${upload.publicationState === "draft" ? "selected" : ""}>Draft</option><option value="published" ${upload.publicationState === "published" ? "selected" : ""}>Published</option><option value="scheduled" ${upload.publicationState === "scheduled" ? "selected" : ""}>Schedule release</option></select></label><label class="field" data-release-date-wrap ${upload.publicationState === "scheduled" ? "" : "hidden"}><span>Release date and time</span><input name="release_at" type="datetime-local" value="${escapeHtml(toLocalDateTime(upload.releaseAt))}" /></label><button class="btn btn-secondary btn-small" type="submit">Save release</button></form></details>` : ""}
       </li>
-    `).join("");
+    `;
+    }).join("");
   }
 
   async function addFiles(files) {
@@ -308,6 +321,10 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
             status: res.status || "processing",
             progress: res.processing_progress ?? 0,
             createdAt: res.created_at || new Date().toISOString(),
+            resourceScope: res.resource_scope || "class_owned",
+            createdBy: res.created_by || null,
+            publicationState: res.publication_state || "published",
+            releaseAt: res.release_at || null,
             isRemote: true
           };
           nextUploads.push(uploadEntry);
@@ -358,7 +375,7 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
     }
   }
 
-  pasteBtn.addEventListener("click", async () => {
+  pasteBtn?.addEventListener("click", async () => {
     const text = await openDialog({
       title: "Paste notes or text",
       message: "Add lecture notes, reading excerpts, or a syllabus outline.",
@@ -381,6 +398,10 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
           status: res.status || "processing",
           progress: res.processing_progress ?? 0,
           createdAt: res.created_at || new Date().toISOString(),
+          resourceScope: res.resource_scope || "class_owned",
+          createdBy: res.created_by || null,
+          publicationState: res.publication_state || "published",
+          releaseAt: res.release_at || null,
           content: text,
           isRemote: true
         };
@@ -483,21 +504,61 @@ export async function renderLibraryTab({ root, klass, onUploadsAdded, onUploadRe
     }
   });
 
-  zone.addEventListener("dragover", (event) => {
+  list.addEventListener("change", (event) => {
+    if (!event.target.matches('[data-upload-publication] [name="state"]')) return;
+    const form = event.target.closest("[data-upload-publication]");
+    form.querySelector("[data-release-date-wrap]").hidden = event.target.value !== "scheduled";
+  });
+
+  list.addEventListener("submit", async (event) => {
+    const form = event.target.closest("[data-upload-publication]");
+    if (!form) return;
+    event.preventDefault();
+    const upload = klass.uploads.find((item) => item.id === form.dataset.uploadPublication);
+    if (!upload) return;
+    const state = form.querySelector('[name="state"]').value;
+    const localDate = form.querySelector('[name="release_at"]').value;
+    if (state === "scheduled" && !localDate) {
+      toast("Choose a release date and time.", { tone: "error" });
+      return;
+    }
+    try {
+      const response = await updateResourcePublicationApi("uploads", upload.backendId || upload.id, {
+        state,
+        releaseAt: state === "scheduled" ? new Date(localDate).toISOString() : null
+      });
+      upload.publicationState = response.publication_state || state;
+      upload.releaseAt = response.release_at || (state === "scheduled" ? new Date(localDate).toISOString() : null);
+      await updateClass(klass.id, { uploads: klass.uploads });
+      toast(state === "scheduled" ? "Release scheduled." : `Course material ${state}.`);
+      renderUploads();
+    } catch (error) {
+      toast(`Could not update release settings: ${error.message}`, { tone: "error" });
+    }
+  });
+
+  zone?.addEventListener("dragover", (event) => {
     event.preventDefault();
     zone.classList.add("is-dragging");
   });
-  zone.addEventListener("dragleave", () => zone.classList.remove("is-dragging"));
-  zone.addEventListener("drop", (event) => {
+  zone?.addEventListener("dragleave", () => zone.classList.remove("is-dragging"));
+  zone?.addEventListener("drop", (event) => {
     event.preventDefault();
     zone.classList.remove("is-dragging");
     addFiles(event.dataTransfer.files);
   });
-  input.addEventListener("change", () => {
+  input?.addEventListener("change", () => {
     addFiles(input.files);
     input.value = "";
   });
 
   renderFilters();
   renderUploads();
+}
+
+function toLocalDateTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return "";
+  return new Date(date.valueOf() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }

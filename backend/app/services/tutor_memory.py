@@ -11,9 +11,9 @@ from uuid import UUID, uuid4
 from google import genai
 from google.genai import types
 
-from app.api.errors import ApiError
 from app.api.schemas import TutorMemoryState, TutorRecapContent
 from app.services.database import SQLiteConnection, SQLiteDatabase
+from app.services.class_access import class_access
 from app.services.gemini_content import _provider_response_schema
 
 MAX_TRANSCRIPT_CHARS = 40_000
@@ -90,10 +90,8 @@ class SessionTranscript:
 async def require_owned_scope(
     connection: SQLiteConnection, owner_id: str | UUID, class_id: str | UUID | None
 ) -> None:
-    if class_id is not None and not await connection.fetchval(
-        "SELECT id FROM course_classes WHERE id = ?1 AND owner_id = ?2", class_id, owner_id
-    ):
-        raise ApiError(404, "not_found", "The requested resource was not found.")
+    if class_id is not None:
+        await class_access(connection, class_id, owner_id, required="read")
 
 
 class TutorMemoryService:

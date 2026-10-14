@@ -3,14 +3,16 @@ import { renderQuizPlayer } from "./quiz-player.js";
 import { renderFlashcards } from "./flashcards.js";
 import { escapeHtml, toast } from "./ui.js";
 import { openMaterialViewer } from "./material-viewer.js";
-import { updateClass } from "./classes.js";
+import { classHasCapability, updateClass } from "./classes.js";
 import { getBackendClassId, getBackendUploadId, prepareStudySources, waitForStudyMaterial } from "./course-sync.js";
 import {
   getStudyMaterialsApi,
+  getMyStudyMaterialsApi,
   getUploadsApi,
   createStudyMaterialApi,
   getStudyMaterialDetailApi,
-  deleteStudyMaterialApi
+  deleteStudyMaterialApi,
+  updateResourcePublicationApi
 } from "./api.js";
 
 const TYPES = [
@@ -97,6 +99,10 @@ function formatRemoteMaterial(detail, klassId, uiTypeFallback, uploads = [], bac
     createdAt: detail.created_at || new Date().toISOString(),
     timeLimitMinutes: detail.options?.time_limit_minutes || (uiType === "Practice test" ? 15 : undefined),
     isRemote: true,
+    resourceScope: detail.resource_scope || "personal",
+    createdBy: detail.created_by || detail.owner_id || null,
+    publicationState: detail.publication_state || (detail.resource_scope === "personal" || !detail.resource_scope ? null : "published"),
+    releaseAt: detail.release_at || null,
     downloadUrls: detail.download_urls || {},
     instructions: detail.content?.instructions || "",
     sections,
@@ -154,8 +160,16 @@ function scoreableQuestions(material) {
   });
 }
 
-export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCompleted }) {
+export async function renderStudyTab({ root, klass, currentUserId = null, onMaterialAdded, onAttemptCompleted }) {
   const backendClassId = getBackendClassId(klass);
+  let personalSummaries = [];
+  if (currentUserId) {
+    try {
+      personalSummaries = await getMyStudyMaterialsApi();
+    } catch {
+      // Disconnected clients retain the existing local/class view.
+    }
+  }
   if (backendClassId) {
     try {
       const [materialResult, uploadResult] = await Promise.allSettled([
@@ -173,25 +187,64 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
           status: upload.status,
           progress: upload.processing_progress,
           size: upload.file_size_bytes,
+          resourceScope: upload.resource_scope || "class_owned",
+          createdBy: upload.created_by || null,
+          publicationState: upload.publication_state || "published",
+          releaseAt: upload.release_at || null,
           isRemote: true
         }));
         const mappedIds = new Set(remoteUploads.map((upload) => upload.id));
         klass.uploads = [...remoteUploads, ...klass.uploads.filter((upload) => !mappedIds.has(upload.id))];
+      } else {
+        // Do not display stale remote records when current authorization could not be checked.
+        klass.uploads = klass.uploads.filter((upload) => !getBackendUploadId(upload));
       }
-      const remoteMaterials = materialResult.status === "fulfilled" ? materialResult.value : klass.materials.filter((material) => material.isRemote);
+      const classMaterials = materialResult.status === "fulfilled" ? materialResult.value : [];
+      const classMaterialIds = new Set(classMaterials.map((material) => material.id));
+      const remoteMaterials = [
+        ...classMaterials,
+        ...personalSummaries.filter((material) => !classMaterialIds.has(material.id))
+      ];
       const existing = new Map(klass.materials.map((material) => [material.id, material]));
       const merged = remoteMaterials.map((summary) => {
         const cached = existing.get(summary.id);
-        return materialResult.status === "fulfilled"
-          ? formatRemoteMaterial({ ...summary, download_urls: cached?.downloadUrls, content: cached?.status === "ready" ? cached : null }, klass.id, undefined, klass.uploads, backendClassId)
-          : summary;
+        return formatRemoteMaterial(
+          {
+            ...summary,
+            download_urls: cached?.downloadUrls,
+            content: cached?.status === "ready" ? cached : null
+          },
+          klass.id,
+          undefined,
+          klass.uploads,
+          summary.resource_scope === "personal" ? null : backendClassId,
+        );
       });
       const localMaterials = klass.materials.filter((material) => !material.isRemote);
       klass.materials = [...localMaterials, ...merged];
-      await updateClass(klass.id, { uploads: klass.uploads, materials: klass.materials });
+      // Personal server resources are fetched by owner and never persisted in the
+      // shared browser cache, so they remain available after leaving their source class.
+      await updateClass(klass.id, {
+        uploads: klass.uploads,
+        materials: klass.materials.filter((material) => material.resourceScope !== "personal")
+      });
     } catch (e) {
       console.warn("Could not sync remote study materials:", e);
     }
+  } else if (personalSummaries.length) {
+    const existing = new Map(klass.materials.map((material) => [material.id, material]));
+    const personalMaterials = personalSummaries.map((summary) => {
+      const cached = existing.get(summary.id);
+      return formatRemoteMaterial(
+        { ...summary, download_urls: cached?.downloadUrls, content: cached?.status === "ready" ? cached : null },
+        klass.id,
+        undefined,
+        klass.uploads,
+        null,
+      );
+    });
+    const personalIds = new Set(personalMaterials.map((material) => material.id));
+    klass.materials = [...klass.materials.filter((material) => !personalIds.has(material.id)), ...personalMaterials];
   }
 
   // Retain choices when returning from a saved quiz or flashcard player.
@@ -246,6 +299,11 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
                 </label>`).join("")}</div>` : ""}
               <p id="source-selection-count" class="field-hint" role="status" aria-live="polite"></p>
             </fieldset>
+            <fieldset class="field-block study-destination-picker">
+              <legend>Save this study set</legend>
+              <label class="destination-option"><input type="radio" name="destination" value="personal" checked /><span><strong>Keep it personal</strong><small>Only you can see this quiz or study set.</small></span></label>
+              ${classHasCapability(klass, "create") ? `<label class="destination-option"><input type="radio" name="destination" value="class_contribution" /><span><strong>Share with this class</strong><small>Starts as a draft. Publish it when it is ready for classmates.</small></span></label>` : ""}
+            </fieldset>
             <div class="field-grid">
               <div class="field-block">
                 <label for="generate-count" id="generate-count-label">Question count</label>
@@ -260,6 +318,11 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
                   <option value="harder">Challenging</option>
                 </select>
               </div>
+            </div>
+            <div class="field-block" id="generation-instructions-block">
+              <label for="generation-instructions">Additional instructions (optional)</label>
+              <textarea id="generation-instructions" name="additional_instructions" rows="6" maxlength="2000" aria-describedby="generation-instructions-help" placeholder="Focus on chapters 3–5. Emphasize application questions rather than definitions."></textarea>
+              <p class="field-hint" id="generation-instructions-help">Guide quiz or exam topics and style. Generated questions remain grounded in the selected course materials.</p>
             </div>
           </div>
           <button id="generate-btn" class="btn btn-primary generate-submit" type="submit" ${hasUploads ? "" : "disabled"}>
@@ -291,11 +354,17 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
     const generationStatus = root.querySelector("#generation-status");
     const sourcePicker = root.querySelector("#study-source-picker");
     const sourceCount = root.querySelector("#source-selection-count");
+    const instructionsBlock = root.querySelector("#generation-instructions-block");
     let generating = false;
+    function updateTypeFields(uiType) {
+      root.querySelector("#generate-count-label").textContent = uiType === "Study guide"
+        ? "Section count" : uiType === "Flashcards" ? "Card count" : "Question count";
+      instructionsBlock.hidden = !["Quiz", "Practice test"].includes(uiType);
+    }
+    updateTypeFields("Quiz");
     form.addEventListener("change", (event) => {
       if (event.target.name !== "type") return;
-      root.querySelector("#generate-count-label").textContent = event.target.value === "Study guide"
-        ? "Section count" : event.target.value === "Flashcards" ? "Card count" : "Question count";
+      updateTypeFields(event.target.value);
     });
 
     function updateSourceSelection() {
@@ -342,6 +411,11 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
         const isFlashcards = material.type === "Flashcards";
         const canPlay = isAssessment || isFlashcards;
         const title = material.title || material.type || "Study material";
+        const isAuthor = material.createdBy && String(material.createdBy) === String(currentUserId);
+        const canDelete = (material.resourceScope === "personal" && isAuthor)
+          || klass.isOwner || (isAuthor && classHasCapability(klass, "delete"));
+        const canPublish = klass.isOwner || classHasCapability(klass, "manage_permissions")
+          || (isAuthor && classHasCapability(klass, "create"));
         const prompts = material.items?.map((item) => item.prompt).filter(Boolean)
           || questions.map((question) => typeof question === "string" ? question : question.prompt).filter(Boolean);
 
@@ -356,6 +430,7 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
             </header>
             <div class="material-badges">
               ${material.isSample ? `<span class="sample-badge">Sample material</span>` : `<span class="ai-label">${material.isRemote ? `AI-generated &middot; ${escapeHtml(material.status || "ready")}` : "Local draft"}</span>`}
+              ${material.resourceScope === "personal" ? `<span class="permission-badge">Personal</span>` : material.publicationState ? `<span class="permission-badge" data-publication="${escapeHtml(material.publicationState)}">${material.publicationState === "scheduled" ? `Scheduled for ${escapeHtml(formatDate(material.releaseAt))}` : escapeHtml(material.publicationState)}</span>` : ""}
               ${lastAttempt ? `<span class="row-meta">Last score: <strong>${lastAttempt.scorePercent}%</strong> &middot; ${(material.attempts || []).length} ${(material.attempts || []).length === 1 ? "attempt" : "attempts"}</span>` : ""}
             </div>
             <footer>
@@ -364,11 +439,17 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
                 <button class="btn ${canPlay ? "btn-primary" : "btn-secondary"} material-open" type="button" data-open-material="${escapeHtml(material.id)}">
                   ${isFlashcards ? "Study cards" : isAssessment ? "Start" : "Open"}
                 </button>
-                <button class="btn btn-ghost btn-icon" type="button" data-delete-material="${escapeHtml(material.id)}" aria-label="Delete material">
-                  ${icon("trash", { size: 16 })}
-                </button>
+                ${material.isRemote && canDelete ? `<button class="btn btn-ghost btn-icon" type="button" data-delete-material="${escapeHtml(material.id)}" aria-label="Delete material">${icon("trash", { size: 16 })}</button>` : ""}
               </div>
             </footer>
+            ${material.isRemote && material.resourceScope !== "personal" && canPublish ? `
+              <details class="resource-release-control"><summary>Manage release</summary>
+                <form data-material-publication="${escapeHtml(material.id)}">
+                  <label class="field"><span>Visibility</span><select name="state"><option value="draft" ${material.publicationState === "draft" ? "selected" : ""}>Draft</option><option value="published" ${material.publicationState === "published" ? "selected" : ""}>Published</option><option value="scheduled" ${material.publicationState === "scheduled" ? "selected" : ""}>Schedule release</option></select></label>
+                  <label class="field" data-release-date-wrap ${material.publicationState === "scheduled" ? "" : "hidden"}><span>Release date and time</span><input name="release_at" type="datetime-local" value="${escapeHtml(toLocalDateTime(material.releaseAt))}" /></label>
+                  <button class="btn btn-secondary btn-small" type="submit">Save release</button>
+                </form>
+              </details>` : ""}
             ${prompts.length ? `<ul class="preview-list">${prompts.slice(0, 2).map((prompt) => `<li>${escapeHtml(prompt)}</li>`).join("")}</ul>` : ""}
             ${material.sources?.length ? `<div class="source-chips">${material.sources.map((source) => `<span>${escapeHtml(source)}</span>`).join("")}</div>` : ""}
           </article>
@@ -388,6 +469,11 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
         return;
       }
       const difficulty = data.get("difficulty") || "mixed";
+      const additionalInstructions = ["Quiz", "Practice test"].includes(uiType)
+        ? String(data.get("additional_instructions") || "").trim()
+        : "";
+      const destination = data.get("destination") === "class_contribution" && classHasCapability(klass, "create")
+        ? "class_contribution" : "personal";
       const selectedUploadIds = data.getAll("source_upload");
       const controller = new AbortController();
       const stopWaiting = () => controller.abort();
@@ -414,7 +500,9 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
             count,
             difficulty,
             time_limit_minutes: uiType === "Practice test" ? defaultPracticeTestTimeLimit(count) : undefined
-          }
+          },
+          additionalInstructions,
+          destination
         });
         // Persist the pending job so reloads and polling failures do not lose it.
         await onMaterialAdded(formatRemoteMaterial(summary, klass.id, uiType, klass.uploads, backendClassId));
@@ -461,7 +549,9 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
           }
         }
         klass.materials = klass.materials.filter((m) => m.id !== deleteId);
-        await updateClass(klass.id, { materials: klass.materials });
+        await updateClass(klass.id, {
+          materials: klass.materials.filter((item) => item.resourceScope !== "personal")
+        });
         toast("Material deleted.");
         renderMaterials();
         return;
@@ -477,7 +567,9 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
         try {
           const detail = await getStudyMaterialDetailApi(materialId);
           Object.assign(material, formatRemoteMaterial(detail, klass.id, material.type, klass.uploads, backendClassId));
-          await updateClass(klass.id, { materials: klass.materials });
+          await updateClass(klass.id, {
+            materials: klass.materials.filter((item) => item.resourceScope !== "personal")
+          });
           renderMaterials();
         } catch (e) {
           toast(e.message, { tone: "error" });
@@ -522,8 +614,47 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
       });
     });
 
+    list.addEventListener("change", (event) => {
+      if (!event.target.matches?.('[data-material-publication] [name="state"]')) return;
+      const form = event.target.closest("[data-material-publication]");
+      form.querySelector("[data-release-date-wrap]").hidden = event.target.value !== "scheduled";
+    });
+    list.addEventListener("submit", async (event) => {
+      const form = event.target.closest?.("[data-material-publication]");
+      if (!form) return;
+      event.preventDefault();
+      const material = klass.materials.find((item) => item.id === form.dataset.materialPublication);
+      if (!material) return;
+      const state = form.querySelector('[name="state"]').value;
+      const localDate = form.querySelector('[name="release_at"]').value;
+      if (state === "scheduled" && !localDate) {
+        toast("Choose a release date and time.", { tone: "error" });
+        return;
+      }
+      try {
+        const response = await updateResourcePublicationApi("study_materials", material.id, {
+          state,
+          releaseAt: state === "scheduled" ? new Date(localDate).toISOString() : null
+        });
+        material.publicationState = response.publication_state || state;
+        material.releaseAt = response.release_at || (state === "scheduled" ? new Date(localDate).toISOString() : null);
+        toast(state === "scheduled" ? "Release scheduled." : `Study material ${state}.`);
+        renderMaterials();
+      } catch (error) {
+        toast(`Could not update release settings: ${error.message}`, { tone: "error" });
+      }
+    });
+
     renderMaterials();
   }
 
   renderStudyView();
+}
+
+function toLocalDateTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return "";
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.valueOf() - offset).toISOString().slice(0, 16);
 }
