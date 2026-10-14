@@ -67,7 +67,7 @@ def main() -> None:
         binary.parent.mkdir(parents=True, exist_ok=True)
         binary.write_bytes(data)
         binary.chmod(0o755)
-    settings = Settings(study_pdf_executable=str(binary), study_pdf_timeout_seconds=120)
+    settings = Settings(study_pdf_executable=str(binary))
     upload_id = uuid4()
     latex = render_guide_latex(
         title="Study guide",

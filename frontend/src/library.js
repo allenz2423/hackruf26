@@ -251,7 +251,7 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
           ${icon("check", { size: 20 })}
           <div>
             <strong>Saved to your account</strong>
-            <span>New uploads are saved to your class library. Any older browser-only files synchronize when you start class tutoring or generate a study set.</span>
+            <span>New uploads are saved to your class library. Study generation, reasoning checks, and quiz-review tutoring send authorized course excerpts to this deployment's configured AI provider. Live tutoring uses Gemini Live; scanned PDFs and lecture recordings may use Gemini Files. Older browser-only files synchronize when you start class tutoring or generate a study set.</span>
           </div>
         </div>
       `}
@@ -643,8 +643,10 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
           }
         }
 
+        const isAuthor = upload.createdBy && String(upload.createdBy) === String(currentUserId);
+        const canRetryProcessing = klass.isOwner || (isAuthor && classHasCapability(klass, "edit"));
         import("./file-preview.js")
-          .then(({ openUploadPreview }) => openUploadPreview(upload))
+          .then(({ openUploadPreview }) => openUploadPreview({ ...upload, canRetryProcessing }))
           .catch(() => toast("The file preview could not be opened. Try reloading the page.", { tone: "error" }));
       }
       return;

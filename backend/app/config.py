@@ -58,7 +58,9 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.8-live"
     gemini_text_model: str = "gemini-3.8-flash"
     gemini_timeout_seconds: float = 10.0
-    gemini_content_timeout_seconds: float = 600.0
+    openai_compatible_base_url: str | None = None
+    openai_compatible_api_key: SecretStr | None = None
+    openai_compatible_model: str | None = None
     live_session_rate_limit: int = 5
     live_session_rate_window_seconds: int = 60
     live_review_timeout_seconds: float = 60.0
@@ -78,7 +80,6 @@ class Settings(BaseSettings):
     study_tutor_rate_limit: int = 30
     study_tutor_rate_window_seconds: int = 60
     study_pdf_executable: str = "tectonic"
-    study_pdf_timeout_seconds: float = 60.0
     auth_rate_limit: int = 10
     auth_rate_window_seconds: int = 300
     session_ttl_days: int = 30
@@ -123,7 +124,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_limits_and_deployment(self) -> Settings:
-        if self.gemini_timeout_seconds <= 0 or self.gemini_content_timeout_seconds <= 0:
+        if self.gemini_timeout_seconds <= 0:
             raise ValueError("Gemini timeouts must be greater than zero.")
         if self.live_session_rate_limit < 1 or self.live_session_rate_window_seconds < 1:
             raise ValueError("Live session rate limit and window must both be positive.")
@@ -141,10 +142,8 @@ class Settings(BaseSettings):
             raise ValueError("Generation rate limit and window must both be positive.")
         if self.study_tutor_rate_limit < 1 or self.study_tutor_rate_window_seconds < 1:
             raise ValueError("Study tutor rate limit and window must both be positive.")
-        if not self.study_pdf_executable.strip() or not 1 <= self.study_pdf_timeout_seconds <= 120:
-            raise ValueError(
-                "Set STUDY_PDF_EXECUTABLE and a STUDY_PDF_TIMEOUT_SECONDS between 1 and 120."
-            )
+        if not self.study_pdf_executable.strip():
+            raise ValueError("STUDY_PDF_EXECUTABLE cannot be empty.")
         if not 1 <= self.request_body_max_bytes <= 16_384:
             raise ValueError("REQUEST_BODY_MAX_BYTES must be between 1 and 16384.")
         if not 1_024 <= self.lean_request_max_bytes <= 131_072:
@@ -178,6 +177,18 @@ class Settings(BaseSettings):
             origins = self.allowed_origins
             if any(not origin.startswith("https://") for origin in origins):
                 raise ValueError("Production APP_ORIGINS must use HTTPS.")
+        compatible_provider_values = (
+            self.openai_compatible_base_url,
+            self.openai_compatible_api_key,
+            self.openai_compatible_model,
+        )
+        if any(value is not None for value in compatible_provider_values) and not all(
+            value is not None for value in compatible_provider_values
+        ):
+            raise ValueError(
+                "OPENAI_COMPATIBLE_BASE_URL, OPENAI_COMPATIBLE_API_KEY, and "
+                "OPENAI_COMPATIBLE_MODEL must be configured together."
+            )
         return self
 
     @property

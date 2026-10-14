@@ -12,13 +12,22 @@ LIVE_API_VERSION = "v1beta"
 
 
 def create_genai_client(
-    settings: Settings, *, timeout_seconds: float | None = None, api_version: str = API_VERSION
+    settings: Settings,
+    *,
+    timeout_seconds: float | None = None,
+    api_version: str = API_VERSION,
+    no_timeout: bool = False,
 ) -> genai.Client:
-    """Create a server-only SDK client with an explicit network timeout."""
+    """Create a server-only SDK client, optionally without a request deadline."""
+    timeout_ms = (
+        None
+        if no_timeout
+        else int((timeout_seconds or settings.gemini_timeout_seconds) * 1000)
+    )
     return genai.Client(
         api_key=settings.require_gemini_key(),
         http_options=types.HttpOptions(
             api_version=api_version,
-            timeout=int((timeout_seconds or settings.gemini_timeout_seconds) * 1000),
+            timeout=timeout_ms,
         ),
     )

@@ -6,6 +6,16 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     applied_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+-- One administrator-managed OpenAI-compatible text provider. The key is
+-- authenticated-encrypted with a key derived from FILE_URL_SIGNING_SECRET.
+CREATE TABLE IF NOT EXISTS ai_provider_settings (
+    id                  INTEGER PRIMARY KEY CHECK (id = 1),
+    base_url            TEXT NOT NULL,
+    model               TEXT NOT NULL,
+    encrypted_api_key   TEXT,
+    updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 CREATE TABLE IF NOT EXISTS course_classes (
     id          TEXT PRIMARY KEY,
     owner_id    TEXT NOT NULL,

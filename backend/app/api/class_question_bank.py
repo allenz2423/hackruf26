@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -21,7 +20,6 @@ from app.services.question_bank import create_generated_assessment
 
 logger = logging.getLogger("screen_tutor.question_bank")
 router = APIRouter(tags=["question-bank"])
-GENERATION_DEADLINE_SECONDS = 70
 
 
 class FeedbackReleaseRequest(BaseModel):
@@ -123,31 +121,18 @@ async def generate_class_assessment(
             )
 
     try:
-        result = await asyncio.wait_for(
-            _run_generation(
-                db,
-                class_id=str(class_id),
-                user_id=str(user_id),
-                payload=payload,
-                service=service,
-                model_name=request.app.state.settings.gemini_text_model,
+        result = await _run_generation(
+            db,
+            class_id=str(class_id),
+            user_id=str(user_id),
+            payload=payload,
+            service=service,
+            model_name=getattr(
+                service,
+                "model_name",
+                request.app.state.settings.gemini_text_model,
             ),
-            timeout=GENERATION_DEADLINE_SECONDS,
         )
-    except TimeoutError:
-        await db.execute(
-            "UPDATE class_question_generation_operations SET status='failed',"
-            "error_code='provider_timeout',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
-            "WHERE class_id=?1 AND requester_id=?2 AND operation_id=?3 AND status='running'",
-            class_id,
-            user_id,
-            payload.operation_id,
-        )
-        raise ApiError(
-            503,
-            "question_generation_timeout",
-            "Question generation timed out. Retry with a new operation ID.",
-        ) from None
     except ApiError as exc:
         await db.execute(
             "UPDATE class_question_generation_operations SET status='failed',error_code=?4,"

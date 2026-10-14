@@ -47,6 +47,39 @@ function findInlineDollarEnd(text, open) {
   return -1;
 }
 
+// A missing closing `$` can otherwise consume the rest of a prose paragraph and
+// close on a later, unrelated formula. Treat unmistakable prose as an unclosed
+// expression so the prose stays readable and later formulas can still render.
+// Multi-letter names remain valid inside groups (for example `x_{max}` and
+// `\\text{kg}`), while ordinary words outside groups are not math notation.
+function looksLikeInlineMath(tex) {
+  let depth = 0;
+  for (let index = 0; index < tex.length; ) {
+    const char = tex[index];
+    if (char === "\\") {
+      index += 1;
+      if (/[A-Za-z]/.test(tex[index] || "")) {
+        while (/[A-Za-z]/.test(tex[index] || "")) index += 1;
+      } else if (index < tex.length) {
+        index += 1;
+      }
+      continue;
+    }
+    if (char === "{") depth += 1;
+    else if (char === "}") depth = Math.max(0, depth - 1);
+
+    if (depth === 0 && /[A-Za-z]/.test(char)) {
+      let end = index + 1;
+      while (/[A-Za-z]/.test(tex[end] || "")) end += 1;
+      if (end - index >= 4) return false;
+      index = end;
+      continue;
+    }
+    index += 1;
+  }
+  return true;
+}
+
 export function splitMath(text) {
   const source = String(text ?? "");
   const segments = [];
@@ -96,7 +129,8 @@ export function splitMath(text) {
       }
     } else if (source[index] === "$") {
       const end = findInlineDollarEnd(source, index);
-      if (end !== -1 && pushMath(source.slice(index, end + 1), source.slice(index + 1, end), false)) {
+      const tex = end === -1 ? "" : source.slice(index + 1, end);
+      if (end !== -1 && looksLikeInlineMath(tex) && pushMath(source.slice(index, end + 1), tex, false)) {
         index = end + 1;
       } else {
         plain += "$";

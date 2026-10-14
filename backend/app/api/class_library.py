@@ -59,7 +59,11 @@ from app.services.class_access import (
     require_resource_mutation,
 )
 from app.services.database import SQLiteConnection, SQLiteDatabase, json_value
-from app.services.gemini_content import MAX_NOTE_CONTEXT_CHARS, GeminiContentService
+from app.services.gemini_content import (
+    MAX_NOTE_CONTEXT_CHARS,
+    ContentGenerationFailure,
+    GeminiContentService,
+)
 from app.services.learning_scoring import (
     award_run_completion,
     materialize_released_evidence_for_run,
@@ -88,6 +92,32 @@ from app.services.study_files import StudyFileFailure, compiler_path, create_gui
 logger = logging.getLogger("screen_tutor.class_library")
 router = APIRouter(tags=["class-library"])
 
+
+def _provider_error_metadata(exc: Exception) -> tuple[int | None, str | None]:
+    """Return safe structured provider status fields without logging exception content."""
+    code = getattr(exc, "code", None)
+    if type(code) is not int:
+        code = None
+    status = getattr(exc, "status", None)
+    if not isinstance(status, str):
+        status = getattr(status, "name", None)
+    if not isinstance(status, str) or not re.fullmatch(r"[A-Z0-9_]{1,48}", status):
+        status = None
+    return code, status
+
+
+def _study_generation_failure_code(exc: Exception) -> str:
+    """Return a stable error identifier without retaining provider or student text."""
+    if isinstance(exc, ApiError):
+        code = exc.code
+    elif isinstance(exc, ContentGenerationFailure):
+        code = exc.code
+    elif isinstance(exc, TimeoutError):
+        code = "provider_timeout"
+    else:
+        code = "generation_failed"
+    return code if re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code) else "generation_failed"
+
 FILE_TYPES: dict[str, tuple[str, str]] = {
     ".pdf": ("application/pdf", "document"),
     ".docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "document"),
@@ -107,8 +137,6 @@ FILE_TYPES: dict[str, tuple[str, str]] = {
 LECTURE_KINDS = {"lecture_video", "lecture_audio"}
 NOTE_KINDS = {"notes", "document", "syllabus", "slides", "lecture_video", "lecture_audio"}
 ASSESSMENT_EXTENSIONS = {".pdf", ".docx", ".pptx", ".txt", ".md", ".png", ".jpg", ".jpeg"}
-SHARED_ASSESSMENT_GENERATION_DEADLINE_SECONDS = 70
-PRIVATE_ASSESSMENT_GENERATION_DEADLINE_SECONDS = 70
 
 
 async def _authorize(request: Request) -> tuple[UUID, SQLiteDatabase, Settings]:
@@ -1283,10 +1311,13 @@ async def _process_upload_job(
         if revision_id is not None:
             await create_default_document(application, upload_id)
     except Exception as exc:
+        provider_code, provider_status = _provider_error_metadata(exc)
         logger.error(
-            "upload_processing_failed upload_id=%s category=%s",
+            "upload_processing_failed upload_id=%s category=%s provider_code=%s provider_status=%s",
             upload_id,
             type(exc).__name__,
+            provider_code,
+            provider_status,
         )
         if row is None:
             return
@@ -1552,10 +1583,13 @@ async def _reprocess_upload_job(
         if revision_id is not None:
             await create_default_document(application, upload_id)
     except Exception as exc:
+        provider_code, provider_status = _provider_error_metadata(exc)
         logger.error(
-            "upload_reprocessing_failed upload_id=%s category=%s",
+            "upload_reprocessing_failed upload_id=%s category=%s provider_code=%s provider_status=%s",
             upload_id,
             type(exc).__name__,
+            provider_code,
+            provider_status,
         )
         if row is None:
             return
@@ -1850,6 +1884,7 @@ async def _create_material_job(
     )
     if database is None or service is None:
         return
+    generation_stage = "load_sources"
     try:
         material = await database.fetchrow(
             "SELECT m.id,m.class_id,m.origin_class_id,m.owner_id,m.created_by,m.resource_scope,"
@@ -1920,20 +1955,18 @@ async def _create_material_job(
             actor_id = material.get("created_by") or material.get("owner_id")
             if origin_class_id is None or actor_id is None:
                 raise RuntimeError("private assessment generation lost its source owner")
-            await asyncio.wait_for(
-                create_validated_private_assessment(
-                    database,
-                    material_id=str(material_id),
-                    class_id=str(origin_class_id),
-                    user_id=str(actor_id),
-                    material_kind=material["kind"],
-                    options=json_value(material["options"], {}),
-                    language=str(json_value(material["options"], {}).get("language") or "en"),
-                    additional_instructions=material.get("generation_instructions"),
-                    source_rows=sources,
-                    service=service,
-                ),
-                timeout=PRIVATE_ASSESSMENT_GENERATION_DEADLINE_SECONDS,
+            generation_stage = "assessment_generation"
+            await create_validated_private_assessment(
+                database,
+                material_id=str(material_id),
+                class_id=str(origin_class_id),
+                user_id=str(actor_id),
+                material_kind=material["kind"],
+                options=json_value(material["options"], {}),
+                language=str(json_value(material["options"], {}).get("language") or "en"),
+                additional_instructions=material.get("generation_instructions"),
+                source_rows=sources,
+                service=service,
             )
             return
         await database.execute(
@@ -1941,17 +1974,28 @@ async def _create_material_job(
             material_id,
             int(any(excerpt["truncated"] for excerpt in source_excerpts(sources, MAX_NOTE_CONTEXT_CHARS))),
         )
-        title, content = await asyncio.to_thread(
-            service.generate_material,
-            kind=material["kind"],
-            class_name=material["class_name"] or "Personal study materials",
-            scope=json_value(material["scope"], {}),
-            options=json_value(material["options"], {}),
-            additional_instructions=material["generation_instructions"],
-            sources=sources,
-        )
+        generation_stage = "material_generation"
+        for generation_attempt in range(2):
+            try:
+                title, content = await asyncio.to_thread(
+                    service.generate_material,
+                    kind=material["kind"],
+                    class_name=material["class_name"] or "Personal study materials",
+                    scope=json_value(material["scope"], {}),
+                    options=json_value(material["options"], {}),
+                    additional_instructions=material["generation_instructions"],
+                    sources=sources,
+                )
+                break
+            except ContentGenerationFailure as exc:
+                if (
+                    exc.code not in {"empty_model_response", "invalid_model_response"}
+                    or generation_attempt == 1
+                ):
+                    raise
         files = {}
         if material["kind"] == "study_guide":
+            generation_stage = "pdf_export"
             files = await asyncio.to_thread(
                 create_guide_files,
                 application.state.settings,
@@ -1961,6 +2005,7 @@ async def _create_material_job(
                 content=content,
                 sources=sources,
             )
+        generation_stage = "persist"
         async with database.acquire() as connection:
             async with connection.transaction():
                 completed = await connection.fetchrow(
@@ -1978,15 +2023,28 @@ async def _create_material_job(
                         [(material_id, format, data) for format, data in files.items()],
                     )
     except Exception as exc:
+        failure_code = _study_generation_failure_code(exc)
+        failure_detail = (
+            exc.diagnostic_code if isinstance(exc, ContentGenerationFailure) else None
+        )
+        provider_code, provider_status = _provider_error_metadata(exc)
         logger.error(
-            "study_generation_failed material_id=%s category=%s",
+            "study_generation_failed material_id=%s stage=%s category=%s error_code=%s "
+            "failure_detail=%s provider_code=%s provider_status=%s",
             material_id,
+            generation_stage,
             type(exc).__name__,
+            failure_code,
+            failure_detail,
+            provider_code,
+            provider_status,
         )
         await database.execute(
-            "UPDATE study_materials SET status = 'failed', failure_code = 'generation_failed', "
-            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1 AND status = 'generating'",
+            "UPDATE study_materials SET status = 'failed', failure_code = ?2, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+            "WHERE id = ?1 AND status = 'generating'",
             material_id,
+            failure_code,
         )
 
 
@@ -2123,31 +2181,18 @@ async def create_study_material(
             feedback_release_policy=feedback_release_policy,
         )
         try:
-            generated = await asyncio.wait_for(
-                create_generated_assessment(
-                    database,
-                    class_id=str(class_id),
-                    user_id=str(user_id),
-                    payload=request_payload,
-                    service=request.app.state.gemini_content_service,
-                    model_name=settings.gemini_text_model,
+            generated = await create_generated_assessment(
+                database,
+                class_id=str(class_id),
+                user_id=str(user_id),
+                payload=request_payload,
+                service=request.app.state.gemini_content_service,
+                model_name=getattr(
+                    request.app.state.gemini_content_service,
+                    "model_name",
+                    settings.gemini_text_model,
                 ),
-                timeout=SHARED_ASSESSMENT_GENERATION_DEADLINE_SECONDS,
             )
-        except TimeoutError:
-            await database.execute(
-                "UPDATE class_question_generation_operations SET status='failed',"
-                "error_code='provider_timeout',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
-                "WHERE class_id=?1 AND requester_id=?2 AND operation_id=?3 AND status='running'",
-                class_id,
-                user_id,
-                operation_id,
-            )
-            raise ApiError(
-                503,
-                "question_generation_timeout",
-                "Question generation timed out. Try again shortly.",
-            ) from None
         except ApiError as exc:
             await database.execute(
                 "UPDATE class_question_generation_operations SET status='failed',error_code=?4,"

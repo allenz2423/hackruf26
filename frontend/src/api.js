@@ -55,6 +55,28 @@ export function getSignupRequestsApi() {
   return apiFetch("/api/admin/signup-requests");
 }
 
+export function getAIProviderSettingsApi() {
+  return apiFetch("/api/admin/ai-provider");
+}
+
+export function updateAIProviderSettingsApi(settings) {
+  return apiFetch("/api/admin/ai-provider", {
+    method: "PUT",
+    body: JSON.stringify(settings)
+  });
+}
+
+export function resetAIProviderSettingsApi() {
+  return apiFetch("/api/admin/ai-provider", { method: "DELETE" });
+}
+
+export function testAIProviderSettingsApi() {
+  return apiFetch("/api/admin/ai-provider/test", {
+    method: "POST",
+    body: "{}"
+  });
+}
+
 export function approveSignupRequestApi(requestId) {
   return apiFetch(`/api/admin/signup-requests/${encodeURIComponent(requestId)}/approve`, {
     method: "POST",
@@ -545,8 +567,8 @@ export async function uploadTextApi(classId, text, kind = "notes", title = "Past
   });
 }
 
-export async function getUploadDetailApi(uploadId) {
-  return await apiFetch(`/api/uploads/${encodeURIComponent(uploadId)}`);
+export async function getUploadDetailApi(uploadId, signal) {
+  return await apiFetch(`/api/uploads/${encodeURIComponent(uploadId)}`, { signal });
 }
 
 export async function updateUploadApi(uploadId, data) {

@@ -34,6 +34,7 @@ _MATH_COMMANDS = set(
 frac dfrac tfrac sqrt sum prod int iint lim sin cos tan log ln exp min max
 alpha beta gamma delta epsilon varepsilon zeta eta theta vartheta iota kappa
 lambda mu nu xi pi varpi rho sigma tau upsilon phi varphi chi psi omega
+ circ
 Gamma Delta Theta Lambda Xi Pi Sigma Upsilon Phi Psi Omega
 times cdot div pm mp le leq ge geq ne neq approx equiv sim simeq propto
 in notin subset subseteq supset supseteq cup cap emptyset infty partial nabla
@@ -75,6 +76,13 @@ def _safe_math(value: str) -> bool:
                 return False
             index += len(match[0])
             continue
+        if depth == 0 and char.isascii() and char.isalpha():
+            word = re.match(r"[A-Za-z]+", value[index:])
+            assert word is not None
+            if len(word[0]) >= 4:
+                return False
+            index += len(word[0])
+            continue
         if char in "$%#&~" or (unicodedata.category(char).startswith("C") and char not in "\n\t"):
             return False
         if char == "{":
@@ -91,17 +99,23 @@ def _inline(value: str, render_math: bool = True) -> str:
     if not render_math:
         return escape_latex(value)
     parts = []
-    previous = 0
-    for match in _MATH_PATTERN.finditer(value):
-        parts.append(escape_latex(value[previous : match.start()]))
+    cursor = 0
+    while match := _MATH_PATTERN.search(value, cursor):
+        parts.append(escape_latex(value[cursor : match.start()]))
         math = next(group for group in match.groups() if group is not None)
         if _safe_math(math):
             display = match[1] is not None or match[2] is not None
             parts.append((r"\[" if display else r"\(") + math + (r"\]" if display else r"\)"))
+            cursor = match.end()
+        elif match[0].startswith("$") and not match[0].startswith("$$"):
+            # Leave this opening marker as text and rescan from the next dollar.
+            # That next marker may open a valid equation after a truncated one.
+            parts.append(escape_latex("$"))
+            cursor = match.start() + 1
         else:
             parts.append(escape_latex(match[0]))
-        previous = match.end()
-    parts.append(escape_latex(value[previous:]))
+            cursor = match.end()
+    parts.append(escape_latex(value[cursor:]))
     return "".join(parts)
 
 
@@ -251,8 +265,7 @@ def compile_guide_pdf(latex: str, settings: Settings, *, only_cached: bool = Tru
     executable = compiler_path(settings)
     if not executable:
         raise StudyFileFailure("Install Tectonic to create study-guide PDFs.")
-    if not _COMPILATION_LOCK.acquire(timeout=settings.study_pdf_timeout_seconds):
-        raise StudyFileFailure("PDF generation is busy. Try again shortly.")
+    _COMPILATION_LOCK.acquire()
     try:
         with tempfile.TemporaryDirectory(prefix="screen-tutor-guide-") as directory:
             source = Path(directory) / "guide.tex"
@@ -262,14 +275,13 @@ def compile_guide_pdf(latex: str, settings: Settings, *, only_cached: bool = Tru
                 command.append("--only-cached")
             command.append(str(source))
             if shutil.which("prlimit"):
-                command = ["prlimit", "--cpu=60", f"--fsize={_MAX_FILE_BYTES}", "--", *command]
+                command = ["prlimit", f"--fsize={_MAX_FILE_BYTES}", "--", *command]
             result = subprocess.run(
                 command,
                 cwd=directory,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=settings.study_pdf_timeout_seconds,
                 check=False,
             )
             pdf = Path(directory) / "guide.pdf"
@@ -279,7 +291,7 @@ def compile_guide_pdf(latex: str, settings: Settings, *, only_cached: bool = Tru
             if not data.startswith(b"%PDF-"):
                 raise StudyFileFailure("Study-guide PDF compilation failed.")
             return data
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except OSError as exc:
         raise StudyFileFailure("Study-guide PDF compilation failed.") from exc
     finally:
         _COMPILATION_LOCK.release()

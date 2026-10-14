@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
 from fastapi import BackgroundTasks
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pypdf import PdfWriter
 from starlette.requests import Request
 from starlette.responses import Response
@@ -21,6 +22,7 @@ from starlette.responses import Response
 from app.api.class_library import (
     _process_assessment_job,
     _process_upload_job,
+    _provider_error_metadata,
     _reprocess_upload_job,
     get_study_material,
     patch_upload,
@@ -119,6 +121,70 @@ class PdfExtractionTests(unittest.TestCase):
             text = self.service._extract_text(self.path, "notes", "application/pdf")
         self.assertTrue(text.startswith("[Page 1]\nDetailed original facts"))
         vision.assert_not_called()
+
+
+class PowerPointImageExtractionTests(unittest.TestCase):
+    def setUp(self):
+        self.service = GeminiContentService(None, settings())
+        self.path = Path("slides.pptx")
+        self.text_shape = SimpleNamespace(
+            has_text_frame=True,
+            text="The sample slide contains useful native text.",
+            shape_type=MSO_SHAPE_TYPE.TEXT_BOX,
+        )
+
+    def fake_presentation(self, mime_type):
+        image_shape = SimpleNamespace(
+            shape_type=MSO_SHAPE_TYPE.PICTURE,
+            image=SimpleNamespace(blob=b"fixture-image", content_type=mime_type),
+        )
+        return SimpleNamespace(slides=[SimpleNamespace(shapes=[self.text_shape, image_shape])])
+
+    def test_unsupported_vector_image_is_skipped_without_losing_slide_text(self):
+        with (
+            patch(
+                "app.services.gemini_content.Presentation",
+                return_value=self.fake_presentation("image/x-wmf"),
+            ),
+            patch.object(self.service, "_generate_plain") as describe_images,
+        ):
+            extracted = self.service._extract_text(self.path, "slides", "application/pptx")
+
+        self.assertIn("The sample slide contains useful native text.", extracted)
+        self.assertNotIn("[Slide image descriptions]", extracted)
+        describe_images.assert_not_called()
+
+    def test_supported_raster_image_still_gets_a_generated_description(self):
+        with (
+            patch(
+                "app.services.gemini_content.Presentation",
+                return_value=self.fake_presentation("image/png"),
+            ),
+            patch.object(
+                self.service, "_generate_plain", return_value="A labeled diagram."
+            ) as describe_images,
+        ):
+            extracted = self.service._extract_text(self.path, "slides", "application/pptx")
+
+        self.assertIn("The sample slide contains useful native text.", extracted)
+        self.assertIn("A labeled diagram.", extracted)
+        describe_images.assert_called_once()
+
+
+class ProviderErrorMetadataTests(unittest.TestCase):
+    def test_provider_log_fields_keep_status_but_exclude_error_content(self):
+        error = RuntimeError("private source text and request data")
+        error.code = 400
+        error.status = "INVALID_ARGUMENT"
+
+        self.assertEqual(_provider_error_metadata(error), (400, "INVALID_ARGUMENT"))
+
+    def test_provider_log_fields_reject_unbounded_or_unstructured_values(self):
+        error = RuntimeError("private source text")
+        error.code = "400"
+        error.status = "invalid argument: private text"
+
+        self.assertEqual(_provider_error_metadata(error), (None, None))
 
 
 class SourceLifecycleTests(unittest.IsolatedAsyncioTestCase):

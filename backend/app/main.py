@@ -34,6 +34,7 @@ from app.config import Settings, get_settings
 from app.middleware.request_context import RequestContextMiddleware
 from app.middleware.request_size import RequestSizeLimitMiddleware
 from app.security.rate_limit import InMemoryRateLimiter
+from app.services.ai_provider_settings import load_provider_config
 from app.services.concept_graph import (
     enqueue_missing_concept_extractions,
     process_queued_concept_extractions,
@@ -48,9 +49,11 @@ from app.services.learning_calibration import (
     enqueue_question_bank_replenishment,
     process_learning_calibration_jobs,
     process_question_bank_replenishment_jobs,
+    question_bank_replenishment_wait_seconds,
     recover_learning_calibration_jobs,
 )
 from app.services.live_sessions import GeminiLiveSessionService, LiveSessionTicketStore
+from app.services.openai_compatible import OpenAICompatibleClient
 from app.services.quiz_reasoning import QuizReasoningService
 from app.services.source_index import (
     MAX_BACKFILL_PER_START,
@@ -133,7 +136,12 @@ async def _run_learning_calibration_worker(application: FastAPI) -> None:
             except Exception:
                 logger.exception("learning_calibration_batch_failed")
                 processed = 0
-            await asyncio.sleep(2 if processed else 900)
+            delay = (
+                2.0
+                if processed
+                else await question_bank_replenishment_wait_seconds(database)
+            )
+            await asyncio.sleep(delay)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -149,7 +157,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         settings = settings_override or get_settings()
-        # Fail closed during startup. No endpoint is served with a missing API key.
+        # Gemini remains required for Live voice and provider-specific file processing.
         settings.require_gemini_key()
         application.state.settings = settings
         application.state.live_session_rate_limiter = InMemoryRateLimiter(
@@ -184,6 +192,7 @@ def create_app(
             settings.study_tutor_rate_window_seconds,
         )
         application.state.quiz_reasoning_rate_limiter = InMemoryRateLimiter(20, 60)
+        application.state.ai_provider_test_rate_limiter = InMemoryRateLimiter(5, 300)
 
         lean_proof_service = LeanProofService(settings)
         if settings.lean_tool_enabled:
@@ -199,6 +208,11 @@ def create_app(
             application.state.lean_proof_service = None
 
         application.state.database = await create_database(settings)
+        application.state.ai_provider_config = await load_provider_config(
+            application.state.database, settings
+        )
+        openai_client = OpenAICompatibleClient(application.state.ai_provider_config)
+        application.state.openai_compatible_client = openai_client
         await recover_interrupted_jobs(application.state.database)
         await recover_learning_calibration_jobs(application.state.database)
         application.state.private_storage = LocalPrivateStorage(settings)
@@ -208,11 +222,8 @@ def create_app(
 
         client = create_genai_client(settings, api_version=LIVE_API_VERSION)
         application.state.gemini_client = client
-        content_client = create_genai_client(
-            settings,
-            timeout_seconds=settings.gemini_content_timeout_seconds,
-        )
-        quiz_client = create_genai_client(settings, timeout_seconds=30)
+        content_client = create_genai_client(settings, no_timeout=True)
+        quiz_client = openai_client
         application.state.gemini_content_client = content_client
         application.state.quiz_reasoning_client = quiz_client
         application.state.quiz_reasoning_service = QuizReasoningService(
@@ -220,17 +231,18 @@ def create_app(
             settings.gemini_text_model,
         )
         application.state.gemini_content_service = GeminiContentService(
-            content_client,
+            openai_client,
             settings,
+            media_client=content_client,
         )
         application.state.study_tutor_service = StudyTutorService(
-            content_client,
-            settings.gemini_text_model,
+            openai_client,
+            "admin-configured",
         )
         application.state.tutor_memory_service = TutorMemoryService(
             application.state.database,
-            content_client,
-            settings.gemini_text_model,
+            openai_client,
+            "admin-configured",
         )
         application.state.live_session_service = GeminiLiveSessionService(
             client,
@@ -275,8 +287,6 @@ def create_app(
                 client.close()
             if content_client is not None:
                 content_client.close()
-            if quiz_client is not None:
-                quiz_client.close()
             await application.state.database.close()
 
     application = FastAPI(

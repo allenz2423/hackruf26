@@ -1253,6 +1253,83 @@ main {
   gap: var(--space-2);
 }
 
+.ai-provider-panel {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-5);
+}
+
+.ai-provider-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.ai-provider-heading h2,
+#signup-requests-title {
+  margin-bottom: var(--space-1);
+}
+
+.admin-provider-note {
+  max-width: 76ch;
+  color: var(--muted);
+  font-size: 0.94rem;
+}
+
+.ai-provider-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3) var(--space-4);
+}
+
+.ai-provider-form > label:not(.ai-provider-clear-key) {
+  display: grid;
+  gap: var(--space-1);
+  font-weight: 600;
+}
+
+.ai-provider-form input:not([type="checkbox"]) {
+  width: 100%;
+  min-width: 0;
+}
+
+.ai-provider-clear-key {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--muted);
+}
+
+.ai-provider-clear-key input {
+  accent-color: var(--accent);
+}
+
+.ai-provider-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+#ai-provider-message {
+  grid-column: 1 / -1;
+  min-height: 1.5em;
+}
+
+@media (max-width: 620px) {
+  .ai-provider-panel {
+    padding: var(--space-4);
+  }
+
+  .ai-provider-heading {
+    flex-direction: column;
+  }
+
+  .ai-provider-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 620px) {
   .admin-request {
     align-items: stretch;

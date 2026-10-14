@@ -23,6 +23,7 @@ from app.services.study_prompts import (
 
 MAX_BANK_SOURCE_CHUNKS = 32
 MAX_BANK_SOURCE_CHARS = 36_000
+PRIVATE_ASSESSMENT_VALIDATION_ATTEMPTS = 2
 QUESTION_BANK_VALIDATOR_VERSION = "jot-question-bank-validator-v2"
 FAMILY_STOPWORDS = {
     "a",
@@ -770,33 +771,44 @@ async def create_validated_private_assessment(
         {key: value for key, value in chunk.items() if key != "concept_id"}
         for chunk in source_context.values()
     ]
-    generated = await asyncio.to_thread(
-        service.generate_question_bank,
-        {
-            "kind": material_kind,
-            "requested_language": request_payload.language,
-            "optional_instructions": additional_instructions or "",
-            "assignments": assignments,
-            "source_chunks": public_sources,
-        },
-    )
-    reviewed = await asyncio.to_thread(
-        service.validate_question_bank,
-        {
-            "requested_language": request_payload.language,
-            "assignments": assignments,
-            "source_chunks": public_sources,
-            "candidates": [item.model_dump(mode="json") for item in generated.questions],
-            "prior_validated_items": [],
-        },
-    )
-    validated = _validate_ai_items(
-        generated.questions,
-        reviewed.reviews,
-        plan=plan,
-        source_context=source_context,
-        language=request_payload.language,
-    )
+    generation_context = {
+        "kind": material_kind,
+        "requested_language": request_payload.language,
+        "optional_instructions": additional_instructions or "",
+        "assignments": assignments,
+        "source_chunks": public_sources,
+    }
+    for validation_attempt in range(PRIVATE_ASSESSMENT_VALIDATION_ATTEMPTS):
+        generated = await asyncio.to_thread(service.generate_question_bank, generation_context)
+        reviewed = await asyncio.to_thread(
+            service.validate_question_bank,
+            {
+                "requested_language": request_payload.language,
+                "assignments": assignments,
+                "source_chunks": public_sources,
+                "candidates": [item.model_dump(mode="json") for item in generated.questions],
+                "prior_validated_items": [],
+            },
+        )
+        try:
+            validated = _validate_ai_items(
+                generated.questions,
+                reviewed.reviews,
+                plan=plan,
+                source_context=source_context,
+                language=request_payload.language,
+            )
+            break
+        except ApiError as exc:
+            retryable_validation_error = exc.code in {
+                "question_validation_failed",
+                "duplicate_question_family",
+            }
+            if (
+                not retryable_validation_error
+                or validation_attempt + 1 >= PRIVATE_ASSESSMENT_VALIDATION_ATTEMPTS
+            ):
+                raise
     content_questions = []
     actual_concept_ids = set(actual_topic_ids)
     for item in validated:

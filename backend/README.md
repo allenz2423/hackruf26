@@ -1,10 +1,10 @@
 # Screen Tutor backend
 
-FastAPI owns the Gemini API key, model configuration, Live sessions, and model tools, and serves the SQLite-backed class library API. The browser connects to a same-origin backend WebSocket. Screen frames and enabled microphone audio pass through the backend in memory and are forwarded to the provider; live media and conversation data are not logged or stored.
+FastAPI owns provider credentials, model configuration, Live sessions, and model tools, and serves the SQLite-backed class library API. Text generation uses the administrator-configured OpenAI-compatible Chat Completions route; Gemini remains configured for Live voice and Gemini Files media processing. The browser connects to a same-origin backend WebSocket. Screen frames and enabled microphone audio pass through the backend in memory and are forwarded to the provider; live media and conversation data are not logged or stored.
 
 ## Local setup
 
-1. Copy the root `.env.example` to `.env` and configure `GEMINI_API_KEY` and a random `FILE_URL_SIGNING_SECRET` with at least 32 characters. Set `GEMINI_TEXT_MODEL=gemini-3.8-flash` to override its default.
+1. Copy the root `.env.example` to `.env` and configure `GEMINI_API_KEY` and a random `FILE_URL_SIGNING_SECRET` with at least 32 characters. Gemini is used for Live voice and recorded-media/scanned-file processing. Configure the OpenAI-compatible base URL, API key, and model in `.env` or from **Admin → OpenAI-compatible route**; that route is used for text generation, quizzes, reasoning, and text tutoring.
 2. Keep the default `LOCAL_OWNER_ID` for a single local workspace, or replace it with another UUID if you need a separate SQLite owner namespace.
 3. Install Lean through `elan` if it is not already installed, then prepare the pinned Lean/Mathlib project. The proof checker uses the local `lake` executable; no container runtime is required.
 
@@ -39,7 +39,7 @@ Install the pinned local LaTeX engine and cache its template dependencies once:
 backend/.venv/bin/python backend/scripts/install-study-pdf.py
 ```
 
-The installer checks release checksums and places Tectonic under ignored `backend/.local/bin/`. Setup needs internet access; normal compilation uses cached packages offline. Alternatively install [Tectonic](https://tectonic-typesetting.github.io/en-US/install.html) yourself and set `STUDY_PDF_EXECUTABLE`. This runtime dependency is separate from Python requirements. `STUDY_PDF_TIMEOUT_SECONDS` defaults to 60.
+The installer checks release checksums and places Tectonic under ignored `backend/.local/bin/`. Setup needs internet access; normal compilation uses cached packages offline. Alternatively install [Tectonic](https://tectonic-typesetting.github.io/en-US/install.html) yourself and set `STUDY_PDF_EXECUTABLE`. This runtime dependency is separate from Python requirements. Study-material model calls and PDF compilation have no time deadline; PDF output size remains capped.
 
 Study guides save PDF and LaTeX files. Every processed upload also gets a balanced study companion, with concise/detailed variants available on request. Companion PDFs include full extracted source text in a separate appendix; originals remain untouched. SQLite stores document/file bytes and deletes them with their parent records. Back up SQLite alongside private originals.
 
@@ -136,9 +136,11 @@ The full request/response shapes, status codes, processing lifecycle, and data b
 
 The backend executes the configured calculation and optional `verify_lean_proof` tools directly inside the Live session. Annotation requests are sent to the browser for frame/geometry validation and local rendering, then the result is returned to the session. The Lean checker accepts a formal proposition and tactic proof body and returns `verified`, `rejected`, or `timed_out` with bounded diagnostics. Lean checks only the formal statement supplied by the provider.
 
-## Gemini models
+## Provider configuration
 
-`GEMINI_MODEL` defaults to `gemini-3.8-live` for low-latency tutor sessions. `GEMINI_TEXT_MODEL` defaults to `gemini-3.8-flash` for document extraction, lecture transcription, syllabus parsing, and structured study-material generation. They use separate API modes with the same server-only Gemini key; the Flash model does not provide the Live session.
+`OPENAI_COMPATIBLE_BASE_URL`, `OPENAI_COMPATIBLE_API_KEY`, and `OPENAI_COMPATIBLE_MODEL` must be set together when configured through the environment. Otherwise an administrator can save them from the Admin page; the database encrypts the key using a key derived from `FILE_URL_SIGNING_SECRET`, and it is never returned to the browser. Production URLs must use HTTPS. The backend appends `/chat/completions` to the base URL.
+
+`GEMINI_MODEL` defaults to `gemini-3.8-live` for low-latency tutor sessions. `GEMINI_TEXT_MODEL` defaults to `gemini-3.8-flash` for Gemini Files OCR of scanned PDFs and transcription of lecture audio/video. OpenAI-compatible Chat Completions routes do not provide a common Live or uploaded-file protocol, so those two workflows remain on Gemini.
 
 ## Limits and deployment notes
 

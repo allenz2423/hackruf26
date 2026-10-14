@@ -29,6 +29,7 @@ from app.services.learning_calibration import (
     enqueue_question_bank_replenishment,
     process_learning_calibration_jobs,
     process_question_bank_replenishment_jobs,
+    question_bank_replenishment_wait_seconds,
     recover_learning_calibration_jobs,
     refresh_calibration_flags,
 )
@@ -47,6 +48,7 @@ class FakeQuestionBankService:
         self.review_contexts: list[dict] = []
         self.block_review: tuple[threading.Event, threading.Event] | None = None
         self.invalid_source = False
+        self.reject_next_review = False
 
     def process_text(self, text: str, _kind: str) -> dict:
         return {
@@ -96,7 +98,9 @@ class FakeQuestionBankService:
                     rubric="Select the supported function.",
                     level=level,
                     language=context["requested_language"],
-                    assessment_target=independent_targets[index % len(independent_targets)],
+                    assessment_target=independent_targets[
+                        ((level - 1) * 2 + index % 2) % len(independent_targets)
+                    ],
                     concept_ids=[slot["concept_id"]],
                     source_chunk_revision_ids=[source_id],
                 )
@@ -112,11 +116,13 @@ class FakeQuestionBankService:
             started.set()
             if not release.wait(5):
                 raise RuntimeError("provider barrier timed out")
+        reject_this_review = self.reject_next_review
+        self.reject_next_review = False
         return QuestionBankAIReview(
             reviews=[
                 QuestionBankAIReviewItem(
                     index=index,
-                    source_supported=True,
+                    source_supported=not reject_this_review,
                     concept_aligned=True,
                     answer_correct=True,
                     distractors_valid=True,
@@ -300,9 +306,59 @@ class QuestionBankTests(unittest.TestCase):
             self.class_id,
             self.concept_id,
         )
-        self.assertEqual([row["count"] for row in bank_counts], [2, 2, 2, 2])
+        self.assertEqual(len(bank_counts), 1)
+        self.assertEqual(bank_counts[0]["count"], 2)
+        self.assertIn(bank_counts[0]["level"], {1, 2, 3, 4})
         self.assertEqual(len(self.fake.generation_contexts), 1)
-        self.assertEqual(len(self.fake.generation_contexts[0]["assignments"]), 8)
+        self.assertEqual(len(self.fake.generation_contexts[0]["assignments"]), 2)
+
+        # A later per-level job generates its own items instead of discarding
+        # the first level's work when one level is missing or rejected.
+        processed_next = self.client.portal.call(
+            process_question_bank_replenishment_jobs, self.client.app, 1
+        )
+        self.assertEqual(processed_next, 1)
+        self.assertEqual(len(self.fake.generation_contexts), 2)
+
+        # A duplicate queued job for a full level is a successful no-op and
+        # must still count as processed so the worker keeps draining the batch.
+        completed = self.client.portal.call(
+            self.db.fetchrow,
+            "SELECT id,class_id,concept_id,level,language,source_digest "
+            "FROM question_bank_replenishment_jobs WHERE class_id=?1 AND status='complete' "
+            "ORDER BY updated_at LIMIT 1",
+            self.class_id,
+        )
+        self.client.portal.call(
+            self.db.execute,
+            "UPDATE question_bank_replenishment_jobs SET status='complete' "
+            "WHERE class_id=?1 AND status='queued'",
+            self.class_id,
+        )
+        self.client.portal.call(
+            self.db.execute,
+            "UPDATE question_bank_replenishment_jobs SET status='queued',"
+            "available_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+            completed["id"],
+        )
+        processed_noop = self.client.portal.call(
+            process_question_bank_replenishment_jobs, self.client.app, 1
+        )
+        self.assertEqual(processed_noop, 1)
+        self.assertEqual(len(self.fake.generation_contexts), 2)
+
+    def test_replenishment_worker_waits_for_retry_deadline(self) -> None:
+        queued = self.client.portal.call(enqueue_question_bank_replenishment, self.db, 1, 10)
+        self.assertEqual(queued, 1)
+        self.client.portal.call(
+            self.db.execute,
+            "UPDATE question_bank_replenishment_jobs SET available_at="
+            "strftime('%Y-%m-%dT%H:%M:%fZ','now','+30 seconds') WHERE class_id=?1",
+            self.class_id,
+        )
+        delay = self.client.portal.call(question_bank_replenishment_wait_seconds, self.db)
+        self.assertGreater(delay, 25)
+        self.assertLessEqual(delay, 30)
 
     def test_replenishment_supersedes_stale_source_digest_without_calling_provider(self) -> None:
         self.client.portal.call(enqueue_question_bank_replenishment, self.db, 1, 10)
@@ -880,6 +936,30 @@ class QuestionBankTests(unittest.TestCase):
         )
         self.assertEqual(eligibility, 1)
 
+    def test_personal_quiz_retries_once_after_transient_validation_rejection(self) -> None:
+        self.fake.reject_next_review = True
+        response = self.call(
+            "post",
+            f"/api/classes/{self.class_id}/study-materials",
+            "bank_owner",
+            json={
+                "kind": "quiz",
+                "scope": {"kind": "uploads", "upload_ids": [self.note_id]},
+                "options": {"count": 4, "difficulty": "mixed"},
+                "destination": "personal",
+            },
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        material = self.client.portal.call(
+            self.db.fetchrow,
+            "SELECT status,assessment_validation_state FROM study_materials WHERE id=?1",
+            response.json()["id"],
+        )
+        self.assertEqual(material["status"], "ready")
+        self.assertEqual(material["assessment_validation_state"], "validated")
+        self.assertEqual(len(self.fake.generation_contexts), 2)
+        self.assertEqual(len(self.fake.review_contexts), 2)
+
     def test_personal_quiz_rejects_unsupported_provider_source_output(self) -> None:
         self.fake.invalid_source = True
         response = self.call(
@@ -896,11 +976,13 @@ class QuestionBankTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202, response.text)
         state = self.client.portal.call(
             self.db.fetchrow,
-            "SELECT status,assessment_validation_state FROM study_materials WHERE id=?1",
+            "SELECT status,assessment_validation_state,failure_code "
+            "FROM study_materials WHERE id=?1",
             response.json()["id"],
         )
         self.assertEqual(state["status"], "failed")
         self.assertEqual(state["assessment_validation_state"], "legacy_unvalidated")
+        self.assertEqual(state["failure_code"], "question_validation_failed")
 
     def test_personal_quiz_generation_replays_by_owner_class_and_operation(self) -> None:
         operation_id = str(uuid4())
@@ -932,16 +1014,14 @@ class QuestionBankTests(unittest.TestCase):
         self.assertEqual(conflict.status_code, 409, conflict.text)
         self.assertEqual(conflict.json()["code"], "idempotency_conflict")
 
-    def test_private_quiz_provider_timeout_keeps_material_unvalidated(self) -> None:
+    def test_private_quiz_generation_can_exceed_the_old_deadline(self) -> None:
         started = threading.Event()
         release = threading.Event()
         self.fake.block_review = (started, release)
         try:
-            with patch(
-                "app.api.class_library.PRIVATE_ASSESSMENT_GENERATION_DEADLINE_SECONDS",
-                0.03,
-            ):
-                response = self.call(
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                pending = executor.submit(
+                    self.call,
                     "post",
                     f"/api/classes/{self.class_id}/study-materials",
                     "bank_owner",
@@ -953,15 +1033,18 @@ class QuestionBankTests(unittest.TestCase):
                         "destination": "personal",
                     },
                 )
+                self.assertTrue(started.wait(2), "the controlled provider did not start")
+                threading.Event().wait(0.05)
+                release.set()
+                response = pending.result(timeout=5)
             self.assertEqual(response.status_code, 202, response.text)
-            self.assertTrue(started.wait(1), "the controlled provider did not start")
             state = self.client.portal.call(
                 self.db.fetchrow,
                 "SELECT status,assessment_validation_state FROM study_materials WHERE id=?1",
                 response.json()["id"],
             )
-            self.assertEqual(state["status"], "failed")
-            self.assertEqual(state["assessment_validation_state"], "legacy_unvalidated")
+            self.assertEqual(state["status"], "ready")
+            self.assertEqual(state["assessment_validation_state"], "validated")
         finally:
             release.set()
 

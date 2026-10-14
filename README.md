@@ -32,13 +32,13 @@ Jot (working name: Screen Tutor) is a HackRU Fall 2026 project for the **Educati
 - Jot sees only what the student shares, through the browser's picker.
 - Live screen frames and microphone audio are relayed in memory and never recorded or stored. Only opt-in recaps are saved.
 - The model's only visual action is a temporary mark, which the browser validates before drawing. It cannot click, type, or control any app.
-- The Gemini API key stays on the server. The browser gets a short-lived, one-use session ticket.
+- Provider keys stay on the server. The browser gets a short-lived, one-use session ticket for Live sessions.
 
 ## Run it locally
 
 You need Python 3.12, Node.js 18 or newer, and a [Gemini API key](https://aistudio.google.com/apikey).
 
-1. **Configure.** Copy `.env.example` to `.env`. Set `GEMINI_API_KEY`, and set `FILE_URL_SIGNING_SECRET` to a random string of at least 32 characters.
+1. **Configure.** Copy `.env.example` to `.env`. Set `GEMINI_API_KEY` for Live voice and scanned/media processing, and set `FILE_URL_SIGNING_SECRET` to a random string of at least 32 characters. Configure `OPENAI_COMPATIBLE_BASE_URL`, `OPENAI_COMPATIBLE_API_KEY`, and `OPENAI_COMPATIBLE_MODEL` together for text generation, or save them from the Admin page after creating an administrator.
 2. **Start the backend** (port 8000):
 
    ```bash

@@ -7,7 +7,7 @@ from datetime import date as calendar_date
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from app.live_modes import TutorLanguage, TutorMode
 
@@ -1068,6 +1068,46 @@ class SignupRequestDecision(BaseModel):
     id: UUID
     status: Literal["approved", "rejected"]
     username: str
+
+
+class AIProviderSettingsUpdate(BaseModel):
+    """Administrator-only OpenAI-compatible Chat Completions configuration."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    base_url: str = Field(min_length=1, max_length=2_048, strict=True)
+    model: str = Field(min_length=1, max_length=200, strict=True)
+    api_key: SecretStr | None = None
+    clear_api_key: bool = False
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        secret = value.get_secret_value().strip()
+        if not secret:
+            return None
+        if len(secret) > 4_096:
+            raise ValueError("The API key must be 4096 characters or shorter.")
+        return SecretStr(secret)
+
+
+class AIProviderSettingsSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    base_url: str | None = None
+    model: str | None = None
+    api_key_configured: bool = False
+    provider_configured: bool = False
+    settings_source: Literal["admin", "environment", "unconfigured"] = "unconfigured"
+
+
+class AIProviderTestResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    success: bool
+    message: str
 
 
 class ProfileUpdate(BaseModel):

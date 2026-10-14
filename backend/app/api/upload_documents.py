@@ -22,6 +22,7 @@ from app.services.class_access import (
     is_private_assessment,
 )
 from app.services.database import SQLiteDatabase, json_value
+from app.services.gemini_content import ContentGenerationFailure
 from app.services.study_files import compiler_path, create_guide_files
 
 router = APIRouter(tags=["upload-documents"])
@@ -151,6 +152,7 @@ async def _create_upload_document_job(
     application: Any, upload_id: UUID, level: str, job_id: str
 ) -> None:
     db = application.state.database
+    generation_stage = "load_source"
     try:
         row = await db.fetchrow(
             "SELECT d.original_text, d.source_updated_at, n.title, c.name AS "
@@ -170,6 +172,7 @@ async def _create_upload_document_job(
         # Process every chunk. Never silently discard a long document's later pages.
         chunks = source_chunks(text)
         sections = []
+        generation_stage = "draft_and_revision"
         for part, chunk in enumerate(chunks, 1):
             sections.extend(
                 await asyncio.to_thread(
@@ -198,6 +201,7 @@ async def _create_upload_document_job(
         content = UploadDocumentContent(detail_level=level, sections=sections).model_dump(
             mode="json"
         )
+        generation_stage = "typesetting"
         files = await asyncio.to_thread(
             create_guide_files,
             application.state.settings,
@@ -208,6 +212,7 @@ async def _create_upload_document_job(
             sources=[{"id": upload_id, "title": row["title"]}],
             original_text=text,
         )
+        generation_stage = "persist"
         await db.execute(
             "UPDATE upload_documents SET status = 'ready', progress = 100, content = "
             "?4, pdf = ?5, latex = ?6, "
@@ -223,17 +228,28 @@ async def _create_upload_document_job(
             files["latex"],
         )
     except Exception as exc:
+        failure_code = (
+            exc.code
+            if isinstance(exc, ContentGenerationFailure)
+            and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", exc.code)
+            else "document_generation_failed"
+        )
         logger.error(
-            "upload_document_failed upload_id=%s category=%s", upload_id, type(exc).__name__
+            "upload_document_failed upload_id=%s stage=%s category=%s error_code=%s",
+            upload_id,
+            generation_stage,
+            type(exc).__name__,
+            failure_code,
         )
         await db.execute(
             "UPDATE upload_documents SET status = 'failed', failure_code = "
-            "'document_generation_failed', "
+            "?4, "
             "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE note_id = ?1 "
-            "AND detail_level = ?2 AND job_id = ?3",
+            "AND detail_level = ?2 AND job_id = ?3 AND status = 'generating'",
             upload_id,
             level,
             job_id,
+            failure_code,
         )
 
 

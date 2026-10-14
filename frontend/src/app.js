@@ -45,6 +45,10 @@ import {
   signUp,
   signOut,
   getSignupRequestsApi,
+  getAIProviderSettingsApi,
+  updateAIProviderSettingsApi,
+  resetAIProviderSettingsApi,
+  testAIProviderSettingsApi,
   approveSignupRequestApi,
   rejectSignupRequestApi,
   createClassInvitationApi,
@@ -265,7 +269,7 @@ function accountMenuMarkup() {
         ${chevron}
       </button>
       <div class="account-menu-list" id="account-menu-list" role="menu" aria-label="Account" hidden>
-        ${currentUser.is_admin ? `<a role="menuitem" href="#/admin">${icon("user", { size: 16 })} Signup requests</a>` : ""}
+        ${currentUser.is_admin ? `<a role="menuitem" href="#/admin">${icon("user", { size: 16 })} Admin</a>` : ""}
         <a role="menuitem" href="#/account">${icon("user", { size: 16 })} Account</a>
         <a role="menuitem" href="#/classes">${icon("book", { size: 16 })} Your classes</a>
         <button role="menuitem" type="button" data-logout>${icon("logOut", { size: 16 })} Log out</button>
@@ -1995,16 +1999,153 @@ function renderAdmin() {
     <section class="section-stack admin-page" aria-labelledby="admin-title">
       <div class="page-heading">
         <div>
-          <h1 id="admin-title">Signup requests</h1>
-          <p class="muted">Review new account requests. Approved accounts can sign in immediately.</p>
+          <h1 id="admin-title">Admin</h1>
+          <p class="muted">Manage Jot's AI provider and review account requests.</p>
         </div>
         <a class="btn btn-secondary" href="#/classes">${icon("book", { size: 18 })} Your classes</a>
       </div>
+      <section class="panel ai-provider-panel" aria-labelledby="ai-provider-title">
+        <div class="ai-provider-heading">
+          <div>
+            <h2 id="ai-provider-title">OpenAI-compatible route</h2>
+            <p class="muted">Used for quiz generation, study materials, reasoning evaluation, and quiz-review tutoring.</p>
+          </div>
+          <span id="ai-provider-state" class="pill" role="status">Loading settings…</span>
+        </div>
+        <p class="admin-provider-note">Enter your provider's API base URL, key, and model. Jot sends study prompts and authorized course excerpts to this provider; opted-in saved tutor recaps also send their temporary transcript for summarization. Review its privacy and retention terms. The key is encrypted on the server and never shown again. Live tutoring (including typed messages during a live session), scanned PDFs and note images, and lecture transcription still use the server's Gemini configuration.</p>
+        <form id="ai-provider-form" class="ai-provider-form">
+          <label>API base URL
+            <input name="base_url" type="url" required maxlength="2048" placeholder="https://api.example.com/v1" autocomplete="url">
+          </label>
+          <label>Model
+            <input name="model" type="text" required maxlength="200" placeholder="model-name" autocomplete="off" spellcheck="false">
+          </label>
+          <label>API key <span class="muted">(leave blank to keep the saved key)</span>
+            <input name="api_key" type="password" maxlength="4096" placeholder="Provider API key" autocomplete="new-password" autocapitalize="off" spellcheck="false">
+          </label>
+          <label class="ai-provider-clear-key"><input name="clear_api_key" type="checkbox"> Clear the saved API key</label>
+          <div class="ai-provider-actions">
+            <button class="btn btn-primary" type="submit">Save provider</button>
+            <button class="btn btn-secondary" type="button" data-test-ai-provider>Test connection</button>
+            <button class="btn btn-secondary" type="button" data-reset-ai-provider>Use environment settings</button>
+          </div>
+          <p id="ai-provider-message" class="muted" role="status" aria-live="polite"></p>
+        </form>
+      </section>
+      <section class="section-stack" aria-labelledby="signup-requests-title">
+        <div>
+          <h2 id="signup-requests-title">Signup requests</h2>
+          <p class="muted">Review new account requests. Approved accounts can sign in immediately.</p>
+        </div>
       <div id="signup-requests" class="admin-request-list" aria-live="polite" aria-busy="true">
         <p class="muted">Loading requests…</p>
       </div>
+      </section>
     </section>
   `, { section: "classes" });
+
+  const providerForm = document.querySelector("#ai-provider-form");
+  const providerMessage = document.querySelector("#ai-provider-message");
+  const providerState = document.querySelector("#ai-provider-state");
+  const testProviderButton = providerForm.querySelector("[data-test-ai-provider]");
+  const resetProviderButton = providerForm.querySelector("[data-reset-ai-provider]");
+  const setProviderBusy = (busy) => {
+    providerForm.querySelectorAll("button").forEach((button) => { button.disabled = busy; });
+  };
+
+  const showProviderState = (summary) => {
+    const configured = summary.provider_configured;
+    providerState.textContent = configured
+      ? `Configured · ${summary.settings_source}`
+      : "Not configured";
+    if (configured) providerState.dataset.tone = "good";
+    else delete providerState.dataset.tone;
+    providerForm.elements.base_url.value = summary.base_url || "";
+    providerForm.elements.model.value = summary.model || "";
+    providerMessage.textContent = summary.api_key_configured
+      ? "A key is saved. Enter a new key only if you want to replace it."
+      : "No API key is saved yet.";
+  };
+
+  const loadProviderSettings = async () => {
+    providerState.textContent = "Loading settings…";
+    try {
+      showProviderState(await getAIProviderSettingsApi());
+    } catch (error) {
+      providerState.textContent = "Could not load";
+      delete providerState.dataset.tone;
+      providerMessage.textContent = error.message || "Could not load provider settings.";
+    }
+  };
+
+  providerForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const saveButton = providerForm.querySelector("button[type=submit]");
+    setProviderBusy(true);
+    saveButton.textContent = "Saving…";
+    providerMessage.textContent = "";
+    const apiKey = providerForm.elements.api_key.value.trim();
+    const clearApiKey = providerForm.elements.clear_api_key.checked;
+    try {
+      const summary = await updateAIProviderSettingsApi({
+        base_url: providerForm.elements.base_url.value.trim(),
+        model: providerForm.elements.model.value.trim(),
+        ...(apiKey ? { api_key: apiKey } : {}),
+        clear_api_key: clearApiKey
+      });
+      providerForm.elements.api_key.value = "";
+      providerForm.elements.clear_api_key.checked = false;
+      showProviderState(summary);
+      providerMessage.textContent = "Provider settings saved. They apply without a restart.";
+    } catch (error) {
+      providerMessage.textContent = error.message || "Could not save provider settings.";
+    } finally {
+      saveButton.disabled = false;
+      setProviderBusy(false);
+      saveButton.textContent = "Save provider";
+    }
+  });
+
+  testProviderButton.addEventListener("click", async () => {
+    setProviderBusy(true);
+    providerMessage.textContent = "Testing the saved provider settings…";
+    try {
+      const result = await testAIProviderSettingsApi();
+      providerMessage.textContent = result.message;
+    } catch (error) {
+      providerMessage.textContent = error.message || "The provider test failed.";
+    } finally {
+      setProviderBusy(false);
+    }
+  });
+
+  resetProviderButton.addEventListener("click", async () => {
+    const confirmed = await openDialog({
+      title: "Use environment provider settings?",
+      message: "This removes the saved administrator override and restores the server's environment settings, if configured.",
+      confirmLabel: "Use environment settings"
+    });
+    if (!confirmed) return;
+    setProviderBusy(true);
+    providerMessage.textContent = "Restoring environment settings…";
+    try {
+      const summary = await resetAIProviderSettingsApi();
+      providerForm.elements.api_key.value = "";
+      providerForm.elements.clear_api_key.checked = false;
+      showProviderState(summary);
+      providerMessage.textContent = summary.provider_configured
+        ? "Environment provider settings are active."
+        : "The administrator override was removed. No provider is configured.";
+    } catch (error) {
+      providerMessage.textContent = error.message || "Could not restore environment settings.";
+    } finally {
+      setProviderBusy(false);
+    }
+  });
+
+  providerForm.elements.clear_api_key.addEventListener("change", (event) => {
+    if (event.currentTarget.checked) providerForm.elements.api_key.value = "";
+  });
 
   const list = document.querySelector("#signup-requests");
   const renderRequests = (requests) => {
@@ -2077,6 +2218,7 @@ function renderAdmin() {
     }
   });
 
+  loadProviderSettings();
   load();
 }
 

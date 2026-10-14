@@ -12,7 +12,7 @@ The [proactive coaching and barge-in design](proactive-coaching-design.md) descr
 
 Screen Tutor is an AI tutor that runs in a browser and observes a screen the student explicitly shares. The student asks a question by voice or text. The tutor responds conversationally, refers to visible content, and can place a small number of temporary marks—such as a pointer, underline, or note—over the relevant region in the web app's live preview.
 
-The browser owns screen capture and drawing. Gemini interprets the shared frames and returns speech, text transcription, and structured annotation requests. The web app validates those requests and draws the marks locally over its preview. It never gives the model general mouse, keyboard, shell, or application-control access.
+The browser owns screen capture and drawing. Gemini interprets the shared frames and returns speech, text transcription, and structured annotation requests. The web app validates those requests and draws the marks locally over its preview. It never gives the model general mouse, keyboard, shell, or application-control access. Study-material text generation uses the administrator-configured OpenAI-compatible Chat Completions route; Gemini remains in use for Live tutoring and file/media workflows without a shared Chat Completions upload protocol.
 
 Students can also upload their own course materials (notes, documents, syllabi, lecture slides, and recorded video or audio lectures) and organize them by class (for example, Math, Biology, or History). Each class has its own tutor context: when the student studies in a class, the tutor grounds its answers in that class's materials, and it can generate quizzes, study guides, practice exams, and flashcards from them.
 
@@ -147,14 +147,16 @@ flowchart LR
     T[Backend\nLive session gateway + notes API\nLong-lived API key]
     D[(Database + file storage\nClasses, notes, materials)]
     G[Gemini Live API\ngemini-3.8-live]
-    M[Gemini API\nText extraction + generation]
+    M[OpenAI-compatible Chat Completions\nText generation + tutoring]
+    F[Gemini Files API\nScanned-file OCR + lecture transcription]
 
     U -->|selects target, asks question| C
     U -->|uploads notes, requests quiz/guide/exam| C
     C -->|one-use session ticket + live media| T
     C -->|notes, generation requests| T
     T <-->|store / load| D
-    T <-->|extract text, generate materials| M
+    T <-->|generate materials, tutor, evaluate| M
+    T <-->|scan OCR, transcribe recordings| F
     T -->|sampled frames + optional audio/text + class context| G
     G -->|audio, transcript, annotation request| T
     T -->|audio, transcript, frame-bound annotation request| C
@@ -174,7 +176,7 @@ flowchart LR
 
 **Live session gateway**
 
-- Holds the long-lived Gemini API key and owns provider SDK use, model selection, system instructions, class context, and tool execution.
+- Holds provider credentials and owns model selection, system instructions, class context, and tool execution. Text generation uses the administrator-configured OpenAI-compatible route; Live voice remains Gemini.
 - Issues a short-lived, one-use WebSocket ticket after origin, access, rate-limit, and optional class-membership checks. Removing a member revokes unused tickets and closes active class-context sessions. The ticket is not a provider credential and cannot be used to call the provider directly.
 - Receives sampled frames, enabled microphone audio, and typed questions over the browser's same-origin WebSocket, then forwards them in memory to the Live API.
 - Streams audio, transcripts, and frame-bound annotation requests back to the browser. It does not record or persist live media or raw conversation data; only explicitly enabled derived session recaps persist.
@@ -184,10 +186,10 @@ flowchart LR
 
 - Scopes notes to the logged-in account in SQLite.
 - Stores uploaded files in private object storage and stores classes, extracted note text, and generated materials in a database.
-- Extracts text from uploads: direct parsing for text, DOCX, PPTX, and text-based PDFs; Gemini multimodal input for images and scanned PDFs.
+- Extracts text from uploads: direct parsing for text, DOCX, PPTX, and text-based PDFs; the configured compatible route describes inline slide images; Gemini Files processes images and scanned PDFs.
 - Transcribes video/audio lectures with Gemini in a background job (upload to the Gemini Files API, request a timestamped transcript and summary), since long recordings can take minutes to process.
 - Parses a syllabus into a structured outline (topics, weeks, exam dates) used to scope generation.
-- Generates study materials by calling a standard (non-Live) Gemini model with the selected notes and a structured-output schema, then validates the result before saving it.
+- Generates study materials, question-bank items, reasoning evaluations, and quiz-review tutor replies through the administrator-configured OpenAI-compatible Chat Completions route. The backend validates structured output before saving it. When saved recaps are explicitly enabled, the in-memory live-session transcript is also sent to this route for summarization. The route's base URL, model, and key are held server-side; the admin UI never reads a saved key back.
 - When a Live session starts inside a class, supplies that class's note text (or a summary if the notes are too large) for the session's system context.
 - Enforces upload limits (file size, files per class) and rate limits on generation.
 
@@ -292,7 +294,7 @@ Approved on 2026-10-11: signed-in students may enable saved tutoring recaps sepa
 - Uploaded notes and generated study materials **are** stored, because the student explicitly saves them. They are scoped to the student's account, and the student can delete any note, material, or whole class. Deleting a note removes the file and its extracted text.
 - Revisioned source chunks, class concept/edge provenance, immutable assessment snapshots, the student's intentionally submitted assessment responses and reasoning, XP events, evidence, private mastery projections, and recommendations may be stored to provide the learning features described above. Every read rechecks current ownership, class membership, capabilities, publication/release state, and attempt ownership. Assessment-derived progress belongs to the student and is never visible to classmates or class managers; legacy outcomes with unknown owners are excluded. Deletion, membership removal, and resource release changes must not leave retrievable chunks or recommendation links that bypass current access checks.
 - The browser receives only safe question projections before feedback release. Answer keys, randomized option mappings, rubrics, and grading instructions stay on the backend. A provider outage leaves completed and saved assessments readable; pending grading does not count as an incorrect answer or mastery evidence.
-- Uploaded content, including lecture recordings, is sent to the Gemini API for text extraction, transcription, generation, and per-class tutoring. Tell the student this at upload time, and remind them to upload only recordings they are allowed to keep (some courses restrict lecture recordings).
+- Uploaded course content and relevant study requests are sent to the administrator-configured AI provider for text generation/tutoring; scanned-file OCR and lecture recordings still use Gemini Files. Tell students which provider their deployment uses before upload, and remind them to upload only recordings they are allowed to keep (some courses restrict lecture recordings).
 
 ## MVP acceptance criteria
 
@@ -334,6 +336,6 @@ Approved on 2026-10-11: signed-in students may enable saved tutoring recaps sepa
 - Whether students can opt into storing session summaries later.
 - Supported upload formats and size limits for the MVP, including maximum lecture video length and whether to keep the original video or only its transcript after processing.
 - Whether notes reach the tutor as full text, summaries, or chunks retrieved per question (RAG).
-- Which standard Gemini model to use for text extraction and study-material generation.
+- Which OpenAI-compatible route and model the administrator configures for text generation.
 - The file-storage provider and deployment configuration (private S3-compatible storage or local private storage).
 - Whether a future public deployment needs a dedicated account provider.

@@ -396,7 +396,7 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
             ${icon("sparkles", { size: 20 })}
             <div>
               <strong>AI-generated study materials</strong>
-              <span>Your selected course files are uploaded for processing before generation. Generated materials and quiz scores are saved by the backend.</span>
+              <span>Selected course text and prompts are processed by this Jot deployment's administrator-configured AI provider. Scanned files and lecture recordings may use Gemini. Generated materials and quiz scores are saved by the backend.</span>
             </div>
           </div>
           <div id="material-list"></div>

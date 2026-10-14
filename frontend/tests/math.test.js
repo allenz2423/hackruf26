@@ -48,6 +48,22 @@ test("math next to punctuation and digits works", () => {
   assert.deepEqual(kinds("area is $\\pi r^2$ cm"), ["T:area is ", "I:\\pi r^2", "T: cm"]);
 });
 
+test("an unclosed formula cannot swallow prose or later formulas", () => {
+  const text = "The transformed tensor is $\\boldsymbol{\\sigma}'=\\mathbf{A}\\boldsymbol{\\sigma}\\mathbfand each new component is obtained by projection. The maximum shear acts at $45^\\circ$ from the principal directions.";
+  const segments = splitMath(text);
+  const math = segments.filter((segment) => segment.type === "math");
+  const prose = segments.filter((segment) => segment.type === "text").map((segment) => segment.value).join("");
+
+  assert.deepEqual(math.map((segment) => segment.tex), ["45^\\circ"]);
+  assert.match(prose, /and each new component is obtained by projection/);
+  assert.match(prose, /The transformed tensor is \$/);
+  assert.match(prose, /from the principal directions\./);
+});
+
+test("multi-letter math names inside groups remain renderable", () => {
+  assert.deepEqual(kinds("$x_{max}=\\text{kg}$ and $xy$"), ["I:x_{max}=\\text{kg}", "T: and ", "I:xy"]);
+});
+
 test("text around math is escaped, so HTML in the text cannot run", () => {
   const html = mathHtml('<img src=x onerror=alert(1)> and $x$ & <b>bold</b>');
   assert.ok(!html.includes("<img"));

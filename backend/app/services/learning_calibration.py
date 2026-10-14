@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from pydantic import Field
+
 from app.api.errors import ApiError
 from app.api.schemas import QuestionBankGenerationRequest
 from app.services.class_access import class_access
@@ -19,10 +21,16 @@ from app.services.question_bank import (
 
 logger = logging.getLogger("screen_tutor.learning_calibration")
 
+
+class _ReplenishmentGenerationRequest(QuestionBankGenerationRequest):
+    """Internal generation can request the exact number of missing bank items."""
+
+    count: int = Field(default=2, ge=1, le=100)
+
+
 BANK_TARGET_PER_SLOT = 2
-BANK_DAILY_JOB_BUDGET = 10
+BANK_DAILY_JOB_BUDGET = 20
 MAX_REPLENISHMENT_JOBS_PER_SCAN = 20
-REPLENISHMENT_DEADLINE_SECONDS = 150
 CALIBRATION_REFRESH_MINUTES = 15
 CALIBRATION_JOB_MAX_ATTEMPTS = 3
 QUESTION_FLAG_MIN_RESPONSES = 30
@@ -274,6 +282,19 @@ async def _finish_job(
     )
 
 
+async def question_bank_replenishment_wait_seconds(database: SQLiteDatabase) -> float:
+    """Sleep until retryable bank work is due, with a bounded idle backoff."""
+    seconds = await database.fetchval(
+        "SELECT MIN((julianday(available_at)-"
+        "julianday(strftime('%Y-%m-%dT%H:%M:%fZ','now')))*86400.0) "
+        "FROM question_bank_replenishment_jobs WHERE status='queued' "
+        "AND attempts<max_attempts"
+    )
+    if seconds is None:
+        return 900.0
+    return min(900.0, max(2.0, float(seconds)))
+
+
 async def process_question_bank_replenishment_jobs(application: Any, limit: int = 1) -> int:
     """Claim and process bounded jobs without holding SQLite across model calls."""
     database: SQLiteDatabase | None = getattr(application.state, "database", None)
@@ -340,30 +361,31 @@ async def process_question_bank_replenishment_jobs(application: Any, limit: int 
             )
             if existing_count >= BANK_TARGET_PER_SLOT:
                 await _finish_job(database, job_id=job_id, status="complete")
+                # This claimed job was processed even though another job already
+                # filled its slot. Count it so the worker keeps draining the
+                # queued batch instead of sleeping for the full backoff window.
+                completed_count += 1
                 continue
-            # Two slots per cognitive level let the existing selector reuse
-            # current families and generate only the missing independent variant.
-            request = QuestionBankGenerationRequest(
+            # Keep one generation focused on the job's level. A single failed
+            # level must not discard otherwise valid questions for the whole ladder.
+            request = _ReplenishmentGenerationRequest(
                 operation_id=UUID(job_id),
                 kind="quiz",
                 concept_ids=[UUID(str(claimed["concept_id"]))],
-                count=8,
-                level=None,
+                count=BANK_TARGET_PER_SLOT - existing_count,
+                level=int(claimed["level"]),
                 language=str(claimed["language"]),
                 question_types=["multiple_choice"],
             )
-            await asyncio.wait_for(
-                create_generated_assessment(
-                    database,
-                    class_id=str(claimed["class_id"]),
-                    user_id=user_id,
-                    payload=request,
-                    service=service,
-                    model_name=settings.gemini_text_model,
-                    persist_assessment=False,
-                    expected_source_digest=str(claimed["source_digest"]),
-                ),
-                timeout=REPLENISHMENT_DEADLINE_SECONDS,
+            await create_generated_assessment(
+                database,
+                class_id=str(claimed["class_id"]),
+                user_id=user_id,
+                payload=request,
+                service=service,
+                model_name=getattr(service, "model_name", settings.gemini_text_model),
+                persist_assessment=False,
+                expected_source_digest=str(claimed["source_digest"]),
             )
             current_digest = await current_concept_source_digest(
                 database,
