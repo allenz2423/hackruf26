@@ -18,7 +18,7 @@ import {
 import { sourceChunkMarkup, sourceSearchHitMarkup } from "./source-search.js";
 
 const ACCEPTED_EXTENSIONS = new Set(["pdf", "docx", "pptx", "txt", "md", "png", "jpg", "jpeg", "mp4", "webm", "mov", "mp3", "m4a", "wav"]);
-const MAX_FILE_SIZE = 250 * 1024 * 1024;
+const MAX_FILE_SIZE = 100 * 1024 * 1024;
 
 const KIND_ICONS = {
   Notes: "notes",

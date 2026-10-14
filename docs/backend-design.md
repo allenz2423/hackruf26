@@ -44,7 +44,7 @@ The class library stores classes, uploaded course materials, extracted text, lec
 | `FILE_URL_SIGNING_SECRET` | Yes | HMAC secret for short-lived private file links |
 | `LEAN_TOOL_ENABLED` | No | Enables the local Lean proof-check tool |
 | `LEAN_TIMEOUT_SECONDS` | No | Proof-check wall-clock limit, defaults to 30 seconds |
-| `MAX_UPLOAD_MB`, `MAX_UPLOADS_PER_CLASS`, `MAX_LECTURE_MINUTES` | No | Course-material limits |
+| `MAX_UPLOAD_MB`, `MAX_UPLOADS_PER_CLASS`, `MAX_LECTURE_MINUTES` | No | Course-material limits; `MAX_UPLOAD_MB` defaults to 100 MiB and controls the per-file upload cap |
 
 ## Request Policy
 
@@ -284,7 +284,7 @@ The graph API is `GET /api/classes/{class_id}/concept-graph`, its manager-only `
 
 ## Processing Jobs
 
-Uploads are validated by extension, signature, size, and kind. Text files, DOCX, PPTX, and text-based PDFs are parsed locally where possible. Images, scanned PDFs, and lectures use Gemini content processing. Lecture transcripts and generated study materials are saved in SQLite and reused.
+Uploads are validated by extension, signature, size, and kind. The per-file upload limit defaults to 100 MiB. Text files, DOCX, PPTX, and text-based PDFs are parsed locally where possible. Images, scanned PDFs up to 50 MiB, and lectures use Gemini content processing. Scanned PDFs above that processing limit can be stored but fail extraction; this is separate from the upload-size limit. Lecture transcripts and generated study materials are saved in SQLite and reused.
 
 Structured content requests use `response_json_schema` with a compact schema derived from the Pydantic model, plus `response_mime_type: application/json`. This preserves JSON Schema keywords such as `additionalProperties` instead of converting them to the legacy provider schema's unsupported `additional_properties` field. The provider schema inlines local references, converts constant values to enums, normalizes nullable types, and omits length/range/format metadata to avoid rejection of complex nested question schemas. Types, required fields, enums, and object structure remain explicit. The same path handles upload summaries, syllabus extraction, lecture transcription, assessments, and generated study materials. Returned JSON is still validated locally with the full original Pydantic model and the existing count/answer/citation checks before saving; provider simplification does not relax backend validation. See [Gemini structured-output documentation](https://ai.google.dev/gemini-api/docs/generate-content/structured-output).
 

@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     sqlite_path: str = "backend/.local/screen_tutor.sqlite3"
     storage_dir: str = "backend/.local/private_uploads"
     file_url_signing_secret: SecretStr | None = None
-    max_upload_mb: int = 250
+    max_upload_mb: int = 100
     max_uploads_per_class: int = 100
     max_lecture_minutes: int = 120
     max_class_name_length: int = 100

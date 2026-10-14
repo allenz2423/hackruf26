@@ -142,7 +142,7 @@ The backend executes the configured calculation and optional `verify_lean_proof`
 
 ## Limits and deployment notes
 
-- `MAX_UPLOAD_MB` defaults to 250 MiB, matching the current browser-side validation. The server remains authoritative.
+- `MAX_UPLOAD_MB` defaults to 100 MiB, matching the current browser-side validation. The server remains authoritative. Scanned PDFs larger than 50 MiB can be stored but are not sent for model-based extraction; text-based PDFs are parsed locally.
 - `MAX_UPLOADS_PER_CLASS` defaults to 100 uploads; `MAX_LECTURE_MINUTES` defaults to 120.
 - Long media is uploaded to Gemini's temporary Files API for processing and deleted after the job when possible.
 - Upload and generation jobs use FastAPI background tasks for the hackathon MVP. Startup marks interrupted work as failed so uploads can be retried and study generation can be requested again. Ready records are preserved. Run one backend process; use a durable queue before multi-instance production.
