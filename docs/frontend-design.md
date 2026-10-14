@@ -74,9 +74,13 @@ Classes ─┬─ Math 151 ─┬─ Library   (uploads, bounded source search)
 
 ### Concepts tab (shared class map)
 
+Concept cards keep reading content compact: alias creation and manager editing, deprecation, and merge actions stay behind closed disclosures until needed. Tighter card spacing preserves more concepts in view, and the grid reflows cleanly as the viewport narrows or browser zoom increases.
+
 Members with class read access see the authorized active concepts, descriptions, aliases, source references, and validated typed relationships. The UI accepts the backend's `status` or `state` field and displays the concept state. The initial view uses responsive cards and lists rather than a graph-rendering dependency; prerequisite relationships are identified separately from related or applied-in relationships. Only owners and members with `manage_permissions` see manager controls. Managers can review source-backed concept, alias, and relationship proposals, open exact cited chunks and original files, create concepts and source-backed relationship proposals, edit names/descriptions/aliases, merge concepts with confirmation, and approve or reject proposals using optimistic versions. Unapproved aliases are labeled separately and are never shown as active to students. Managers can deprecate a validated concept after confirmation; this removes it from the active student map while keeping its references auditable. Extraction jobs expose pending, completed, and failed states with status retry; raw provider errors are not displayed. A failed graph or review request is shown as unavailable rather than as an empty map or queue. The frontend hides controls by capability for usability, while every operation remains enforced by the backend. The graph view contains no student mastery or assessment outcomes.
 
 ### Library tab (uploads)
+
+Shared-resource release controls appear below the resource title and metadata. Their form width is capped, and they remain within the content column so expanded controls do not stretch the upload icon column or overflow at narrow widths and browser zoom.
 
 The local SQLite workspace calls class/upload APIs without an access-token prerequisite. Existing browser route and IndexedDB IDs stay stable; a persisted `backendId` identifies the corresponding backend class or upload. Library refresh merges remote records into those mappings without discarding locally retained source files. New classes and uploads save through the API, with local files retained for recovery after network failures. Pasted notes use a multiline field with the backend's 1,000,000-character limit. Rename and deletion use the mapped backend UUID and surface API failures.
 

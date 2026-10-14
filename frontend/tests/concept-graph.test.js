@@ -110,6 +110,22 @@ test("member graph markup is read-only and excludes proposals and untrusted hidd
   assert.doesNotMatch(markup, /hidden-proposal|Do not show|secret|private|Manager tools|data-concept-decision|data-edge-decision|Deprecate concept|Create a concept/);
 });
 
+test("manager concept cards keep editing tools collapsed until requested", () => {
+  const markup = conceptGraphPageMarkup({
+    graph: { concepts: [{
+      id: "c1", canonical_name: "Cell Theory", description: "Cells are the basic unit of life.",
+      status: "validated", version: 2, aliases: [], sources: []
+    }], edges: [] },
+    canManage: true
+  });
+
+  assert.match(markup, /<details class="concept-alias-add-details">/);
+  assert.match(markup, /<details class="concept-manage-details">/);
+  assert.match(markup, /data-add-alias="c1"/);
+  assert.match(markup, /data-edit-concept="c1"/);
+  assert.doesNotMatch(markup, /<details class="concept-(?:alias-add|manage)-details" open/);
+});
+
 test("prerequisite direction review flags are visible on proposed and validated edges", () => {
   const concepts = [
     { id: "c1", canonical_name: "Fractions", status: "validated" },

@@ -1426,8 +1426,12 @@ main {
   grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--line);
+}
+
+.data-list li:has(.resource-release-control[open]) {
+  align-items: start;
 }
 
 .data-list li:last-child {
@@ -5704,6 +5708,20 @@ p {
   padding-top: 0.65rem;
 }
 
+.resource-release-control {
+  justify-self: start;
+  width: fit-content;
+  max-width: 100%;
+  margin-top: var(--space-1);
+}
+
+.resource-release-control form {
+  width: min(20rem, 100%);
+  min-width: 0;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+}
+
 .capability-option,
 .destination-option {
   display: flex;
@@ -5901,7 +5919,7 @@ p {
 }
 
 .resource-release-control {
-  margin-top: 0.75rem;
+  margin-top: var(--space-1);
 }
 
 .resource-release-control summary {
@@ -5911,7 +5929,7 @@ p {
 }
 
 .resource-release-control[open] {
-  margin-top: 0.75rem;
+  margin-top: var(--space-2);
 }
 
 .source-search-panel {
@@ -6163,7 +6181,7 @@ p {
   display: grid;
   gap: var(--space-4);
   min-width: 0;
-  padding: var(--space-5);
+  padding: var(--space-4);
 }
 
 .concept-card-list,
@@ -6178,9 +6196,9 @@ p {
 .concept-edge-card {
   display: grid;
   align-content: start;
-  gap: var(--space-3);
+  gap: var(--space-2);
   min-width: 0;
-  padding: var(--space-4);
+  padding: var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--surface-muted);
@@ -6205,6 +6223,11 @@ p {
   min-width: 0;
 }
 
+.concept-card-heading > .row-meta {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .concept-card-heading h3 {
   margin: var(--space-2) 0 0;
   overflow-wrap: anywhere;
@@ -6218,7 +6241,7 @@ p {
 
 .concept-aliases,
 .concept-sources,
-.concept-edit-details,
+.concept-manage-details,
 .concept-merge-details,
 .concept-create-details {
   min-width: 0;
@@ -6226,10 +6249,27 @@ p {
   border-top: 1px solid var(--line);
 }
 
+.concept-aliases {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.concept-aliases-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
 .concept-aliases h4,
 .concept-extraction-panel h4,
 .concept-review-section h4 {
   margin: 0 0 var(--space-2);
+}
+
+.concept-aliases h4 {
+  margin: 0;
 }
 
 .concept-aliases > ul,
@@ -6271,11 +6311,41 @@ p {
   margin-top: var(--space-3);
 }
 
+.concept-alias-add-details[open] {
+  flex: 1 0 100%;
+}
+
+.concept-alias-add-details {
+  min-width: 0;
+}
+
+.concept-alias-form {
+  grid-template-columns: minmax(0, 1fr) minmax(5.5rem, 7rem);
+  align-items: end;
+  gap: var(--space-2);
+  width: min(26rem, 100%);
+  margin-top: var(--space-2);
+}
+
+.concept-alias-form .field {
+  min-width: 0;
+}
+
+.concept-alias-form button {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+
 .concept-create-details > summary,
-.concept-edit-details > summary,
+.concept-manage-details > summary,
 .concept-merge-details > summary,
+.concept-alias-add-details > summary,
 .concept-sources > summary {
   cursor: pointer;
+}
+
+.concept-manage-details > [data-concept-decision] {
+  margin-top: var(--space-2);
 }
 
 .concept-sources > summary {

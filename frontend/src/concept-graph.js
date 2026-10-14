@@ -89,15 +89,16 @@ function sourceListMarkup(sources, options = {}) {
 function aliasesMarkup(concept, canManage) {
   const aliases = list(concept.aliases).filter((alias) => alias.status !== "proposed");
   return `<div class="concept-aliases">
-    <h4>Aliases</h4>
+    <div class="concept-aliases-heading"><h4>Aliases</h4>${canManage ? `<details class="concept-alias-add-details"><summary class="btn btn-ghost btn-small">Add alias</summary>
+      <form class="concept-alias-form" data-add-alias="${escapeHtml(concept.id)}">
+        <label class="field"><span>Alias</span><input name="name" maxlength="160" required /></label>
+        <label class="field"><span>Language tag</span><input name="language" maxlength="24" value="und" /></label>
+        <button class="btn btn-secondary btn-small" type="submit">Add alias</button>
+      </form>
+    </details>` : ""}</div>
     ${aliases.length
       ? `<ul>${aliases.map((alias) => `<li><span>${escapeHtml(alias.name)} <small>${escapeHtml(alias.language || "und")}</small></span>${canManage && alias.id && concept.version != null ? `<button class="btn btn-ghost btn-small" type="button" data-delete-alias="${escapeHtml(alias.id)}" data-concept-id="${escapeHtml(concept.id)}" data-version="${escapeHtml(concept.version)}" aria-label="Remove alias ${escapeHtml(alias.name)}">Remove</button>` : ""}</li>`).join("")}</ul>`
       : `<p class="field-hint">No aliases added.</p>`}
-    ${canManage ? `<form class="concept-alias-form" data-add-alias="${escapeHtml(concept.id)}">
-      <label class="field"><span>Add alias</span><input name="name" maxlength="160" required /></label>
-      <label class="field"><span>Language tag</span><input name="language" maxlength="24" value="und" /></label>
-      <button class="btn btn-secondary btn-small" type="submit">Add alias</button>
-    </form>` : ""}
   </div>`;
 }
 
@@ -120,21 +121,20 @@ function conceptCardMarkup(concept, { concepts, canManage, proposal = false } = 
       <button class="btn btn-primary btn-small" type="button" data-concept-decision="approve" data-concept-id="${escapeHtml(concept.id)}" data-version="${escapeHtml(concept.version ?? "")}">Approve concept</button>
       <button class="btn btn-secondary btn-small" type="button" data-concept-decision="reject" data-concept-id="${escapeHtml(concept.id)}" data-version="${escapeHtml(concept.version ?? "")}">Reject</button>
     </div>` : ""}
-    ${canManage && !proposal ? `<details class="concept-edit-details"><summary class="btn btn-ghost btn-small">Edit concept</summary>
+    ${canManage && !proposal ? `<details class="concept-manage-details"><summary class="btn btn-ghost btn-small">Manage concept</summary>
       <form class="concept-edit-form" data-edit-concept="${escapeHtml(concept.id)}" data-version="${escapeHtml(concept.version ?? "")}">
         <label class="field"><span>Canonical name</span><input name="canonical_name" maxlength="200" required value="${escapeHtml(displayName(concept))}" /></label>
         <label class="field"><span>Assessable description</span><textarea name="description" maxlength="2000" rows="3">${escapeHtml(concept.description || "")}</textarea></label>
         <label class="field"><span>Parent topic</span><select name="parent_concept_id"><option value="">No parent topic</option>${parentChoices.map((item) => `<option value="${escapeHtml(item.id)}" ${String(item.id) === String(concept.parent_concept_id) ? "selected" : ""}>${escapeHtml(displayName(item))}</option>`).join("")}</select></label>
         <button class="btn btn-secondary btn-small" type="submit">Save concept</button>
       </form>
-    </details>
-    ${(concept.state || concept.status) === "validated" ? `<button class="btn btn-ghost btn-small" type="button" data-concept-decision="deprecate" data-concept-id="${escapeHtml(concept.id)}" data-version="${escapeHtml(concept.version ?? "")}">Deprecate concept</button>` : ""}
+      ${(concept.state || concept.status) === "validated" ? `<button class="btn btn-ghost btn-small" type="button" data-concept-decision="deprecate" data-concept-id="${escapeHtml(concept.id)}" data-version="${escapeHtml(concept.version ?? "")}">Deprecate concept</button>` : ""}
     ${parentChoices.length ? `<details class="concept-merge-details"><summary>Merge into another concept</summary>
       <form class="concept-merge-form" data-merge-concept="${escapeHtml(concept.id)}" data-version="${escapeHtml(concept.version ?? "")}">
         <label class="field"><span>Keep this concept and merge into</span><select name="target_concept_id" required><option value="">Choose target</option>${parentChoices.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(displayName(item))}</option>`).join("")}</select></label>
         <button class="btn btn-secondary btn-small" type="submit">Review merge</button>
       </form>
-    </details>` : ""}` : ""}
+    </details>` : ""}</details>` : ""}
   </article>`;
 }
 

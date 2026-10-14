@@ -447,7 +447,7 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
       return `
       <li>
         <span class="kind-icon" data-kind="${escapeHtml(upload.kind)}">${icon(KIND_ICONS[upload.kind] || "file")}</span>
-        <span class="row-main">
+        <div class="row-main">
           <button class="file-name" type="button" data-preview="${escapeHtml(upload.id)}" title="Preview ${escapeHtml(upload.name)}">${escapeHtml(upload.name)}</button>
           <span class="row-meta">${escapeHtml(upload.kind)}${upload.isSample ? " - Built-in sample content" : ` - ${formatBytes(upload.size || 0)} - added ${formatDate(upload.createdAt)}`}</span>
           ${upload.summary ? `<span class="row-summary">${escapeHtml(upload.summary)}</span>` : ""}
@@ -455,14 +455,14 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
           ${upload.publicationState && upload.resourceScope !== "personal" ? `<span class="permission-badge" data-publication="${escapeHtml(upload.publicationState)}">${upload.publicationState === "scheduled" ? `Scheduled for ${escapeHtml(formatDate(upload.releaseAt))}` : escapeHtml(upload.publicationState)}</span>` : ""}
           ${upload.sources?.length ? `<span class="source-chips">${upload.sources.map((source) => `<span>${escapeHtml(source)}</span>`).join("")}</span>` : ""}
           ${(upload.progress < 100 && upload.status !== "failed") ? `<span class="progress" aria-label="${escapeHtml(upload.status)} ${upload.progress}% complete"><span style="width: ${upload.progress}%"></span></span>` : ""}
-        </span>
+          ${upload.isRemote && upload.resourceScope !== "personal" && canPublish ? `<details class="resource-release-control"><summary>Manage release</summary><form data-upload-publication="${escapeHtml(upload.id)}"><label class="field"><span>Visibility</span><select name="state"><option value="draft" ${upload.publicationState === "draft" ? "selected" : ""}>Draft</option><option value="published" ${upload.publicationState === "published" ? "selected" : ""}>Published</option><option value="scheduled" ${upload.publicationState === "scheduled" ? "selected" : ""}>Schedule release</option></select></label><label class="field" data-release-date-wrap ${upload.publicationState === "scheduled" ? "" : "hidden"}><span>Release date and time</span><input name="release_at" type="datetime-local" value="${escapeHtml(toLocalDateTime(upload.releaseAt))}" /></label><button class="btn btn-secondary btn-small" type="submit">Save release</button></form></details>` : ""}
+        </div>
         <span class="pill" data-tone="${STATUS_TONES[upload.status] || ""}"><strong>${escapeHtml(upload.status)}</strong></span>
         <span class="row-actions">
           ${upload.status === "failed" && canEdit ? `<button class="btn btn-secondary btn-small" type="button" data-retry="${escapeHtml(upload.id)}">${icon("sparkles", { size: 16 })} Retry</button>` : ""}
           <button class="btn btn-secondary btn-small" type="button" data-preview="${escapeHtml(upload.id)}">${icon("file", { size: 16 })} View</button>
           ${canDelete ? `<button class="btn btn-ghost btn-icon" type="button" data-remove="${escapeHtml(upload.id)}" aria-label="Remove ${escapeHtml(upload.name)}">${icon("trash", { size: 18 })}</button>` : ""}
         </span>
-        ${upload.isRemote && upload.resourceScope !== "personal" && canPublish ? `<details class="resource-release-control"><summary>Manage release</summary><form data-upload-publication="${escapeHtml(upload.id)}"><label class="field"><span>Visibility</span><select name="state"><option value="draft" ${upload.publicationState === "draft" ? "selected" : ""}>Draft</option><option value="published" ${upload.publicationState === "published" ? "selected" : ""}>Published</option><option value="scheduled" ${upload.publicationState === "scheduled" ? "selected" : ""}>Schedule release</option></select></label><label class="field" data-release-date-wrap ${upload.publicationState === "scheduled" ? "" : "hidden"}><span>Release date and time</span><input name="release_at" type="datetime-local" value="${escapeHtml(toLocalDateTime(upload.releaseAt))}" /></label><button class="btn btn-secondary btn-small" type="submit">Save release</button></form></details>` : ""}
       </li>
     `;
     }).join("");
