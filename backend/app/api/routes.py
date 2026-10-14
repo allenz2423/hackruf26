@@ -24,6 +24,7 @@ from app.api.schemas import (
     LiveSessionTicketResponse,
 )
 from app.config import Settings
+from app.live_modes import TutorMode
 from app.services.calculator import CalculatorInputError, evaluate_expression
 from app.services.lean_proofs import (
     LeanProofBusy,
@@ -112,7 +113,11 @@ async def create_live_session_ticket(
     memory_target = None
     user_id = getattr(request.state, "user_id", None)
     memory_service = getattr(request.app.state, "tutor_memory_service", None)
-    if user_id is not None and memory_service is not None:
+    if (
+        payload.mode != TutorMode.QUIZ_REASONING
+        and user_id is not None
+        and memory_service is not None
+    ):
         memory_target = await memory_service.target(
             user_id, payload.class_id, use_saved_memory=payload.use_saved_memory,
         )

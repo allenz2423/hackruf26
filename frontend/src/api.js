@@ -357,10 +357,61 @@ export async function deleteStudyMaterialApi(materialId) {
 }
 
 // Attempts endpoints
-export async function submitAttemptApi(materialId, answers) {
+export async function submitAttemptApi(materialId, answers, { runId = null, operationId = null } = {}) {
+  const body = { answers };
+  if (runId) body.run_id = runId;
+  if (operationId) body.operation_id = operationId;
   return await apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/attempts`, {
     method: "POST",
-    body: JSON.stringify({ answers })
+    body: JSON.stringify(body)
+  });
+}
+
+export async function createQuizRunApi(materialId, operationId, mode) {
+  return await apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/runs`, {
+    method: "POST", body: JSON.stringify({ operation_id: operationId, mode })
+  });
+}
+
+export async function getQuizRunApi(materialId, runId) {
+  return await apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/runs/${encodeURIComponent(runId)}`);
+}
+
+export async function listQuizRunsApi(materialId) {
+  return await apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/runs`);
+}
+
+function reasoningPath(materialId, runId, questionId) {
+  return `/api/study-materials/${encodeURIComponent(materialId)}/runs/${encodeURIComponent(runId)}/questions/${encodeURIComponent(questionId)}`;
+}
+
+export async function submitReasoningApi(materialId, runId, questionId, { operationId, text, source = "text" }) {
+  return await apiFetch(`${reasoningPath(materialId, runId, questionId)}/reasoning`, {
+    method: "POST", body: JSON.stringify({ operation_id: operationId, text, source })
+  });
+}
+
+export async function retryReasoningApi(materialId, runId, questionId, operationId) {
+  return await apiFetch(`${reasoningPath(materialId, runId, questionId)}/reasoning/retry`, {
+    method: "POST", body: JSON.stringify({ operation_id: operationId })
+  });
+}
+
+export async function skipQuizQuestionApi(materialId, runId, questionId, operationId) {
+  return await apiFetch(`${reasoningPath(materialId, runId, questionId)}/skip`, {
+    method: "POST", body: JSON.stringify({ operation_id: operationId })
+  });
+}
+
+export async function submitReasoningAnswerApi(materialId, runId, questionId, { operationId, answer }) {
+  return await apiFetch(`${reasoningPath(materialId, runId, questionId)}/answer`, {
+    method: "POST", body: JSON.stringify({ operation_id: operationId, answer })
+  });
+}
+
+export async function retryReasoningFeedbackApi(materialId, runId, questionId, operationId) {
+  return await apiFetch(`${reasoningPath(materialId, runId, questionId)}/feedback/retry`, {
+    method: "POST", body: JSON.stringify({ operation_id: operationId })
   });
 }
 

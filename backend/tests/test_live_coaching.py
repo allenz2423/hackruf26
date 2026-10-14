@@ -191,7 +191,10 @@ class FakeSession:
     async def receive(self):
         while True:
             message = await self.messages.get()
-            yield message
+            try:
+                yield message
+            finally:
+                self.messages.task_done()
             if message.server_content and message.server_content.turn_complete:
                 return
 
@@ -236,6 +239,50 @@ class CoachingTransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def emit(self, **kwargs):
         await self.session.messages.put(types.LiveServerMessage(**kwargs))
+
+    async def test_quiz_voice_forwards_only_final_student_transcription(self):
+        events = []
+        session = FakeSession()
+
+        async def send(payload, **kwargs):
+            events.append(payload)
+
+        reader = asyncio.create_task(
+            self.service._read_upstream(
+                session,
+                self.frames,
+                self.pending_annotations,
+                self.lock,
+                "fixture",
+                send,
+                forward_student_transcript=True,
+            )
+        )
+        await session.messages.put(
+            types.LiveServerMessage(
+                server_content=types.LiveServerContent(
+                    interim_input_transcription=types.Transcription(text="partial thought"),
+                    output_transcription=types.Transcription(text="model speech"),
+                )
+            )
+        )
+        await session.messages.join()
+        self.assertFalse(any(event.get("type") == "student_transcript" for event in events))
+        await session.messages.put(
+            types.LiveServerMessage(
+                server_content=types.LiveServerContent(
+                    input_transcription=types.Transcription(text="The kernel manages hardware."),
+                )
+            )
+        )
+        async with asyncio.timeout(2):
+            while not any(event.get("type") == "student_transcript" for event in events):
+                await asyncio.sleep(0.005)
+        transcript = next(event for event in events if event.get("type") == "student_transcript")
+        self.assertEqual(transcript["text"], "The kernel manages hardware.")
+        self.assertEqual(len(transcript["transcript_id"]), 36)
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
 
     async def test_receive_loop_keeps_handling_speech_during_tool_execution(self):
         started, cancelled = asyncio.Event(), asyncio.Event()

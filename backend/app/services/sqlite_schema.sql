@@ -132,6 +132,131 @@ CREATE TABLE IF NOT EXISTS study_material_attempts (
     completed_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+-- Reasoning-first quiz runs are separate from legacy score-only attempts.
+-- Every row contains intentionally submitted reasoning only; live media and
+-- unsent transcript fragments never enter these tables.
+CREATE TABLE IF NOT EXISTS quiz_runs (
+    id              TEXT PRIMARY KEY,
+    material_id     TEXT NOT NULL REFERENCES study_materials(id) ON DELETE CASCADE,
+    owner_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    operation_id    TEXT NOT NULL,
+    mode            TEXT NOT NULL DEFAULT 'standard'
+        CHECK (mode IN ('standard', 'reasoning')),
+    status          TEXT NOT NULL DEFAULT 'in_progress'
+        CHECK (status IN ('in_progress', 'completed')),
+    score_percent   REAL CHECK (score_percent IS NULL OR score_percent BETWEEN 0 AND 100),
+    submission_operation_id TEXT,
+    submission_digest TEXT,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    completed_at    TEXT,
+    UNIQUE (material_id, owner_id, operation_id),
+    CHECK ((status = 'completed' AND score_percent IS NOT NULL AND completed_at IS NOT NULL)
+        OR (status = 'in_progress' AND score_percent IS NULL AND completed_at IS NULL))
+);
+
+CREATE TABLE IF NOT EXISTS quiz_question_attempts (
+    id                              TEXT PRIMARY KEY,
+    run_id                          TEXT NOT NULL REFERENCES quiz_runs(id) ON DELETE CASCADE,
+    question_id                     TEXT NOT NULL,
+    state                           TEXT NOT NULL DEFAULT 'awaiting_reasoning'
+        CHECK (state IN ('awaiting_reasoning', 'evaluating_reasoning', 'reasoning_insufficient',
+                         'reasoning_failed', 'reasoning_accepted', 'submitted', 'completed', 'skipped')),
+    accepted_through_turn           INTEGER,
+    accepted_snapshot_hash          TEXT,
+    submitted_through_turn          INTEGER,
+    submitted_snapshot_hash         TEXT,
+    final_answer                    TEXT,
+    answer_operation_id             TEXT,
+    answer_operation_digest         TEXT,
+    correct                         INTEGER CHECK (correct IS NULL OR correct IN (0, 1)),
+    answer_feedback                 TEXT,
+    reasoning_feedback              TEXT,
+    feedback_status                 TEXT NOT NULL DEFAULT 'not_requested'
+        CHECK (feedback_status IN ('not_requested', 'pending', 'available', 'failed')),
+    feedback_operation_id           TEXT,
+    active_evaluation_operation_id TEXT,
+    skip_operation_id               TEXT,
+    created_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at                      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    submitted_at                    TEXT,
+    completed_at                    TEXT,
+    skipped_at                      TEXT,
+    version                         INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+    UNIQUE (run_id, question_id),
+    CHECK (state <> 'reasoning_accepted' OR
+        (accepted_through_turn IS NOT NULL AND accepted_snapshot_hash IS NOT NULL)),
+    CHECK (state NOT IN ('submitted', 'completed') OR
+        (answer_operation_id IS NOT NULL AND submitted_through_turn IS NOT NULL
+         AND submitted_snapshot_hash IS NOT NULL AND submitted_at IS NOT NULL)),
+    CHECK (state <> 'skipped' OR (skip_operation_id IS NOT NULL AND skipped_at IS NOT NULL)),
+    CHECK (state <> 'completed' OR (correct IS NOT NULL AND completed_at IS NOT NULL))
+);
+
+CREATE TABLE IF NOT EXISTS quiz_reasoning_turns (
+    id              TEXT PRIMARY KEY,
+    attempt_id      TEXT NOT NULL REFERENCES quiz_question_attempts(id) ON DELETE CASCADE,
+    sequence_number INTEGER NOT NULL CHECK (sequence_number > 0),
+    operation_id    TEXT NOT NULL,
+    content_digest  TEXT NOT NULL,
+    source          TEXT NOT NULL CHECK (source IN ('text', 'voice')),
+    text            TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 12000),
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (attempt_id, sequence_number),
+    UNIQUE (attempt_id, operation_id)
+);
+
+CREATE TABLE IF NOT EXISTS quiz_reasoning_evaluations (
+    id              TEXT PRIMARY KEY,
+    attempt_id      TEXT NOT NULL REFERENCES quiz_question_attempts(id) ON DELETE CASCADE,
+    operation_id    TEXT NOT NULL,
+    snapshot_hash   TEXT NOT NULL,
+    through_turn    INTEGER NOT NULL CHECK (through_turn > 0),
+    status          TEXT NOT NULL CHECK (status IN ('pending', 'available', 'failed', 'superseded')),
+    result          TEXT CHECK (result IS NULL OR result IN ('sufficient', 'insufficient')),
+    internal_reason TEXT,
+    follow_up       TEXT,
+    evaluator_version TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    completed_at    TEXT,
+    UNIQUE (attempt_id, operation_id),
+    CHECK (status <> 'available' OR (result IS NOT NULL AND internal_reason IS NOT NULL
+        AND completed_at IS NOT NULL)),
+    CHECK (result <> 'insufficient' OR follow_up IS NOT NULL)
+);
+
+CREATE TABLE IF NOT EXISTS quiz_feedback_operations (
+    id              TEXT PRIMARY KEY,
+    attempt_id      TEXT NOT NULL REFERENCES quiz_question_attempts(id) ON DELETE CASCADE,
+    operation_id    TEXT NOT NULL,
+    status          TEXT NOT NULL CHECK (status IN ('pending', 'available', 'failed', 'superseded')),
+    feedback_version TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    completed_at    TEXT,
+    UNIQUE (attempt_id, operation_id)
+);
+
+-- Aggregate-only diagnostic counters. No owner, question, reasoning, or text
+-- values are stored in metrics.
+CREATE TABLE IF NOT EXISTS quiz_reasoning_metrics (
+    metric_date         TEXT PRIMARY KEY,
+    question_attempt_count INTEGER NOT NULL DEFAULT 0,
+    evaluation_count    INTEGER NOT NULL DEFAULT 0,
+    first_evaluation_count INTEGER NOT NULL DEFAULT 0,
+    first_accepted_count INTEGER NOT NULL DEFAULT 0,
+    followup_turn_count INTEGER NOT NULL DEFAULT 0,
+    accepted_attempt_count INTEGER NOT NULL DEFAULT 0,
+    skip_count          INTEGER NOT NULL DEFAULT 0,
+    evaluation_failure_count INTEGER NOT NULL DEFAULT 0,
+    retry_count         INTEGER NOT NULL DEFAULT 0,
+    latency_total_ms    INTEGER NOT NULL DEFAULT 0,
+    latency_le_1s       INTEGER NOT NULL DEFAULT 0,
+    latency_le_3s       INTEGER NOT NULL DEFAULT 0,
+    latency_le_10s      INTEGER NOT NULL DEFAULT 0,
+    latency_le_30s      INTEGER NOT NULL DEFAULT 0,
+    latency_gt_30s      INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS uploaded_assessments (
     id                      TEXT PRIMARY KEY,
     class_id                TEXT NOT NULL,

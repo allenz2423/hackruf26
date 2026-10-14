@@ -1459,6 +1459,122 @@ main {
   gap: var(--space-3);
 }
 
+.quiz-mode-options {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.quiz-mode-options legend {
+  padding-inline: var(--space-2);
+  font-weight: 700;
+}
+
+.quiz-mode-options .practice-option {
+  align-items: center;
+}
+
+.quiz-start-error {
+  color: var(--danger);
+}
+
+.reasoning-question-list {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.reasoning-question {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.reasoning-answer-area[aria-disabled="true"] {
+  opacity: 0.72;
+}
+
+.reasoning-section {
+  display: grid;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line);
+}
+
+.reasoning-section h3 {
+  font-size: 1rem;
+}
+
+.reasoning-section textarea {
+  width: 100%;
+  min-height: 96px;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+
+.reasoning-section textarea:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.reasoning-history {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding-left: 1.5rem;
+}
+
+.reasoning-history li {
+  overflow-wrap: anywhere;
+}
+
+.reasoning-history li > span {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.reasoning-status {
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+.reasoning-actions,
+.reasoning-final-answer,
+.reasoning-voice-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.reasoning-final-answer {
+  padding-top: var(--space-2);
+}
+
+.reasoning-voice-status {
+  justify-content: space-between;
+  min-height: 2rem;
+  color: var(--muted);
+}
+
 .practice-question {
   display: block;
   min-width: 0;

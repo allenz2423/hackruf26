@@ -27,6 +27,8 @@ class LiveSessionRequest(BaseModel):
     def uploads_need_a_class(self) -> LiveSessionRequest:
         if self.upload_ids is not None and self.class_id is None:
             raise ValueError("upload_ids requires class_id.")
+        if self.mode == TutorMode.QUIZ_REASONING and (self.class_id is not None or self.upload_ids is not None):
+            raise ValueError("Quiz reasoning voice sessions cannot include class uploads.")
         return self
 
 
@@ -317,6 +319,8 @@ class MaterialDetail(MaterialSummary):
 class AttemptSubmission(BaseModel):
     model_config = ConfigDict(extra="forbid")
     answers: dict[str, str] = Field(min_length=1, max_length=100)
+    run_id: UUID | None = None
+    operation_id: UUID | None = None
 
 
 class QuestionAttemptResult(BaseModel):

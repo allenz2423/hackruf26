@@ -157,6 +157,27 @@ async def recover_interrupted_jobs(database: SQLiteDatabase) -> None:
                 "failure_code = 'generation_interrupted', "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE status = 'generating'"
             )
+            await connection.execute(
+                "UPDATE quiz_reasoning_evaluations SET status = 'failed', "
+                "completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE status = 'pending'"
+            )
+            await connection.execute(
+                "UPDATE quiz_question_attempts SET state = 'reasoning_failed', "
+                "active_evaluation_operation_id = NULL, version = version + 1, "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE state = 'evaluating_reasoning'"
+            )
+            await connection.execute(
+                "UPDATE quiz_question_attempts SET feedback_status = 'failed', "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE feedback_status = 'pending'"
+            )
+            await connection.execute(
+                "UPDATE quiz_feedback_operations SET status = 'failed', "
+                "completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE status = 'pending'"
+            )
 
 
 def json_value(value: object, fallback: object = None) -> object:

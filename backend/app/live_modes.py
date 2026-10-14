@@ -6,6 +6,7 @@ from enum import StrEnum
 class TutorMode(StrEnum):
     CONVERSATION = "conversation"
     CHECK_STEPS = "check_steps"
+    QUIZ_REASONING = "quiz_reasoning"
 
 
 class TutorLanguage(StrEnum):

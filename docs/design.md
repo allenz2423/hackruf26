@@ -54,6 +54,8 @@ Students can also upload their own course materials (notes, documents, syllabi, 
 4. **Generate study materials.** The student picks a class (and optionally specific uploads, including existing tests, lectures, or syllabus topics) and asks for a quiz, study guide, practice exam, or flashcard set. The app generates it from those sources, saves it separately from the original uploads, and opens it.
 5. **Practice and review.** The student takes a quiz or practice exam in the app, sees a score, and can open an inline text tutor on a missed question for hints and follow-up explanations while keeping the results visible.
 
+Remote quizzes also offer an optional **Reasoning Mode** at start; Standard mode remains the default and keeps its existing answer-and-submit flow. In Reasoning Mode, students can select answers first, then explain their thinking. A backend sufficiency check unlocks submission for meaningful attempts even when they are wrong; a targeted follow-up or an explicit confirmed skip handles insufficient attempts. The selected mode belongs to that saved quiz run, and submitted reasoning receives separate post-grade feedback.
+
 ## Product behavior
 
 ### Tutor style
@@ -182,7 +184,9 @@ Note           { id, class_id, title, kind: notes|document|syllabus|slides|lectu
                  status: uploading|processing|ready|failed, created_at }
 SyllabusOutline{ class_id, note_id, topics[] ({title, week?}), exams[] ({name, date?, topics[]}) }
 StudyMaterial  { id, class_id, type: quiz|study_guide|practice_exam|flashcards, source_note_ids[], scope (topics/exam), options, content (JSON), created_at }
-Attempt        { id, material_id, answers, score, completed_at }
+QuizRun        { id, material_id, owner_id, mode: standard|reasoning, status, score, created_at, completed_at }
+Attempt        { id, material_id, answers, score, completed_at } // legacy standard score history
+QuestionAttempt { id, quiz_run_id, question_id, state, reasoning_turns[], accepted_snapshot, submitted_snapshot, final_answer, grade, feedback }
 ```
 
 The hackathon build stores application data in SQLite. Accounts (username or email plus password) and login sessions are handled by the backend itself, with no external account provider. Guests can use quick tutoring and local study, but class libraries require an account.

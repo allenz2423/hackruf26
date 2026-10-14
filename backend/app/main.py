@@ -17,6 +17,7 @@ from app.api.auth import router as auth_router
 from app.api.class_library import router as class_library_router
 from app.api.errors import ApiError
 from app.api.live import router as live_router
+from app.api.quiz_attempts import router as quiz_attempts_router
 from app.api.routes import router
 from app.api.schemas import ErrorResponse
 from app.api.study_tutor import router as study_tutor_router
@@ -31,6 +32,7 @@ from app.services.gemini_client import LIVE_API_VERSION, create_genai_client
 from app.services.gemini_content import GeminiContentService
 from app.services.lean_proofs import LeanProofService, LeanRuntimeUnavailable
 from app.services.live_sessions import GeminiLiveSessionService, LiveSessionTicketStore
+from app.services.quiz_reasoning import QuizReasoningService
 from app.services.storage import LocalPrivateStorage
 from app.services.study_tutor import StudyTutorService
 from app.services.tutor_memory import TutorMemoryService
@@ -78,6 +80,7 @@ def create_app(
             settings.study_tutor_rate_limit,
             settings.study_tutor_rate_window_seconds,
         )
+        application.state.quiz_reasoning_rate_limiter = InMemoryRateLimiter(20, 60)
 
         lean_proof_service = LeanProofService(settings)
         if settings.lean_tool_enabled:
@@ -103,7 +106,12 @@ def create_app(
             settings,
             timeout_seconds=settings.gemini_content_timeout_seconds,
         )
+        quiz_client = create_genai_client(settings, timeout_seconds=30)
         application.state.gemini_content_client = content_client
+        application.state.quiz_reasoning_client = quiz_client
+        application.state.quiz_reasoning_service = QuizReasoningService(
+            quiz_client, settings.gemini_text_model,
+        )
         application.state.gemini_content_service = GeminiContentService(
             content_client,
             settings,
@@ -130,6 +138,8 @@ def create_app(
                 client.close()
             if content_client is not None:
                 content_client.close()
+            if quiz_client is not None:
+                quiz_client.close()
             await application.state.database.close()
 
     application = FastAPI(
@@ -148,6 +158,7 @@ def create_app(
     application.include_router(upload_documents_router)
     application.include_router(tutor_memory_router)
     application.include_router(study_tutor_router)
+    application.include_router(quiz_attempts_router)
 
     @application.exception_handler(ApiError)
     async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:

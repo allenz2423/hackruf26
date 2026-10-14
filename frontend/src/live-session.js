@@ -18,7 +18,8 @@ export class LiveSessionController {
     onAudioInterrupted,
     onStatusChange,
     onTutorText,
-    onMemoryState
+    onMemoryState,
+    onStudentTranscript
   } = {}) {
     this.classId = classId;
     // Backend upload ids for the class context; null uses every ready upload.
@@ -30,6 +31,7 @@ export class LiveSessionController {
     this.onStatusChange = onStatusChange || (() => {});
     this.onTutorText = onTutorText || (() => {});
     this.onMemoryState = onMemoryState || (() => {});
+    this.onStudentTranscript = onStudentTranscript || (() => {});
     this.memoryEnabled = false;
     this.ending = false;
     this.resolveEnd = null;
@@ -43,6 +45,7 @@ export class LiveSessionController {
     this.resolveReady = null;
     this.rejectReady = null;
     this.connectionId = 0;
+    this.seenTranscriptIds = new Set();
   }
 
   async connect({ mode = "conversation", language = "auto", useSavedMemory = true } = {}) {
@@ -50,6 +53,7 @@ export class LiveSessionController {
     this.rejectPending(new Error("A new tutoring session was started."));
     this.detachSocket();
     const connectionId = ++this.connectionId;
+    this.seenTranscriptIds.clear();
     this.failed = false;
     this.intentionalClose = false;
     this.memoryEnabled = false;
@@ -147,6 +151,16 @@ export class LiveSessionController {
     }
 
     if (this.ending) return;
+
+    if (message.type === "student_transcript") {
+      if (typeof message.transcript_id !== "string"
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(message.transcript_id)
+        || typeof message.text !== "string" || !message.text.trim()) return;
+      if (this.seenTranscriptIds.has(message.transcript_id)) return;
+      this.seenTranscriptIds.add(message.transcript_id);
+      this.onStudentTranscript({ transcriptId: message.transcript_id, text: message.text.slice(0, 12_000) });
+      return;
+    }
 
     if (message.type === "assistant") {
       if (message.interrupted) {

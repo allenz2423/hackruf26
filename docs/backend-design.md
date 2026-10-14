@@ -74,6 +74,13 @@ Class-library routes always scope reads and writes to the configured owner UUID.
 - `POST|GET /api/uploads/{upload_id}/document`
 - `GET /api/uploads/{upload_id}/document/files/{format}` (`pdf`, `latex`, or `original_text`)
 - `POST /api/study-materials/{material_id}/attempts`
+- `POST|GET /api/study-materials/{material_id}/runs`
+- `GET /api/study-materials/{material_id}/runs/{run_id}`
+- `POST /api/study-materials/{material_id}/runs/{run_id}/questions/{question_id}/reasoning`
+- `POST /api/study-materials/{material_id}/runs/{run_id}/questions/{question_id}/reasoning/retry`
+- `POST /api/study-materials/{material_id}/runs/{run_id}/questions/{question_id}/skip`
+- `POST /api/study-materials/{material_id}/runs/{run_id}/questions/{question_id}/answer`
+- `POST /api/study-materials/{material_id}/runs/{run_id}/questions/{question_id}/feedback/retry`
 - `POST /api/study-tutor` for in-page quiz/practice-test review hints and follow-up explanations
 - `POST /api/study-materials/{material_id}/flags`
 
@@ -121,7 +128,7 @@ The review retains its original frame ID, digest, dimensions, and a 32×18 lumin
 
 An unfinished review, including tools, has a total deadline of `LIVE_REVIEW_TIMEOUT_SECONDS`. Expiry sends a safe `screen_review_timeout` error and ends the connection; the backend never clears a busy flag and overlaps another review. Disconnect and Reset memory cancel tasks and clear frames, hashes, reviews, and pending annotation replies.
 
-The Live SDK uses `v1beta`. Its setup omits `proactivity`, `thinking_config`, and affective-dialog fields. [Gemini 3.8 Live enables proactivity permanently](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live#migrating-from-gemini-31-flash-live); a live check also confirmed that this endpoint rejects a `proactivity` setup field. Application mode controls scheduling and instructions. Production uses one Live connection with no Flash evaluator or additional speech service. HTTP and browser WebSocket event shapes remain unchanged. Frontend copy and source-lifecycle requirements are documented as a handoff in the proactive design.
+The Live SDK uses `v1beta`. Its setup omits `proactivity`, `thinking_config`, and affective-dialog fields. [Gemini 3.8 Live enables proactivity permanently](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live#migrating-from-gemini-31-flash-live); a live check also confirmed that this endpoint rejects a `proactivity` setup field. Application mode controls scheduling and instructions. Production uses one Live connection with no Flash evaluator or additional speech service. Existing event shapes remain unchanged, with the ticket-bound quiz transcript event documented above. Frontend copy and source-lifecycle requirements are documented as a handoff in the proactive design.
 
 ### Class Tutor integration
 
@@ -139,7 +146,7 @@ The browser sends `screen_paused` whenever sharing stops while Live remains conn
 
 ### WebSocket events
 
-The browser may send only `text`, `audio`, `audio_end`, `frame`, `screen_paused`, `end_session` (the last two have no additional fields), and `annotation_result` events. Event payloads are size-limited and validated; frame payloads must be JPEG and are rate-limited. The backend emits `ready` (with memory-enabled state and loaded recap count), `assistant`, `annotation_request`, `session_ended` (with recap outcome), and sanitized `error` events. WebSocket media stays in active session memory only.
+The browser may send only `text`, `audio`, `audio_end`, `frame`, `screen_paused`, `end_session` (the last two have no additional fields), and `annotation_result` events. Event payloads are size-limited and validated; frame payloads must be JPEG and are rate-limited. The backend emits `ready` (with memory-enabled state and loaded recap count), `assistant`, `annotation_request`, `session_ended` (with recap outcome), and sanitized `error` events. In the ticket-bound `quiz_reasoning` mode only, finalized `server_content.input_transcription` events are returned as `student_transcript` with a per-event ID; interim transcription and model speech are excluded. The browser scopes these events to the active quiz question and submits them as reasoning turns. Quiz voice uses no class context, saved memory, or tools. WebSocket media stays in active session memory only.
 
 The frontend caps the longest JPEG frame dimension at 1920 pixels, initially at quality 0.85, reducing quality or dimensions to stay within the backend's 2,200,000-byte decoded frame limit. Pillow validates JPEGs before forwarding and enforces a 4096-pixel dimension and 4,194,304-pixel area limit before decoding. The backend retains only the latest compressed frame and tiny comparison signature. Original source dimensions and local grayscale comparison data stay in the browser's frame map for annotation alignment and source/content validation. The browser rejects annotation references older than ten seconds and caps active marks at eight across requests. The HTTP and WebSocket formats remain unchanged.
 
@@ -226,6 +233,9 @@ The schema in `backend/app/services/sqlite_schema.sql` defines:
 - `study_materials`
 - `study_material_sources`
 - `study_material_attempts`
+- `quiz_runs` (the selected `standard` or `reasoning` mode is persisted per run)
+- `quiz_question_attempts`, `quiz_reasoning_turns`, `quiz_reasoning_evaluations`, and `quiz_feedback_operations`
+- `quiz_reasoning_metrics` (daily aggregates only; no student or question labels)
 - `uploaded_assessments`
 - `study_material_flags`
 
@@ -318,6 +328,16 @@ For `quiz` and `practice_exam`, public material detail contains `content.format`
 Answer keys, accepted answers, rubrics, and explanations are intentionally omitted from public quiz detail. Submit remote quizzes through `POST /api/study-materials/{id}/attempts`, with an `answers` object mapping question IDs to selected choice IDs, `"true"`/`"false"`, or the student's short-answer text. This call also does not require an auth token. The response provides `score_percent`, `correct_count`, and `question_results` with the correct answers, explanations, and sources for review. Do not score backend quizzes using missing client-side answer keys. Remote flags use `POST /api/study-materials/{id}/flags` without a token prerequisite as well.
 
 Short-answer scoring always accepts the canonical answer as well as the generated accepted alternatives. Matching normalizes Unicode, letter case, and repeated whitespace while preserving punctuation, signs, decimal points, and mathematical operators: `-1` must not match `1`, `1.0` must not match `10`, and `x+y` must not match `xy`. Multiple-choice submissions must match the exact choice ID after trimming surrounding whitespace. This also applies to already saved quizzes; generating a new quiz is not required for the scoring correction.
+
+### Opt-in Reasoning Mode runs
+
+The mode picker starts with Standard. Both modes create an owner-bound `quiz_runs` row; the existing Standard player and grading endpoint remain the Standard path. Reasoning Mode creates one `quiz_question_attempts` row per question and uses the run-scoped endpoints above. Local/sample quizzes do not create backend runs. Public material detail continues to omit answer keys, accepted answers, rubrics, and explanations.
+
+Each deliberately submitted text or finalized voice turn is written to `quiz_reasoning_turns` before a provider call. Evaluation context is limited to the question, choices and instructional metadata, ordered turns, latest turn, and prior follow-up prompts; it never includes the answer key. Versioned evaluator output is schema-validated, and provider or schema failures leave the saved turn locked for a safe retry. The evaluator judges meaningful engagement rather than correctness. The first sufficient evaluation stores an immutable accepted turn number and snapshot hash. Further turns append without revoking permission. Final answer submission requires that accepted state, freezes the complete included turn snapshot and answer in one transaction, and reuses the deterministic quiz grader. Feedback runs afterward and cannot alter the grade or submitted snapshot. A feedback error can be retried without another grade or answer submission.
+
+Skip is a separate terminal question state and is not returned as an incorrect submitted answer. Each operation is owner/run/question scoped and idempotent. Duplicate operation IDs with changed content conflict; a second distinct reasoning turn during an active evaluation gets a recoverable conflict. A confirmed skip supersedes a pending evaluation, and conditional state/snapshot updates discard late provider responses. Startup recovery moves abandoned evaluations and feedback jobs into retryable failed states. Retakes use new run IDs and never overwrite prior attempts. Standard attempts without a run ID continue to use the legacy endpoint for compatibility.
+
+Reasoning evaluator and feedback calls use the configured text model, server-owned versioned prompts, bounded deadlines, and strict structured output. Logs contain only failure categories and aggregate measurements, not student text. Daily aggregates track first-attempt acceptance, follow-up turns, skips, failures, retries, and latency buckets. Inspect recent aggregates on the application database with `SELECT * FROM quiz_reasoning_metrics ORDER BY metric_date DESC LIMIT 30;`; these are diagnostic workflow metrics, not mastery scores.
 
 ### Errors and recovery
 

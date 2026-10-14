@@ -41,7 +41,7 @@ function formatDate(iso) {
   return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function formatRemoteMaterial(detail, klassId, uiTypeFallback, uploads = []) {
+function formatRemoteMaterial(detail, klassId, uiTypeFallback, uploads = [], backendClassId = null) {
   const uiType = detail.kind ? fromApiKind(detail.kind) : (uiTypeFallback || "Quiz");
   const uploadNames = new Map(uploads.map((upload) => [getBackendUploadId(upload), upload.name]));
   const withSources = (item) => ({ ...item, sources: (item.sources || []).map((source) =>
@@ -79,6 +79,7 @@ function formatRemoteMaterial(detail, klassId, uiTypeFallback, uploads = []) {
   return {
     id: detail.id,
     classId: klassId,
+    backendClassId,
     title: detail.title || `${uiType}: Material`,
     type: uiType,
     scope: scopeLabel,
@@ -176,7 +177,7 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
       const merged = remoteMaterials.map((summary) => {
         const cached = existing.get(summary.id);
         return materialResult.status === "fulfilled"
-          ? formatRemoteMaterial({ ...summary, download_urls: cached?.downloadUrls, content: cached?.status === "ready" ? cached : null }, klass.id, undefined, klass.uploads)
+          ? formatRemoteMaterial({ ...summary, download_urls: cached?.downloadUrls, content: cached?.status === "ready" ? cached : null }, klass.id, undefined, klass.uploads, backendClassId)
           : summary;
       });
       const localMaterials = klass.materials.filter((material) => !material.isRemote);
@@ -405,10 +406,10 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
           options: { count, difficulty, time_limit_minutes: uiType === "Practice test" ? 15 : undefined }
         });
         // Persist the pending job so reloads and polling failures do not lose it.
-        await onMaterialAdded(formatRemoteMaterial(summary, klass.id, uiType, klass.uploads));
+        await onMaterialAdded(formatRemoteMaterial(summary, klass.id, uiType, klass.uploads, backendClassId));
         renderMaterials();
         const detail = await waitForStudyMaterial(summary.id, { signal: controller.signal });
-        await onMaterialAdded(formatRemoteMaterial(detail, klass.id, uiType, klass.uploads));
+        await onMaterialAdded(formatRemoteMaterial(detail, klass.id, uiType, klass.uploads, backendClassId));
         renderMaterials();
         if (detail.status === "failed") {
           throw new Error("Study generation failed on the server. Try generating again.");
@@ -464,7 +465,7 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
       if (material.isRemote && (material.status !== "ready" || (!material.questions?.length && !material.cards?.length && !material.content))) {
         try {
           const detail = await getStudyMaterialDetailApi(materialId);
-          Object.assign(material, formatRemoteMaterial(detail, klass.id, material.type, klass.uploads));
+          Object.assign(material, formatRemoteMaterial(detail, klass.id, material.type, klass.uploads, backendClassId));
           await updateClass(klass.id, { materials: klass.materials });
           renderMaterials();
         } catch (e) {

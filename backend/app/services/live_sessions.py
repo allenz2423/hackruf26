@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import WebSocket
 from google import genai
@@ -263,6 +263,7 @@ class GeminiLiveSessionService:
                         send_client,
                         coaching=coaching,
                         transcript=transcript,
+                        forward_student_transcript=mode == TutorMode.QUIZ_REASONING,
                     )
                 )
                 tasks = [
@@ -599,6 +600,7 @@ class GeminiLiveSessionService:
         *,
         coaching: _CoachingState | None = None,
         transcript: SessionTranscript | None = None,
+        forward_student_transcript: bool = False,
     ) -> None:
         state = coaching if coaching is not None else _CoachingState()
         try:
@@ -640,6 +642,12 @@ class GeminiLiveSessionService:
                     content = message.server_content
                     transcription = getattr(content, "input_transcription", None)
                     if getattr(transcription, "text", None):
+                        if forward_student_transcript:
+                            await send_client({
+                                "type": "student_transcript",
+                                "transcript_id": str(uuid4()),
+                                "text": str(transcription.text)[:12_000],
+                            })
                         if transcript is not None:
                             transcript.append("student", transcription.text)
                         now = time.monotonic()

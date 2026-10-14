@@ -32,6 +32,24 @@ test("congested frame samples are dropped and the next current sample can send",
   assert.equal(controller.failed, false);
 });
 
+test("only unique finalized student transcript events are forwarded", () => {
+  const received = [];
+  const controller = new LiveSessionController({ onStudentTranscript: (turn) => received.push(turn) });
+  const turn = {
+    type: "student_transcript",
+    transcript_id: "91ebed9c-d73a-45fd-9aa4-e1dcf52b99e0",
+    text: "I think the kernel handles hardware."
+  };
+  controller.handleMessage(JSON.stringify({ type: "interim_student_transcript", ...turn }));
+  controller.handleMessage(JSON.stringify({ type: "assistant", text: "The kernel is...", turn_complete: true }));
+  controller.handleMessage(JSON.stringify(turn));
+  controller.handleMessage(JSON.stringify(turn));
+  assert.deepEqual(received, [{
+    transcriptId: turn.transcript_id,
+    text: turn.text
+  }]);
+});
+
 test("the material stage renders PDF pages and images at 1920", async (t) => {
   const context = { fillRect() {}, drawImage() {} };
   globals(t, { document: { createElement: () => ({ width: 0, height: 0, getContext: () => context }) } });
@@ -87,6 +105,54 @@ test("saved source warnings distinguish changed, missing, and excerpted uploads"
   assert.match(html, /may not cover every page/);
 });
 
+test("remote quizzes start in Standard mode and offer an isolated opt-in Reasoning Mode", async (t) => {
+  const start = new Element(), alert = new Element(), retryVoice = new Element();
+  alert.hidden = true;
+  const selectedMode = { value: "reasoning" };
+  const root = {
+    innerHTML: "",
+    querySelectorAll: () => [],
+    querySelector(selector) {
+      if (selector === "[data-start-quiz]") return start;
+      if (selector === ".quiz-start-error") return alert;
+      if (selector === 'input[name="quiz-mode"]:checked') return selectedMode;
+      if (selector === "[data-retry-voice]") return retryVoice;
+      return new Element();
+    }
+  };
+  const requests = [];
+  globals(t, {
+    window: {
+      sessionStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+      addEventListener() {}, removeEventListener() {}, setTimeout() {}, clearTimeout() {},
+      confirm: () => false
+    },
+    fetch: async (path, options) => {
+      requests.push({ path, body: JSON.parse(options.body) });
+      return { ok: true, status: 201, text: async () => JSON.stringify({
+        run_id: "run-fixture", material_id: "material-fixture", mode: "reasoning",
+        status: "in_progress", attempts: []
+      }) };
+    }
+  });
+  renderQuizPlayer(root, {
+    id: "material-fixture", title: "A quiz", type: "Quiz", isRemote: true,
+    questions: [{ id: "q1", prompt: "What does the kernel do?", kind: "multiple_choice", choices: [
+      { id: "a", text: "Manage hardware" }, { id: "b", text: "Display the desktop" }
+    ] }]
+  });
+  assert.match(root.innerHTML, /Standard quiz/);
+  assert.match(root.innerHTML, /Reasoning Mode/);
+  assert.match(root.innerHTML, /value="standard" checked/);
+
+  await start.events.get("click")();
+  assert.equal(requests[0].body.mode, "reasoning");
+  assert.match(root.innerHTML, /Explain your thinking/);
+  assert.match(root.innerHTML, /value="a"/);
+  assert.match(root.innerHTML, /type="radio" name="question-0" value="a" \/>/);
+  assert.match(root.innerHTML, /type="submit" disabled>Submit answer/);
+});
+
 class Element {
   constructor() { this.events = new Map(); this.disabled = false; this.textContent = ""; }
   addEventListener(name, callback) { this.events.set(name, callback); }
@@ -134,7 +200,10 @@ function quizFixture(t, replies) {
   renderQuizPlayer(root, {
     id: "fixture", type: "Practice test", timeLimitMinutes: 1, isRemote: true,
     questions: [{ id: "q1", prompt: "Choose one", choices: [{ id: "a", text: "A" }, { id: "b", text: "B" }] }]
-  }, { onAttemptCompleted: (attempt) => attempts.push(attempt) });
+  }, {
+    runContext: { mode: "standard", runId: "run-fixture" },
+    onAttemptCompleted: (attempt) => attempts.push(attempt)
+  });
   return {
     form, input, submitButton, countdown, intervals, requests, attempts,
     advance(ms) { now += ms; },
@@ -145,7 +214,9 @@ function quizFixture(t, replies) {
 }
 
 const failed = () => ({ ok: false, status: 503, payload: { message: "Unavailable" } });
-const scored = () => ({ ok: true, status: 200, payload: { score_percent: 0, correct_count: 0, question_results: [] } });
+const scored = () => ({ ok: true, status: 200, payload: {
+  attempt_id: "run-fixture", score_percent: 0, correct_count: 0, question_results: []
+} });
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 test("scoring failure resumes the practice-test timer at its original deadline", async (t) => {

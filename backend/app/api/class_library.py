@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -1558,6 +1559,41 @@ async def submit_attempt(
         raise ApiError(409, "attempt_not_supported", "Only quizzes and practice exams can be submitted.")
     if row["status"] != "ready":
         raise ApiError(409, "material_not_ready", "Wait for this study material to finish generating.")
+
+    run = None
+    answers_digest = hashlib.sha256(
+        json.dumps(payload.answers, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if payload.run_id is not None:
+        run = await database.fetchrow(
+            "SELECT * FROM quiz_runs WHERE id = ?1 AND material_id = ?2 AND owner_id = ?3",
+            payload.run_id, material_id, user_id,
+        )
+        if run is None:
+            raise ApiError(404, "not_found", "The requested quiz run was not found.")
+        if run["mode"] != "standard":
+            raise ApiError(409, "wrong_quiz_mode", "Use the Reasoning Mode submission flow for this quiz run.")
+        if payload.operation_id is None:
+            raise ApiError(400, "operation_id_required", "A submission operation ID is required.")
+        if run["status"] == "completed":
+            if (run["submission_operation_id"] != str(payload.operation_id)
+                    or run["submission_digest"] != answers_digest):
+                raise ApiError(409, "answer_immutable", "This quiz run already has a submitted answer.")
+        elif run["submission_operation_id"] is not None and (
+            run["submission_operation_id"] != str(payload.operation_id)
+            or run["submission_digest"] != answers_digest
+        ):
+            raise ApiError(409, "idempotency_conflict", "This submission operation ID was already used with different answers.")
+    else:
+        # Keep the old standard-mode API usable, while preventing it from
+        # bypassing an explicitly started Reasoning Mode run.
+        active_reasoning_run = await database.fetchval(
+            "SELECT count(*) FROM quiz_runs WHERE material_id = ?1 AND owner_id = ?2 "
+            "AND mode = 'reasoning' AND status = 'in_progress'",
+            material_id, user_id,
+        )
+        if active_reasoning_run:
+            raise ApiError(409, "reasoning_required", "Finish or skip the active Reasoning Mode run before submitting a standard attempt.")
     content = json_value(row["content"], {})
     questions = content.get("questions", []) if isinstance(content, dict) else []
     question_by_id = {str(question["id"]): question for question in questions}
@@ -1595,14 +1631,42 @@ async def submit_attempt(
             )
         )
     score = round(correct_count * 100 / len(question_by_id), 2)
-    attempt_id = await database.fetchval(
-        "INSERT INTO study_material_attempts (id, material_id, answers, score_percent) "
-        "VALUES (?1, ?2, ?3, ?4) RETURNING id",
-        uuid4(),
-        material_id,
-        json.dumps(payload.answers),
-        score,
-    )
+    attempt_id = payload.run_id or uuid4()
+    if run is None:
+        attempt_id = await database.fetchval(
+            "INSERT INTO study_material_attempts (id, material_id, answers, score_percent) "
+            "VALUES (?1, ?2, ?3, ?4) RETURNING id",
+            attempt_id, material_id, json.dumps(payload.answers), score,
+        )
+    else:
+        async with database.acquire() as connection:
+            async with connection.transaction():
+                current = await connection.fetchrow(
+                    "SELECT status, submission_operation_id, submission_digest FROM quiz_runs WHERE id = ?1",
+                    payload.run_id,
+                )
+                if current is None:
+                    raise ApiError(404, "not_found", "The requested quiz run was not found.")
+                if current["status"] == "completed":
+                    if (current["submission_operation_id"] != str(payload.operation_id)
+                            or current["submission_digest"] != answers_digest):
+                        raise ApiError(409, "answer_immutable", "This quiz run already has a submitted answer.")
+                else:
+                    changed = await connection.fetchrow(
+                        "UPDATE quiz_runs SET submission_operation_id = ?2, submission_digest = ?3, "
+                        "status = 'completed', score_percent = ?4, "
+                        "completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
+                        "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                        "WHERE id = ?1 AND status = 'in_progress' RETURNING id",
+                        payload.run_id, payload.operation_id, answers_digest, score,
+                    )
+                    if changed is None:
+                        raise ApiError(409, "answer_immutable", "This quiz run already has a submitted answer.")
+                    await connection.execute(
+                        "INSERT INTO study_material_attempts (id, material_id, answers, score_percent) "
+                        "VALUES (?1, ?2, ?3, ?4)",
+                        payload.run_id, material_id, json.dumps(payload.answers), score,
+                    )
     return AttemptResult(
         attempt_id=attempt_id,
         score_percent=score,
