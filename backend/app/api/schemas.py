@@ -266,7 +266,7 @@ StudyQuestionKind = Literal["multiple_choice", "true_false", "short_answer"]
 
 class StudyOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    count: int = Field(default=10, ge=4, le=50)
+    count: int = Field(default=10, ge=4, le=100)
     difficulty: StudyDifficulty = "mixed"
     time_limit_minutes: int | None = Field(default=None, ge=1, le=300)
     question_types: list[StudyQuestionKind] | None = Field(
@@ -527,14 +527,14 @@ class QuestionContent(BaseModel):
 class QuizContent(BaseModel):
     model_config = ConfigDict(extra="forbid")
     format: Literal["quiz"]
-    questions: list[QuestionContent] = Field(min_length=1, max_length=50)
+    questions: list[QuestionContent] = Field(min_length=1, max_length=100)
 
 
 class PracticeExamContent(BaseModel):
     model_config = ConfigDict(extra="forbid")
     format: Literal["practice_exam"]
     instructions: str = Field(min_length=1, max_length=2000)
-    questions: list[QuestionContent] = Field(min_length=1, max_length=50)
+    questions: list[QuestionContent] = Field(min_length=1, max_length=100)
 
 
 class GuideSectionContent(BaseModel):
@@ -548,7 +548,7 @@ class GuideSectionContent(BaseModel):
 class StudyGuideContent(BaseModel):
     model_config = ConfigDict(extra="forbid")
     format: Literal["study_guide"]
-    sections: list[GuideSectionContent] = Field(min_length=1, max_length=50)
+    sections: list[GuideSectionContent] = Field(min_length=1, max_length=100)
 
 
 DocumentDetailLevel = Literal["concise", "balanced", "detailed"]
@@ -582,7 +582,7 @@ class FlashcardContent(BaseModel):
 class FlashcardsContent(BaseModel):
     model_config = ConfigDict(extra="forbid")
     format: Literal["flashcards"]
-    cards: list[FlashcardContent] = Field(min_length=1, max_length=50)
+    cards: list[FlashcardContent] = Field(min_length=1, max_length=100)
 
 
 class SyllabusTopicAI(BaseModel):

@@ -21,7 +21,13 @@ from app.api.class_library import (
     get_study_material,
 )
 from app.api.errors import ApiError
-from app.api.schemas import FlashcardsContent, PracticeExamContent, QuizContent, StudyGuideContent
+from app.api.schemas import (
+    FlashcardsContent,
+    PracticeExamContent,
+    QuizContent,
+    StudyGuideContent,
+    StudyOptions,
+)
 from app.api.upload_documents import (
     _create_upload_document_job,
     _reserve_document,
@@ -166,6 +172,86 @@ class StudyFormatTests(unittest.TestCase):
                     options={"count": 4},
                     sources=[{"id": source_id, "title": "Notes", "extracted_text": "Glucose."}],
                 )
+
+    def test_100_item_limit_is_supported_across_generated_materials(self) -> None:
+        questions = [
+            {
+                "id": f"q{index}",
+                "kind": "short_answer",
+                "prompt": f"Question {index}?",
+                "answer": f"answer {index}",
+                "accepted_answers": [f"answer {index}"],
+                "explanation": "From the supplied notes.",
+            }
+            for index in range(100)
+        ]
+        contents = [
+            QuizContent(format="quiz", questions=questions),
+            PracticeExamContent(
+                format="practice_exam", instructions="Practice exam.", questions=questions
+            ),
+            StudyGuideContent(
+                format="study_guide",
+                sections=[{"heading": f"Section {i}", "body": "Notes."} for i in range(100)],
+            ),
+            FlashcardsContent(
+                format="flashcards",
+                cards=[
+                    {"id": f"c{i}", "front": f"Term {i}", "back": "Definition."}
+                    for i in range(100)
+                ],
+            ),
+        ]
+        self.assertEqual(StudyOptions(count=100).count, 100)
+        for content in contents:
+            with self.subTest(kind=content.format):
+                item_list = next(
+                    value
+                    for key, value in content.model_dump().items()
+                    if key in {"questions", "sections", "cards"}
+                )
+                self.assertEqual(len(item_list), 100)
+        with self.assertRaises(ValueError):
+            StudyOptions(count=101)
+        with self.assertRaises(ValueError):
+            QuizContent(format="quiz", questions=[*questions, questions[0]])
+
+    def test_100_question_generation_has_an_expanded_structured_output_budget(self) -> None:
+        upload_id = uuid4()
+        source = {
+            "id": upload_id,
+            "title": "Biology notes",
+            "extracted_text": "Glucose stores energy.",
+        }
+        questions = [
+            {
+                "id": f"q{index}",
+                "kind": "short_answer",
+                "prompt": f"Question {index}?",
+                "answer": f"answer {index}",
+                "accepted_answers": [f"answer {index}"],
+                "explanation": "From the supplied notes.",
+                "sources": [{"upload_id": str(upload_id)}],
+            }
+            for index in range(100)
+        ]
+        service = GeminiContentService(None, settings())
+        service._generate_json = Mock(
+            return_value=QuizContent(format="quiz", questions=questions)
+        )
+        _, content = service.generate_material(
+            kind="quiz",
+            class_name="BIO 170",
+            scope={"kind": "uploads", "upload_ids": [str(upload_id)]},
+            options={
+                "count": 100,
+                "difficulty": "mixed",
+                "question_types": ["short_answer"],
+            },
+            sources=[source],
+        )
+        self.assertEqual(len(content["questions"]), 100)
+        self.assertEqual(service._generate_json.call_args.kwargs["max_output_tokens"], 48_000)
 
 
 class LatexExportTests(unittest.TestCase):

@@ -308,7 +308,7 @@ The Study tab now replaces the coarse scope dropdown with a checklist of actual 
 }
 ```
 
-Use actual UUID values in requests. Supported material kinds are `quiz`, `practice_exam`, `study_guide`, and `flashcards`. `count` must be 4–50; difficulty must be `mixed`, `easier`, or `harder`. `question_types` is optional and applies only to quizzes and practice exams; when omitted, all three question kinds are requested. `time_limit_minutes` is optional, must be 1–300, and applies only to `practice_exam`. Extra request fields are rejected.
+Use actual UUID values in requests. Supported material kinds are `quiz`, `practice_exam`, `study_guide`, and `flashcards`. `count` must be 4–100; difficulty must be `mixed`, `easier`, or `harder`. `question_types` is optional and applies only to quizzes and practice exams; when omitted, all three question kinds are requested. `time_limit_minutes` is optional, must be 1–300, and applies only to `practice_exam`. Extra request fields are rejected.
 
 The response is HTTP `202` with a material summary containing `id`, `class_id`, `kind`, `status`, `item_count`, `scope`, and `options`. It acknowledges a background job; it does not include completed questions. Poll `GET /api/study-materials/{id}` without a token prerequisite. Use sequential polling to avoid overlapping requests:
 

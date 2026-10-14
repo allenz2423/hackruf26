@@ -1307,13 +1307,14 @@ main {
 
 .material-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
   gap: var(--space-3);
 }
 
 .material-card {
   display: grid;
   gap: var(--space-3);
+  min-width: 0;
   padding: var(--space-4);
   align-content: start;
 }
@@ -1322,13 +1323,34 @@ main {
   display: flex;
   align-items: center;
   gap: var(--space-3);
+  min-width: 0;
 }
 
 .material-card footer {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: var(--space-2);
+  min-width: 0;
+}
+
+.material-card .row-main,
+.material-card .row-meta,
+.material-card .preview-list,
+.material-card .preview-list li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.material-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  min-width: 0;
+  max-width: 100%;
 }
 
 .material-badges {

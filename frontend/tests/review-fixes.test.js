@@ -3,11 +3,12 @@ import test from "node:test";
 
 import { LiveSessionController } from "../src/live-session.js";
 import { MaterialStage, MAX_PAGE_DIMENSION } from "../src/material-stage.js";
-import { citedPdfUrl } from "../src/file-preview.js";
+import { citedPdfUrl, uploadDocumentSectionsHtml } from "../src/file-preview.js";
 import { quizTutorContext, readQuizTutorContext } from "../src/quiz-tutor-context.js";
 import { renderQuizPlayer } from "../src/quiz-player.js";
 import { sourceCitationHtml, sourceWarningsHtml } from "../src/source-citations.js";
 import { submitReasoningApi } from "../src/api.js";
+import { defaultPracticeTestTimeLimit } from "../src/study.js";
 
 function globals(t, values) {
   for (const [key, value] of Object.entries(values)) {
@@ -113,6 +114,26 @@ test("citations are accessible buttons with escaped labels and locator data", ()
   assert.equal(citedPdfUrl("blob:fixture", { page: 5 }), "blob:fixture#page=5");
   assert.equal(citedPdfUrl("blob:fixture#old", { page: 2 }), "blob:fixture#page=2");
   assert.equal(citedPdfUrl("blob:fixture", { page: -1 }), "blob:fixture");
+});
+
+test("saved upload document previews format math and escape generated text", () => {
+  const html = uploadDocumentSectionsHtml([{
+    heading: "Carbohydrates $C_6H_{12}O_6$",
+    body: "Glucose contains $\\alpha$ bonds.\nA second line.\n\nUnsafe <img src=x onerror=alert(1)>",
+    key_terms: ["monosaccharide"],
+    sources: []
+  }], "BIO 170.pdf");
+  assert.match(html, /class="tex-math/);
+  assert.match(html, /<div class="guide-section-body"><p>/);
+  assert.match(html, /A second line\.<\/p>/);
+  assert.match(html, /Key terms:<\/strong> monosaccharide/);
+  assert.ok(!html.includes("<img src=x"));
+  assert.match(html, /&lt;img src=x/);
+});
+
+test("larger practice tests receive proportionally longer default timers", () => {
+  assert.equal(defaultPracticeTestTimeLimit(20), 15);
+  assert.equal(defaultPracticeTestTimeLimit(100), 75);
 });
 
 test("long quiz handoffs stay within the backend's 5000-character text limit", () => {

@@ -489,7 +489,7 @@ class GeminiContentService:
         generated = self._generate_json(
             prompt,
             schema,
-            max_output_tokens=16_000,
+            max_output_tokens=min(48_000, max(16_000, count * 480)),
             system_instruction=STUDY_MATERIAL_SYSTEM_PROMPTS[kind],
         )
         content = generated.model_dump(mode="json")

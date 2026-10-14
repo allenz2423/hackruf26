@@ -21,6 +21,12 @@ const TYPES = [
 ];
 
 const TYPE_ICONS = Object.fromEntries(TYPES.map((type) => [type.value, type.icon]));
+const MIN_STUDY_ITEM_COUNT = 4;
+const MAX_STUDY_ITEM_COUNT = 100;
+
+export function defaultPracticeTestTimeLimit(count) {
+  return Math.max(15, Math.ceil(count * 0.75));
+}
 
 function toApiKind(uiType) {
   if (uiType === "Practice test") return "practice_exam";
@@ -243,12 +249,8 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
             <div class="field-grid">
               <div class="field-block">
                 <label for="generate-count" id="generate-count-label">Question count</label>
-                <select id="generate-count" name="count">
-                  <option value="5">5 questions</option>
-                  <option value="10" selected>10 questions</option>
-                  <option value="15">15 questions</option>
-                  <option value="20">20 questions</option>
-                </select>
+                <input id="generate-count" name="count" type="number" min="${MIN_STUDY_ITEM_COUNT}" max="${MAX_STUDY_ITEM_COUNT}" step="1" value="10" inputmode="numeric" required />
+                <p class="field-hint">Choose ${MIN_STUDY_ITEM_COUNT}–${MAX_STUDY_ITEM_COUNT} items. Larger sets take longer to generate.</p>
               </div>
               <div class="field-block">
                 <label for="generate-difficulty">Difficulty</label>
@@ -358,7 +360,7 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
             </div>
             <footer>
               <span class="row-meta">${formatDate(material.createdAt)}${material.timeLimitMinutes ? ` &middot; ${material.timeLimitMinutes} min` : ""}</span>
-              <div style="display: flex; gap: 0.5rem; align-items: center;">
+              <div class="material-card-actions">
                 <button class="btn ${canPlay ? "btn-primary" : "btn-secondary"} material-open" type="button" data-open-material="${escapeHtml(material.id)}">
                   ${isFlashcards ? "Study cards" : isAssessment ? "Start" : "Open"}
                 </button>
@@ -379,7 +381,12 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
       if (generateBtn.disabled) return;
       const data = new FormData(form);
       const uiType = data.get("type");
-      const count = Number(data.get("count")) || 10;
+      const count = Number(data.get("count"));
+      if (!Number.isInteger(count) || count < MIN_STUDY_ITEM_COUNT || count > MAX_STUDY_ITEM_COUNT) {
+        generationStatus.textContent = `Choose between ${MIN_STUDY_ITEM_COUNT} and ${MAX_STUDY_ITEM_COUNT} items.`;
+        root.querySelector("#generate-count").focus();
+        return;
+      }
       const difficulty = data.get("difficulty") || "mixed";
       const selectedUploadIds = data.getAll("source_upload");
       const controller = new AbortController();
@@ -403,7 +410,11 @@ export async function renderStudyTab({ root, klass, onMaterialAdded, onAttemptCo
         const summary = await createStudyMaterialApi(classId, {
           kind: toApiKind(uiType),
           scope: { kind: "uploads", upload_ids: uploadIds },
-          options: { count, difficulty, time_limit_minutes: uiType === "Practice test" ? 15 : undefined }
+          options: {
+            count,
+            difficulty,
+            time_limit_minutes: uiType === "Practice test" ? defaultPracticeTestTimeLimit(count) : undefined
+          }
         });
         // Persist the pending job so reloads and polling failures do not lose it.
         await onMaterialAdded(formatRemoteMaterial(summary, klass.id, uiType, klass.uploads, backendClassId));

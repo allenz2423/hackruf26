@@ -4,6 +4,7 @@ import { escapeHtml, formatBytes, toast } from "./ui.js";
 import { getBackendUploadId } from "./course-sync.js";
 import { getUploadDetailApi, getUploadDocumentApi, createUploadDocumentApi, downloadUploadDocumentApi } from "./api.js";
 import { formatSourceCitation } from "./source-citations.js";
+import { mathHtml, typesetMath } from "./math.js";
 
 const MAX_TEXT_PREVIEW = 2 * 1024 * 1024;
 
@@ -76,6 +77,29 @@ function locateOriginal(container, citation) {
 export function citedPdfUrl(url, citation) {
   return Number.isInteger(citation?.page) && citation.page > 0
     ? `${url.split("#")[0]}#page=${citation.page}` : url;
+}
+
+export function uploadDocumentSectionsHtml(sections, uploadName) {
+  return (Array.isArray(sections) ? sections : []).map((section) => {
+    const paragraphs = String(section.body || "")
+      .split(/\n{2,}/)
+      .filter((paragraph) => paragraph.trim())
+      .map((paragraph) => `<p>${mathHtml(paragraph.trim()).replace(/\n/g, "<br>")}</p>`)
+      .join("");
+    const sources = (section.sources || [])
+      .map((source) => escapeHtml(formatSourceCitation({ ...source, name: uploadName })))
+      .join("; ");
+    const keyTerms = Array.isArray(section.key_terms) && section.key_terms.length
+      ? `<p><strong>Key terms:</strong> ${section.key_terms.map(escapeHtml).join(", ")}</p>`
+      : "";
+    return `
+      <section class="guide-section">
+        <h3 class="guide-section-heading">${mathHtml(section.heading || "")}</h3>
+        <div class="guide-section-body">${paragraphs}</div>
+        ${keyTerms}
+        <p class="row-meta">${sources}</p>
+      </section>`;
+  }).join("");
 }
 
 function renderFilePreview(dialog, file, citation) {
@@ -205,13 +229,8 @@ export async function openUploadPreview(upload, { citation = null, initialView =
         if (!dialog.open || signal.aborted) return;
         status.textContent = `${level[0].toUpperCase() + level.slice(1)} document saved. The PDF includes the original extracted text.`;
         downloads.hidden = false;
-        body.innerHTML = (document.content?.sections || []).map((section) => `
-          <section class="guide-section">
-            <h3 class="guide-section-heading">${escapeHtml(section.heading)}</h3>
-            <div class="guide-section-body">${section.body.split(/\n{2,}/).map((paragraph) => `<p>${escapeHtml(paragraph).replace(/\n/g, "<br>")}</p>`).join("")}</div>
-            ${section.key_terms?.length ? `<p><strong>Key terms:</strong> ${section.key_terms.map(escapeHtml).join(", ")}</p>` : ""}
-            <p class="row-meta">${(section.sources || []).map((source) => escapeHtml(formatSourceCitation({ ...source, name: upload.name }))).join("; ")}</p>
-          </section>`).join("");
+        body.innerHTML = uploadDocumentSectionsHtml(document.content?.sections, upload.name);
+        void typesetMath(body);
       } catch (error) {
         if (signal.aborted || !dialog.open) return;
         status.textContent = error.message || "Could not load the study document. Try again.";

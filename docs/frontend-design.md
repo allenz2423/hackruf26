@@ -99,7 +99,7 @@ The local SQLite workspace calls class/upload APIs without an access-token prere
 
 ### Study tab (generated materials)
 
-- **Generate panel:** pick a type (Quiz, Practice test, Study guide, Flashcards); a scope (whole class, selected uploads, syllabus topics, or an upcoming exam such as “Midterm 1”); and options (number of questions, difficulty, time limit for practice tests). Show a generating state and allow cancel.
+- **Generate panel:** pick a type (Quiz, Practice test, Study guide, Flashcards); a scope (whole class, selected uploads, syllabus topics, or an upcoming exam such as “Midterm 1”); and options (4–100 questions, sections, or cards depending on the selected type; difficulty; and time limit for practice tests). The default practice-test timer scales at 45 seconds per item with a 15-minute minimum. Show a generating state and allow cancel.
 - **Saved materials list:** every generated item with type, scope, date, and last score. The student can open, retake, regenerate, or delete it.
 - **Quiz / practice test player:** one question at a time or full-page mode, multiple-choice, true/false, and short/free-response inputs, an optional timer for practice tests, and Submit. The results page shows the score, correct answers, explanations, and source links (page/slide number or lecture timestamp that opens the upload detail view). Each missed question has **Ask tutor about this**, which opens a text chat beneath that question in the same results page.
 - **Study guide view:** rendered headings, key terms, formulas (use KaTeX or MathJax for math), and source links; printable.
