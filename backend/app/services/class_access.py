@@ -144,8 +144,10 @@ async def material_access(
     """Return a readable material and class access, preserving private ownership."""
     row = await connection.fetchrow(
         "SELECT id,class_id,origin_class_id,resource_scope,owner_id,created_by,"
-        "publication_state,release_at,kind,status,title,content,scope,options,created_at,"
-        "generated_at,failure_code,sources_outdated,sources_missing,context_truncated "
+        "publication_state,release_at,feedback_release_policy,kind,status,title,content,scope,options,created_at,"
+        "assessment_validation_state,assessment_validation_version,generated_at,failure_code,"
+        "assessment_engine_version,"
+        "sources_outdated,sources_missing,context_truncated "
         "FROM study_materials WHERE id=?1",
         material_id,
     )

@@ -24,9 +24,11 @@ import { readQuizTutorContext } from "./quiz-tutor-context.js";
 import { chooseMaterial, chooseTutorSources, loadTutorSources, saveTutorSources, sourcesSummary } from "./tutor-materials.js";
 import { icon } from "./icons.js";
 import { renderLibraryTab } from "./library.js";
+import { renderConceptGraphTab } from "./concept-graph.js";
 import { createRouter } from "./router.js";
 import { ScreenCaptureController } from "./screen-capture.js";
 import { renderStudyTab } from "./study.js";
+import { renderLearningProgress } from "./progress.js";
 import { AVATAR_ACCESSORIES, AVATAR_COLORS, AVATAR_FACES, avatarSvg, describeAvatar, normalizeAvatar, randomAvatar } from "./avatar.js";
 import { JotBuddy } from "./jot-buddy.js";
 import { renderMathInto } from "./math.js";
@@ -368,6 +370,7 @@ function shell(content, { section = "classes", tutor = section === "tutor", comp
           <a href="#/study" ${section === "study" ? 'aria-current="page"' : ""}>Quick study</a>
         ` : currentUser ? `
           <a href="#/classes" ${section === "classes" ? 'aria-current="page"' : ""}>Classes</a>
+          <a href="#/progress" ${section === "progress" ? 'aria-current="page"' : ""}>Progress</a>
         ` : ""}
         ${currentUser || guestAccess ? `<a href="#/tutor" ${section === "tutor" ? 'aria-current="page"' : ""}>Quick tutor</a>` : ""}
       </nav>
@@ -384,6 +387,11 @@ function shell(content, { section = "classes", tutor = section === "tutor", comp
   });
 
   wireAccountMenu();
+}
+
+function renderLearningProgressPage() {
+  shell(`<div id="learning-progress-root" class="learning-progress-page" aria-live="polite"></div>`, { section: "progress" });
+  void renderLearningProgress({ root: document.querySelector("#learning-progress-root") });
 }
 
 function renderHome() {
@@ -639,6 +647,7 @@ async function renderClasses() {
 
 const CLASS_TABS = [
   { id: "library", label: "Library", icon: "book" },
+  { id: "concepts", label: "Concepts", icon: "chart" },
   { id: "study", label: "Study", icon: "sparkles" },
   { id: "tutor", label: "Tutor", icon: "monitor" },
   { id: "people", label: "People", icon: "user" }
@@ -654,8 +663,15 @@ async function renderClassTab({ id, tab }) {
     window.location.hash = "#/classes";
     return;
   }
+  const backendClassId = getBackendClassId(klass);
+  if (tab === "concepts" && !backendClassId) {
+    // The class map is backed by the server's source index. Local sample
+    // classes should keep their existing browser-only workflow unchanged.
+    window.location.hash = `#/classes/${encodeURIComponent(klass.id)}/library`;
+    return;
+  }
   const tutor = tab === "tutor";
-  if (tab === "people" && !classHasCapability(klass, "read")) {
+  if (["concepts", "people"].includes(tab) && !classHasCapability(klass, "read")) {
     window.location.hash = "#/classes";
     return;
   }
@@ -673,7 +689,7 @@ async function renderClassTab({ id, tab }) {
           </div>
         </div>
         <nav class="tabs" aria-label="${escapeHtml(klass.name)} sections">
-          ${CLASS_TABS.map((item) => `
+          ${CLASS_TABS.filter((item) => item.id !== "concepts" || (backendClassId && classHasCapability(klass, "read"))).map((item) => `
             <a href="#/classes/${encodeURIComponent(klass.id)}/${item.id}" ${tab === item.id ? 'aria-current="page"' : ""}>
               ${icon(item.icon, { size: 18 })} ${item.label}
             </a>
@@ -719,6 +735,11 @@ async function renderClassTab({ id, tab }) {
 
   if (tab === "tutor") {
     renderTutor(klass);
+    return;
+  }
+
+  if (tab === "concepts") {
+    await renderConceptGraphTab({ root, klass });
     return;
   }
 
@@ -2088,6 +2109,7 @@ const router = createRouter(
     { path: "/signup", render: () => renderLogin({ mode: "signup" }) },
     { path: "/classes", render: requireUser(renderClasses) },
     { path: "/classes/:id/:tab", render: requireUser(renderClassTab) },
+    { path: "/progress", render: requireUser(renderLearningProgressPage) },
     { path: "/account", render: requireUser(renderAccount, "Log in to see your account.") },
     { path: "/admin", render: requireAdmin(renderAdmin) },
     { path: "/tutor", render: requireTutorAccess },

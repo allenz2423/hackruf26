@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -15,10 +16,14 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
+from app.api.class_concept_graph import router as class_concept_graph_router
 from app.api.class_library import router as class_library_router
 from app.api.class_memberships import router as class_memberships_router
+from app.api.class_question_bank import router as class_question_bank_router
 from app.api.errors import ApiError
+from app.api.learning import router as learning_router
 from app.api.live import router as live_router
+from app.api.mastery_ladders import router as mastery_ladders_router
 from app.api.quiz_attempts import router as quiz_attempts_router
 from app.api.routes import router
 from app.api.schemas import ErrorResponse
@@ -29,17 +34,110 @@ from app.config import Settings, get_settings
 from app.middleware.request_context import RequestContextMiddleware
 from app.middleware.request_size import RequestSizeLimitMiddleware
 from app.security.rate_limit import InMemoryRateLimiter
+from app.services.concept_graph import (
+    enqueue_missing_concept_extractions,
+    process_queued_concept_extractions,
+    recover_concept_extraction_jobs,
+)
 from app.services.database import create_database, recover_interrupted_jobs
 from app.services.gemini_client import LIVE_API_VERSION, create_genai_client
 from app.services.gemini_content import GeminiContentService
 from app.services.lean_proofs import LeanProofService, LeanRuntimeUnavailable
+from app.services.learning_calibration import (
+    enqueue_learning_calibration_refresh,
+    enqueue_question_bank_replenishment,
+    process_learning_calibration_jobs,
+    process_question_bank_replenishment_jobs,
+    recover_learning_calibration_jobs,
+)
 from app.services.live_sessions import GeminiLiveSessionService, LiveSessionTicketStore
 from app.services.quiz_reasoning import QuizReasoningService
+from app.services.source_index import (
+    MAX_BACKFILL_PER_START,
+    enqueue_backfill_jobs,
+    process_queued_jobs,
+    recover_source_index_jobs,
+)
 from app.services.storage import LocalPrivateStorage
 from app.services.study_tutor import StudyTutorService
 from app.services.tutor_memory import TutorMemoryService
 
 logger = logging.getLogger("screen_tutor.errors")
+
+
+async def _run_source_index_backfill(application: FastAPI) -> None:
+    """Drain legacy source-index work in small batches after the server starts."""
+    database = application.state.database
+    try:
+        while True:
+            await enqueue_backfill_jobs(database, limit=MAX_BACKFILL_PER_START)
+            processed = await process_queued_jobs(application, limit=MAX_BACKFILL_PER_START)
+            queued = await database.fetchval(
+                "SELECT count(*) FROM source_index_jobs WHERE status='queued'"
+            )
+            unindexed = await database.fetchval(
+                "SELECT count(*) FROM course_notes n "
+                "LEFT JOIN source_index_heads h ON h.note_id=n.id "
+                "WHERE n.status='ready' AND (h.note_id IS NULL OR "
+                "h.processing_revision<>n.processing_revision) AND NOT EXISTS ("
+                "SELECT 1 FROM source_index_jobs j WHERE j.note_id=n.id "
+                "AND j.processing_revision=n.processing_revision) AND NOT EXISTS ("
+                "SELECT 1 FROM uploaded_assessments a WHERE a.note_id=n.id AND "
+                "(a.has_student_responses=1 OR a.score_percent IS NOT NULL "
+                "OR a.grading_result IS NOT NULL))"
+            )
+            if not queued and not unindexed:
+                return
+            if not processed:
+                await asyncio.sleep(1)
+            else:
+                await asyncio.sleep(0.05)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("source_index_backfill_worker_failed")
+
+
+async def _run_concept_graph_worker(application: FastAPI) -> None:
+    """Drain bounded class graph jobs after the server is available."""
+    database = application.state.database
+    try:
+        while True:
+            try:
+                await enqueue_missing_concept_extractions(database, limit=20)
+                processed = await process_queued_concept_extractions(application, limit=2)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("concept_graph_extraction_batch_failed")
+                processed = 0
+            await asyncio.sleep(0.05 if processed else 2)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("concept_graph_extraction_worker_failed")
+
+
+async def _run_learning_calibration_worker(application: FastAPI) -> None:
+    """Run bounded bank maintenance and aggregate calibration checks."""
+    database = application.state.database
+    try:
+        while True:
+            try:
+                await enqueue_question_bank_replenishment(database)
+                processed = await process_question_bank_replenishment_jobs(application, limit=1)
+                await enqueue_learning_calibration_refresh(database)
+                await process_learning_calibration_jobs(database, limit=1)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("learning_calibration_batch_failed")
+                processed = 0
+            await asyncio.sleep(2 if processed else 900)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("learning_calibration_worker_failed")
 
 
 def create_app(
@@ -74,6 +172,8 @@ def create_app(
             settings.upload_rate_limit,
             settings.upload_rate_window_seconds,
         )
+        application.state.source_search_rate_limiter = InMemoryRateLimiter(90, 60)
+        application.state.concept_graph_rate_limiter = InMemoryRateLimiter(5, 300)
         application.state.generation_rate_limiter = InMemoryRateLimiter(
             settings.generation_rate_limit,
             settings.generation_rate_window_seconds,
@@ -100,7 +200,10 @@ def create_app(
 
         application.state.database = await create_database(settings)
         await recover_interrupted_jobs(application.state.database)
+        await recover_learning_calibration_jobs(application.state.database)
         application.state.private_storage = LocalPrivateStorage(settings)
+        await recover_source_index_jobs(application.state.database)
+        await recover_concept_extraction_jobs(application.state.database)
         application.state.live_session_ticket_store = LiveSessionTicketStore()
 
         client = create_genai_client(settings, api_version=LIVE_API_VERSION)
@@ -113,17 +216,21 @@ def create_app(
         application.state.gemini_content_client = content_client
         application.state.quiz_reasoning_client = quiz_client
         application.state.quiz_reasoning_service = QuizReasoningService(
-            quiz_client, settings.gemini_text_model,
+            quiz_client,
+            settings.gemini_text_model,
         )
         application.state.gemini_content_service = GeminiContentService(
             content_client,
             settings,
         )
         application.state.study_tutor_service = StudyTutorService(
-            content_client, settings.gemini_text_model,
+            content_client,
+            settings.gemini_text_model,
         )
         application.state.tutor_memory_service = TutorMemoryService(
-            application.state.database, content_client, settings.gemini_text_model,
+            application.state.database,
+            content_client,
+            settings.gemini_text_model,
         )
         application.state.live_session_service = GeminiLiveSessionService(
             client,
@@ -134,9 +241,36 @@ def create_app(
             memory_service=application.state.tutor_memory_service,
         )
 
+        source_index_task = asyncio.create_task(_run_source_index_backfill(application))
+        concept_graph_task = asyncio.create_task(_run_concept_graph_worker(application))
+        # Background replenishment makes provider calls and is enabled for the
+        # production service. Local developers and test clients can exercise the
+        # same bounded service functions explicitly without surprise API calls.
+        learning_calibration_task = (
+            asyncio.create_task(_run_learning_calibration_worker(application))
+            if settings.app_env == "production"
+            else None
+        )
         try:
             yield
         finally:
+            if learning_calibration_task is not None:
+                learning_calibration_task.cancel()
+            concept_graph_task.cancel()
+            source_index_task.cancel()
+            if learning_calibration_task is not None:
+                try:
+                    await learning_calibration_task
+                except asyncio.CancelledError:
+                    pass
+            try:
+                await concept_graph_task
+            except asyncio.CancelledError:
+                pass
+            try:
+                await source_index_task
+            except asyncio.CancelledError:
+                pass
             if client is not None:
                 client.close()
             if content_client is not None:
@@ -160,10 +294,14 @@ def create_app(
     application.include_router(live_router)
     application.include_router(class_library_router)
     application.include_router(class_memberships_router)
+    application.include_router(class_question_bank_router)
+    application.include_router(class_concept_graph_router)
     application.include_router(upload_documents_router)
     application.include_router(tutor_memory_router)
     application.include_router(study_tutor_router)
     application.include_router(quiz_attempts_router)
+    application.include_router(learning_router)
+    application.include_router(mastery_ladders_router)
 
     @application.exception_handler(ApiError)
     async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:

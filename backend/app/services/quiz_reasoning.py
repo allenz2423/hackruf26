@@ -13,6 +13,7 @@ from app.services.gemini_content import _provider_response_schema
 from app.services.study_prompts import (
     QUIZ_REASONING_EVALUATOR_PROMPT,
     QUIZ_REASONING_FEEDBACK_PROMPT,
+    QUIZ_REASONING_RUBRIC_PROMPT,
 )
 
 
@@ -39,6 +40,13 @@ class ReasoningFeedback(BaseModel):
     reasoning_feedback: str = Field(min_length=1, max_length=1800)
 
 
+class ReasoningRubricResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    status: Literal["passed", "failed"]
+    feedback: str = Field(min_length=1, max_length=1200)
+
+
 class QuizReasoningService:
     """Use the configured text model; never log or retain input or output text."""
 
@@ -60,6 +68,15 @@ class QuizReasoningService:
             ReasoningFeedback,
             QUIZ_REASONING_FEEDBACK_PROMPT,
             max_output_tokens=1200,
+        )
+
+    def evaluate_rubric(self, context: dict) -> ReasoningRubricResult:
+        """Evaluate reasoning quality after submission, separate from sufficiency."""
+        return self._generate(
+            context,
+            ReasoningRubricResult,
+            QUIZ_REASONING_RUBRIC_PROMPT,
+            max_output_tokens=900,
         )
 
     def _generate(

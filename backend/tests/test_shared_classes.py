@@ -8,11 +8,13 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+from app.api.class_library import _process_upload_job
+from app.api.schemas import QuestionBankAIItem, QuestionBankAIReviewItem
 from app.config import Settings
 from app.main import create_app
 from app.services.auth import SESSION_COOKIE
@@ -25,6 +27,24 @@ ORIGIN = "http://localhost:5173"
 class FakeGenerator:
     def __init__(self) -> None:
         self.sources: list[list[dict]] = []
+        self.generation_contexts: list[dict] = []
+        self._generation_number = 0
+
+    def process_text(self, text: str, _kind: str) -> dict:
+        return {
+            "extracted_text": text,
+            "summary": text[:200],
+            "key_topics": [],
+            "transcript_segments": [],
+            "duration_seconds": None,
+            "syllabus_outline": None,
+        }
+
+    def process_upload(self, path, _kind: str, _mime_type: str) -> dict:
+        text = path.read_bytes().decode("utf-8", errors="ignore")
+        if text.startswith("%PDF-1.4 "):
+            text = text.removeprefix("%PDF-1.4 ")
+        return self.process_text(text, _kind)
 
     def generate_material(self, **kwargs):
         self.sources.append(kwargs["sources"])
@@ -41,6 +61,60 @@ class FakeGenerator:
                 "sources": [{"upload_id": upload_id}],
             }],
         }
+
+    def generate_question_bank(self, context: dict):
+        from app.api.schemas import QuestionBankAIGeneration
+
+        self.generation_contexts.append(context)
+        self._generation_number += 1
+        items = []
+        for slot in context["assignments"]:
+            source_id = slot["source_chunk_revision_ids"][0]
+            items.append(
+                QuestionBankAIItem(
+                    assignment_id=slot["assignment_id"],
+                    prompt=f"Which statement is supported at level {slot['level']}?",
+                    kind=slot["kind"],
+                    choices=[
+                        {"id": "a", "text": "Mitochondria support ATP production."},
+                        {"id": "b", "text": "Mitochondria store the cell's genetic code."},
+                    ],
+                    answer="a",
+                    accepted_answers=[],
+                    explanation="The source links mitochondria with ATP production.",
+                    rubric="Identify the source-supported function.",
+                    level=slot["level"],
+                    language=context["requested_language"],
+                    assessment_target=(
+                        f"Mitochondria ATP function {self._generation_number} level {slot['level']}"
+                    ),
+                    concept_ids=[slot["concept_id"]],
+                    source_chunk_revision_ids=[source_id],
+                )
+            )
+        return QuestionBankAIGeneration(questions=items)
+
+    def validate_question_bank(self, context: dict):
+        from app.api.schemas import QuestionBankAIReview
+
+        return QuestionBankAIReview(
+            reviews=[
+                QuestionBankAIReviewItem(
+                    index=index,
+                    source_supported=True,
+                    concept_aligned=True,
+                    answer_correct=True,
+                    distractors_valid=True,
+                    unambiguous=True,
+                    level_aligned=True,
+                    language_valid=True,
+                    leakage_free=True,
+                    duplicate_family=False,
+                    reason="The fixture candidate is supported and reviewable.",
+                )
+                for index, _ in enumerate(context["candidates"])
+            ]
+        )
 
 
 class SharedClassApiTests(unittest.TestCase):
@@ -112,9 +186,11 @@ class SharedClassApiTests(unittest.TestCase):
         file_size = len(text.encode("utf-8")) if storage_key else None
         self.client.portal.call(
             self.database.execute,
-            "INSERT INTO course_notes (id,class_id,resource_scope,created_by,publication_state,title,kind,"
-            "source_type,storage_key,original_filename,mime_type,file_size_bytes,extracted_text,summary,status,processing_progress) "
-            "VALUES (?1,?2,'class_owned',?3,?4,?5,'document',?6,?7,?8,?9,?10,?11,?12,'ready',100)",
+            "INSERT INTO course_notes (id,class_id,resource_scope,created_by,publication_state,"
+            "title,kind,source_type,storage_key,original_filename,mime_type,file_size_bytes,"
+            "extracted_text,summary,status,processing_progress) "
+            "VALUES (?1,?2,'class_owned',?3,?4,?5,'document',?6,?7,?8,?9,?10,"
+            "?11,?12,'processing',0)",
             note_id,
             self.class_id,
             self.users[created_by]["id"] if created_by else None,
@@ -128,6 +204,8 @@ class SharedClassApiTests(unittest.TestCase):
             text,
             text[:200],
         )
+        with patch("app.api.class_library.create_default_document", new_callable=AsyncMock):
+            self.client.portal.call(_process_upload_job, self.client.app, note_id)
         return note_id
 
     def seed_assessment(
@@ -167,6 +245,8 @@ class SharedClassApiTests(unittest.TestCase):
         return assessment_id
 
     def generate(self, username: str, *, source_id: str, destination: str = "personal") -> dict:
+        if destination == "class_contribution":
+            self._ensure_validated_concept(source_id)
         response = self.call(
             "post",
             f"/api/classes/{self.class_id}/study-materials",
@@ -179,6 +259,55 @@ class SharedClassApiTests(unittest.TestCase):
             },
         )
         return response
+
+    def _ensure_validated_concept(self, source_id: str) -> None:
+        existing = self.client.portal.call(
+            self.database.fetchval,
+            "SELECT c.id FROM class_concepts c JOIN class_concept_source_refs r "
+            "ON r.concept_id=c.id AND r.class_id=c.class_id WHERE c.class_id=?1 "
+            "AND c.status='validated' AND r.chunk_revision_id IN (SELECT cr.id "
+            "FROM source_index_heads h JOIN source_chunk_revisions cr "
+            "ON cr.revision_id=h.revision_id WHERE h.note_id=?2) LIMIT 1",
+            self.class_id,
+            source_id,
+        )
+        if existing:
+            return
+        chunk_id = self.client.portal.call(
+            self.database.fetchval,
+            "SELECT cr.id FROM source_index_heads h JOIN source_chunk_revisions cr "
+            "ON cr.revision_id=h.revision_id WHERE h.note_id=?1 ORDER BY cr.chunk_order LIMIT 1",
+            source_id,
+        )
+        concept_id = str(uuid4())
+        source_text = self.client.portal.call(
+            self.database.fetchval,
+            "SELECT extracted_text FROM course_notes WHERE id=?1",
+            source_id,
+        ) or "course topic"
+        first_word = str(source_text).strip().split(maxsplit=1)[0].strip(".,:;!?()[]{}")
+        name = f"{first_word or 'Course'} {source_id[:8]}"
+        self.client.portal.call(
+            self.database.execute,
+            "INSERT INTO class_concepts(id,class_id,canonical_name,normalized_name,description,"
+            "status,provenance,created_by) "
+            "VALUES (?1,?2,?3,?4,'Validated fixture learning objective',"
+            "'validated','manual',?5)",
+            concept_id,
+            self.class_id,
+            name,
+            name.casefold(),
+            self.owner["id"],
+        )
+        self.client.portal.call(
+            self.database.execute,
+            "INSERT INTO class_concept_source_refs(id,class_id,concept_id,chunk_revision_id) "
+            "VALUES (?1,?2,?3,?4)",
+            str(uuid4()),
+            self.class_id,
+            concept_id,
+            chunk_id,
+        )
 
     def test_owner_membership_invitation_lifecycle_and_race_limit(self) -> None:
         owner_classes = self.call("get", "/api/classes", "class_owner").json()["items"]
@@ -299,7 +428,11 @@ class SharedClassApiTests(unittest.TestCase):
         self.assertEqual(personal_detail.status_code, 200, personal_detail.text)
         self.assertEqual(personal_detail.json()["resource_scope"], "personal")
         self.assertIsNone(personal_detail.json()["class_id"])
-        self.assertIn("Course fact", self.generator.sources[-1][0]["extracted_text"])
+        self.assertTrue(self.generator.generation_contexts)
+        self.assertIn(
+            "Course fact",
+            self.generator.generation_contexts[-1]["source_chunks"][0]["text"],
+        )
         live_response = self.call(
             "post", "/api/live-sessions", "read_only", json={"class_id": self.class_id}
         )
@@ -353,7 +486,7 @@ class SharedClassApiTests(unittest.TestCase):
         )
         self.assertEqual(published.status_code, 200, published.text)
 
-        for username, answer in (("creator", "a"), ("another_reader", "b")):
+        for username in ("creator", "another_reader"):
             run = self.call(
                 "post",
                 f"/api/study-materials/{shared_id}/runs",
@@ -362,6 +495,20 @@ class SharedClassApiTests(unittest.TestCase):
             )
             self.assertEqual(run.status_code, 201, run.text)
             run_id = run.json()["run_id"]
+            questions = run.json()["questions"]
+            expected_text = (
+                "Mitochondria support ATP production."
+                if username == "creator"
+                else "Mitochondria store the cell's genetic code."
+            )
+            answers = {
+                question["id"]: next(
+                    item["id"]
+                    for item in question["choices"]
+                    if item["text"] == expected_text
+                )
+                for question in questions
+            }
             submitted = self.call(
                 "post",
                 f"/api/study-materials/{shared_id}/attempts",
@@ -369,7 +516,7 @@ class SharedClassApiTests(unittest.TestCase):
                 json={
                     "run_id": run_id,
                     "operation_id": str(uuid4()),
-                    "answers": {"q1": answer},
+                    "answers": answers,
                 },
             )
             self.assertEqual(submitted.status_code, 200, submitted.text)
@@ -697,7 +844,9 @@ class SharedClassApiTests(unittest.TestCase):
             200,
         )
         key = "answer-key-fixture.pdf"
-        self.client.app.state.private_storage.path_for(key).write_bytes(b"%PDF-1.4 SECRET KEY")
+        self.client.app.state.private_storage.path_for(key).write_bytes(
+            b"%PDF-1.4 SECRET CORRECT ANSWER"
+        )
         key_note = self.seed_note(
             title="Midterm", text="SECRET CORRECT ANSWER", created_by="class_owner", storage_key=key
         )

@@ -28,12 +28,13 @@ Students can also upload their own course materials (notes, documents, syllabi, 
 - Let students upload their own notes, documents, syllabi, lecture slides, and video/audio lectures, and organize them by class.
 - Generate study materials (quizzes, study guides, practice exams, flashcards) from a class's uploaded materials.
 - Give each class a tutor that uses that class's notes as context, so answers match what the student is actually learning.
+- Build revision-pinned retrieval and a source-backed concept map, then use them for private, evidence-based practice and progress views.
 
 ## Non-goals for the MVP
 
 - Editing the student's document, code, or application for them.
 - Clicking, typing, scrolling, or running commands on the student's behalf.
-- Recording a lesson, retaining screenshots or audio, or building behavioral student profiles. (Notes and study materials that the student explicitly uploads or saves are stored; see [Notes and study materials](#notes-and-study-materials).)
+- Recording a lesson or retaining screenshots, audio, raw Live transcripts, or tutoring conversations. Assessment-derived responses, XP, and private mastery estimates are in scope; they are not inferred from Live media or exposed to teachers or classmates. (See [Privacy and data handling](#privacy-and-data-handling).)
 - Shared classes support multiple members, temporary invitations, per-member capabilities, private study materials, shared contributions, publication schedules, and owner-private attempts. Class forking, leaderboards, and organization hierarchies are deferred. See [Shared classes design](shared-classes-design.md).
 - Teacher dashboards or assignment grading.
 - Guaranteeing perfect OCR or pixel-precise visual grounding. The student can correct or dismiss a mark.
@@ -126,6 +127,16 @@ Editing or deleting a source upload preserves saved study sets, downloadable gui
 ### Shared classes
 
 Class membership and resource access are enforced by the backend on every request. Invitation codes are temporary, usage-limited, stored as digests, and redeemed atomically. Capabilities are independent: `edit` and `delete` apply to a member's own contributions, while a separate `delete_others` grant can remove another member's published contribution. Class-owned resources and class deletion remain owner-controlled. Drafts and future scheduled releases are filtered from student-facing resource APIs, generation, files, and tutor context. Answer keys have their own release state, and assessment attempts and reasoning traces remain scoped to the submitting user. Legacy attempts without reliable attribution remain unassigned and private. See [Shared classes design](shared-classes-design.md) for the schema and migration details. Forking, leaderboards, and organization hierarchies are deferred.
+
+### Source-grounded learning and private mastery
+
+Course uploads are indexed as a hierarchy of material, section, and chunk. Each logical source has a stable identity, while every processed edit creates an immutable content revision with a SHA-256 digest, extraction provenance, and page, slide, paragraph, or lecture-time locator where available. Search uses bounded, authorized SQLite FTS5/BM25 retrieval; a topic request does not load every lecture into model context. Citations point to the exact source revision used, and generated visual descriptions are labeled separately from extracted source text.
+
+Each class can have a source-backed concept graph. Concepts and typed relationships retain their provenance and review state; inferred teaching order or similarity alone never establishes an essential prerequisite. Authorized class managers review proposed concepts and edges. Only validated prerequisite edges inform practice recommendations.
+
+Generated assessments and reusable questions are versioned and source-linked. The server keeps answer specifications, option mappings, and grading rubrics private until the assessment's feedback-release policy permits disclosure. Students receive safe question projections and each has independent attempts. Standard quizzes and optional Reasoning Mode remain available. Mastery Ladder is a separate assessment mode: it progresses independently for each selected concept through four cognitive-demand levels, with a distinct same-level recovery question after a miss. A reasoning-required ladder evaluates reasoning quality separately from the existing sufficiency-to-submit gate.
+
+Assessment outcomes create private, append-only evidence and idempotent XP events. XP measures participation, accuracy measures observed answer performance, and mastery estimates current concept proficiency; these measures are never substituted for one another. A deterministic, versioned Beta-Binomial-inspired projection reports uncertainty and evidence sufficiency. First-release mastery values are estimates, not empirically calibrated scores. Students can view their own XP, accuracy, concept estimates, history, growth, due reviews, and explainable practice recommendations. Class managers can review shared source-backed concepts and calibration flags, but cannot view individual student responses, reasoning, XP, mastery, or recommendations. Historical attempts without reliable ownership remain private and do not become evidence.
 
 ## System design
 
@@ -279,6 +290,8 @@ Approved on 2026-10-11: signed-in students may enable saved tutoring recaps sepa
 - Pause immediately when the student pauses capture, the browser reports the track ended, permission is revoked, or the session ends. A change of source requires a new browser selection flow.
 - Avoid sending unchanged frames repeatedly. Provide a clear screen pause control for sensitive content.
 - Uploaded notes and generated study materials **are** stored, because the student explicitly saves them. They are scoped to the student's account, and the student can delete any note, material, or whole class. Deleting a note removes the file and its extracted text.
+- Revisioned source chunks, class concept/edge provenance, immutable assessment snapshots, the student's intentionally submitted assessment responses and reasoning, XP events, evidence, private mastery projections, and recommendations may be stored to provide the learning features described above. Every read rechecks current ownership, class membership, capabilities, publication/release state, and attempt ownership. Assessment-derived progress belongs to the student and is never visible to classmates or class managers; legacy outcomes with unknown owners are excluded. Deletion, membership removal, and resource release changes must not leave retrievable chunks or recommendation links that bypass current access checks.
+- The browser receives only safe question projections before feedback release. Answer keys, randomized option mappings, rubrics, and grading instructions stay on the backend. A provider outage leaves completed and saved assessments readable; pending grading does not count as an incorrect answer or mastery evidence.
 - Uploaded content, including lecture recordings, is sent to the Gemini API for text extraction, transcription, generation, and per-class tutoring. Tell the student this at upload time, and remind them to upload only recordings they are allowed to keep (some courses restrict lecture recordings).
 
 ## MVP acceptance criteria

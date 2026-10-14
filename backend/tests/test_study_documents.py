@@ -8,16 +8,18 @@ import json
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 from pypdf import PdfReader
 from starlette.background import BackgroundTasks
 from starlette.requests import Request
+from starlette.responses import Response
 
 from app.api.class_library import (
     _create_material_job,
+    _process_upload_job,
     _public_material_content,
     create_study_material,
     download_study_file,
@@ -27,6 +29,10 @@ from app.api.errors import ApiError
 from app.api.schemas import (
     FlashcardsContent,
     PracticeExamContent,
+    QuestionBankAIGeneration,
+    QuestionBankAIItem,
+    QuestionBankAIReview,
+    QuestionBankAIReviewItem,
     QuizContent,
     StudyGuideContent,
     StudyMaterialCreate,
@@ -43,6 +49,7 @@ from app.security.rate_limit import InMemoryRateLimiter
 from app.services.auth import SESSION_COOKIE, create_session, create_user
 from app.services.database import _add_missing_columns, create_database, recover_interrupted_jobs
 from app.services.gemini_content import ContentGenerationFailure, GeminiContentService
+from app.services.storage import LocalPrivateStorage
 from app.services.study_files import (
     _safe_math,
     compiler_path,
@@ -435,6 +442,88 @@ class LatexExportTests(unittest.TestCase):
         self.assertTrue(files["pdf"].startswith(b"%PDF-"))
 
 
+class FakeStudyGenerationService:
+    def __init__(self, upload_id: UUID, guide: dict) -> None:
+        self.upload_id = upload_id
+        self.guide = guide
+        self.generation_contexts: list[dict] = []
+
+    def process_text(self, text: str, _kind: str) -> dict:
+        return {
+            "extracted_text": text,
+            "summary": text[:200],
+            "key_topics": [],
+            "transcript_segments": [],
+            "duration_seconds": None,
+            "syllabus_outline": None,
+        }
+
+    def process_upload(self, path, kind: str, _mime_type: str) -> dict:
+        return self.process_text(path.read_bytes().decode("utf-8", errors="ignore"), kind)
+
+    def generate_material(self, **_kwargs):
+        return "Biology guide", self.guide
+
+    def generate_upload_document_chunk(self, **_kwargs):
+        return [section(self.upload_id)]
+
+    def generate_question_bank(self, context: dict) -> QuestionBankAIGeneration:
+        self.generation_contexts.append(context)
+        questions = []
+        for slot in context["assignments"]:
+            choices = (
+                [
+                    {"id": "a", "text": "Glucose is a monosaccharide."},
+                    {"id": "b", "text": "Glucose is a protein."},
+                ]
+                if slot["kind"] == "multiple_choice"
+                else []
+            )
+            answer = (
+                "a"
+                if slot["kind"] == "multiple_choice"
+                else "Glucose is a monosaccharide."
+            )
+            questions.append(
+                QuestionBankAIItem(
+                    assignment_id=slot["assignment_id"],
+                    prompt=f"Which idea about glucose is supported at level {slot['level']}?",
+                    kind=slot["kind"],
+                    choices=choices,
+                    answer=answer,
+                    accepted_answers=[answer] if slot["kind"] == "short_answer" else [],
+                    explanation="The source identifies glucose as a monosaccharide.",
+                    rubric="Select the supported classification.",
+                    level=slot["level"],
+                    language=context["requested_language"],
+                    assessment_target=f"Glucose classification level {slot['level']}",
+                    concept_ids=[slot["concept_id"]],
+                    source_chunk_revision_ids=[slot["source_chunk_revision_ids"][0]],
+                )
+            )
+        return QuestionBankAIGeneration(questions=questions)
+
+    def validate_question_bank(self, context: dict) -> QuestionBankAIReview:
+        return QuestionBankAIReview(
+            reviews=[
+                QuestionBankAIReviewItem(
+                    index=index,
+                    source_supported=True,
+                    concept_aligned=True,
+                    answer_correct=True,
+                    distractors_valid=True,
+                    unambiguous=True,
+                    level_aligned=True,
+                    language_valid=True,
+                    leakage_free=True,
+                    duplicate_family=False,
+                    reason="The fixture item is supported by the supplied source.",
+                )
+                for index, _ in enumerate(context["candidates"])
+            ]
+        )
+
+
 class SavedDocumentTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.settings = settings()
@@ -461,15 +550,13 @@ class SavedDocumentTests(unittest.IsolatedAsyncioTestCase):
             "format": "study_guide",
             "sections": [section(self.upload_id) for _ in range(4)],
         }
-        self.service = SimpleNamespace(
-            generate_material=lambda **kwargs: ("Biology guide", self.guide),
-            generate_upload_document_chunk=lambda **kwargs: [section(self.upload_id)],
-        )
+        self.service = FakeStudyGenerationService(self.upload_id, self.guide)
         self.application = SimpleNamespace(
             state=SimpleNamespace(
                 settings=self.settings,
                 database=self.db,
                 gemini_content_service=self.service,
+                private_storage=LocalPrivateStorage(self.settings),
                 generation_rate_limiter=InMemoryRateLimiter(30, 60),
             )
         )
@@ -511,6 +598,12 @@ class SavedDocumentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_quiz_instructions_are_persisted_and_forwarded_to_generation(self) -> None:
         instruction = "Focus on chapters 3–5 and use application questions."
+        await self.db.execute(
+            "UPDATE course_notes SET status='processing',processing_progress=0 WHERE id=?1",
+            self.upload_id,
+        )
+        with patch("app.api.class_library.create_default_document", new_callable=AsyncMock):
+            await _process_upload_job(self.application, self.upload_id)
         payload = StudyMaterialCreate(
             kind="quiz",
             scope={"kind": "uploads", "upload_ids": [self.upload_id]},
@@ -526,15 +619,16 @@ class SavedDocumentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["generation_instructions"], instruction)
         self.assertNotIn("generation_instructions", summary.model_dump())
 
-        self.service.generate_material = Mock(
-            return_value=("Quiz: BIO 170", {"format": "quiz", "questions": []})
-        )
         await _create_material_job(self.application, summary.id)
+        generated_status = await self.db.fetchrow(
+            "SELECT status,failure_code FROM study_materials WHERE id=?1", summary.id
+        )
+        self.assertEqual(generated_status["status"], "ready", generated_status)
         self.assertEqual(
-            self.service.generate_material.call_args.kwargs["additional_instructions"],
+            self.service.generation_contexts[-1]["optional_instructions"],
             instruction,
         )
-        detail = await get_study_material(summary.id, self.request())
+        detail = await get_study_material(summary.id, self.request(), Response())
         self.assertNotIn("generation_instructions", detail.model_dump())
 
     async def test_legacy_study_material_schema_gets_instruction_column(self) -> None:
@@ -559,7 +653,7 @@ class SavedDocumentTests(unittest.IsolatedAsyncioTestCase):
         await self.add_material()
         with patch("app.api.class_library.create_guide_files", return_value=self.files):
             await _create_material_job(self.application, self.material_id)
-        detail = await get_study_material(self.material_id, self.request())
+        detail = await get_study_material(self.material_id, self.request(), Response())
         self.assertEqual(detail.status, "ready")
         self.assertEqual(set(detail.download_urls), {"pdf", "latex"})
         for kind in self.files:

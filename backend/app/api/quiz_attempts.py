@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import math
+import secrets
 import time
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -15,10 +16,19 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.admin import _require_admin
 from app.api.dependencies import database, enforce_sqlite_api_policy
 from app.api.errors import ApiError
-from app.services.database import SQLiteConnection, SQLiteDatabase, json_value
 from app.services.class_access import material_access
+from app.services.database import SQLiteConnection, SQLiteDatabase, json_value
+from app.services.learning_scoring import (
+    attempt_learning_outcome,
+    award_run_completion,
+    materialize_released_evidence_for_run,
+    record_assessment_outcome,
+    record_question_exposure,
+)
+from app.services.question_bank import validate_material_bank_sources
 from app.services.quiz_reasoning import QuizReasoningService
 from app.services.study_prompts import (
     QUIZ_REASONING_EVALUATOR_VERSION,
@@ -67,6 +77,17 @@ def _check_expected_version(expected: int, actual: int) -> None:
             409,
             "version_conflict",
             f"This question attempt was modified (version {actual}).",
+        )
+
+
+def _require_ladder_api(request: Request, run: dict[str, Any]) -> None:
+    if run.get("assessment_type") == "mastery_ladder" and not getattr(
+        request.state, "mastery_ladder_internal", False
+    ):
+        raise ApiError(
+            409,
+            "ladder_route_required",
+            "Use the Mastery Ladder controls to submit this response.",
         )
 
 
@@ -128,11 +149,39 @@ async def _owned_run(
 
 
 async def _attempt_payload(
-    db: SQLiteConnection | SQLiteDatabase, attempt_id: str, question: dict[str, Any]
+    db: SQLiteConnection | SQLiteDatabase,
+    attempt_id: str,
+    question: dict[str, Any],
+    *,
+    feedback_available: bool | None = None,
+    public_question: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     row = await db.fetchrow("SELECT * FROM quiz_question_attempts WHERE id = ?1", attempt_id)
     if row is None:
         raise ApiError(404, "not_found", "The question attempt was not found.")
+    if feedback_available is None:
+        run = await db.fetchrow(
+            "SELECT r.*,m.feedback_release_policy AS material_feedback_policy FROM quiz_runs r "
+            "JOIN study_materials m ON m.id=r.material_id WHERE r.id=?1",
+            row["run_id"],
+        )
+        released = bool(
+            run
+            and await db.fetchval(
+                "SELECT 1 FROM study_material_feedback_releases WHERE material_id=?1",
+                run["material_id"],
+            )
+        )
+        feedback_available = bool(
+            run
+            and (
+                (
+                    run["feedback_release_policy"] == "after_completion"
+                    and run["status"] == "completed"
+                )
+                or (run["feedback_release_policy"] == "manual" and released)
+            )
+        )
     turns = await db.fetch(
         "SELECT sequence_number, operation_id, source, text, created_at "
         "FROM quiz_reasoning_turns "
@@ -170,18 +219,38 @@ async def _attempt_payload(
         "feedback_operation_id": row["feedback_operation_id"],
     }
     if row["state"] in {"submitted", "completed"}:
-        result.update(
-            {
-                "final_answer": row["final_answer"],
-                "correct": bool(row["correct"]),
-                "correct_answer": _display_answer(question),
-                "explanation": str(question.get("explanation", "")),
-                "answer_feedback": row["answer_feedback"],
-                "reasoning_feedback": row["reasoning_feedback"],
-                "submitted_at": row["submitted_at"],
-                "completed_at": row["completed_at"],
-            }
-        )
+        submitted_answer = row["final_answer"]
+        public_answer_question = public_question or question
+        if public_answer_question and question.get("kind") == "multiple_choice":
+            selected = next(
+                (
+                    choice.get("text")
+                    for choice in public_answer_question.get("choices", [])
+                    if choice.get("id") == submitted_answer
+                ),
+                "",
+            )
+            submitted_answer = selected
+        result.update({"final_answer": submitted_answer, "submitted_at": row["submitted_at"]})
+        if feedback_available:
+            result.update(
+                {
+                    "correct": bool(row["correct"]),
+                    "correct_answer": _display_answer(question),
+                    "explanation": str(question.get("explanation", "")),
+                    "answer_feedback": row["answer_feedback"],
+                    "reasoning_feedback": row["reasoning_feedback"],
+                    "completed_at": row["completed_at"],
+                }
+            )
+    run_owner = await db.fetchval("SELECT owner_id FROM quiz_runs WHERE id=?1", row["run_id"])
+    learning_outcome = await attempt_learning_outcome(
+        db,
+        attempt_id=attempt_id,
+        owner_id=str(run_owner or ""),
+    )
+    if learning_outcome is not None:
+        result["outcome"] = learning_outcome
     return result
 
 
@@ -206,36 +275,247 @@ def _display_answer(question: dict[str, Any]) -> str:
 async def _run_payload(
     db: SQLiteDatabase, run: dict[str, Any], material: dict[str, Any]
 ) -> dict[str, Any]:
+    if int(run.get("snapshot_version", 0)) < 1:
+        # Historical runs had no immutable question snapshot. Never pair their
+        # submitted answers with today's mutable material content or expose keys.
+        return {
+            "run_id": run["id"],
+            "material_id": run["material_id"],
+            "mode": run["mode"],
+            "status": run["status"],
+            "feedback_policy": {
+                "release": run.get("feedback_release_policy", "after_completion"),
+                "feedback_available": False,
+            },
+            "questions": [],
+            "attempts": [],
+            "resume_supported": False,
+        }
+    release = run.get("feedback_release_policy", "after_completion")
+    feedback_available = False
+    if release == "after_completion":
+        feedback_available = run["status"] == "completed"
+    elif release == "manual":
+        feedback_available = bool(
+            run.get("feedback_released_at")
+            or await db.fetchval(
+                "SELECT 1 FROM study_material_feedback_releases WHERE material_id=?1",
+                run["material_id"],
+            )
+        )
+    question_rows = await db.fetch(
+        "SELECT id,public_snapshot,private_snapshot FROM quiz_run_questions "
+        "WHERE run_id=?1 ORDER BY ordinal,id",
+        run["id"],
+    )
+    questions = [json_value(row["public_snapshot"], {}) for row in question_rows]
+    private_by_id = {
+        str(row["id"]): json_value(row["private_snapshot"], {}) for row in question_rows
+    }
+    public_by_id = {str(item.get("id")): item for item in questions}
+    attempt_rows = await db.fetch(
+        "SELECT id,question_id FROM quiz_question_attempts WHERE run_id=?1 ORDER BY rowid",
+        run["id"],
+    )
     response: dict[str, Any] = {
         "run_id": run["id"],
         "material_id": run["material_id"],
         "mode": run["mode"],
         "status": run["status"],
-        "score_percent": run["score_percent"],
-        "created_at": run["created_at"],
-        "completed_at": run["completed_at"],
+        "feedback_policy": {"release": release, "feedback_available": feedback_available},
+        "questions": questions,
         "attempts": [],
+        "completed_at": run.get("completed_at"),
     }
-    if run["mode"] == "standard":
-        legacy = await db.fetchrow(
-            "SELECT answers, score_percent, completed_at FROM study_material_attempts "
-            "WHERE id = ?1",
-            run["id"],
-        )
-        if legacy:
-            response["answers"] = json_value(legacy["answers"], {})
-        return response
-    by_id = {str(item["id"]): item for item in _questions(material)}
-    attempts = await db.fetch(
-        "SELECT id, question_id FROM quiz_question_attempts WHERE run_id = ?1 ORDER BY rowid",
-        run["id"],
-    )
     response["attempts"] = [
-        await _attempt_payload(db, item["id"], by_id[item["question_id"]])
-        for item in attempts
-        if item["question_id"] in by_id
+        await _attempt_payload(
+            db,
+            item["id"],
+            private_by_id[item["question_id"]],
+            feedback_available=feedback_available,
+            public_question=public_by_id.get(item["question_id"]),
+        )
+        for item in attempt_rows
+        if item["question_id"] in private_by_id
     ]
+    if feedback_available:
+        response["score_percent"] = run.get("score_percent")
+        response["correct_count"] = int(
+            await db.fetchval(
+                "SELECT count(*) FROM quiz_question_attempts WHERE run_id=?1 "
+                "AND state='completed' AND correct=1",
+                run["id"],
+            )
+            or 0
+        )
     return response
+
+
+async def _run_question(
+    db: SQLiteConnection | SQLiteDatabase, run_id: str, question_id: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    row = await db.fetchrow(
+        "SELECT public_snapshot,private_snapshot FROM quiz_run_questions WHERE run_id=?1 AND id=?2",
+        run_id,
+        question_id,
+    )
+    if row is None:
+        raise ApiError(
+            409,
+            "legacy_run_snapshot_unavailable",
+            "This older run has no immutable question snapshot. Start a new run to continue.",
+        )
+    return json_value(row["private_snapshot"], {}), json_value(row["public_snapshot"], {})
+
+
+def _feedback_available(run: dict[str, Any], *, manually_released: bool = False) -> bool:
+    policy = run.get("feedback_release_policy", "after_completion")
+    return bool(
+        (policy == "after_completion" and run.get("status") == "completed")
+        or (policy == "manual" and (run.get("feedback_released_at") or manually_released))
+    )
+
+
+async def _pin_run_questions(
+    conn: SQLiteConnection,
+    *,
+    run_id: str,
+    material: dict[str, Any],
+    questions: list[dict[str, Any]],
+) -> None:
+    """Persist immutable private grading snapshots and per-run public identifiers."""
+    rng = secrets.SystemRandom()
+    for ordinal, source in enumerate(questions):
+        question_id = str(uuid4())
+        private = json.loads(json.dumps(source, ensure_ascii=False))
+        kind = str(private.get("kind", "short_answer"))
+        original_choices = private.get("choices", [])
+        if not isinstance(original_choices, list):
+            raise ApiError(409, "quiz_invalid", "This quiz contains invalid answer choices.")
+        if kind == "true_false" and not original_choices:
+            original_choices = [
+                {"id": "true", "text": "True"},
+                {"id": "false", "text": "False"},
+            ]
+        option_mapping: dict[str, str] = {}
+        public_choices: list[dict[str, str]] = []
+        private_choices: list[dict[str, str]] = []
+        for item in original_choices:
+            if not isinstance(item, dict):
+                raise ApiError(409, "quiz_invalid", "This quiz contains invalid answer choices.")
+            original_id = str(item.get("id", ""))
+            text = str(item.get("text", ""))
+            if not original_id or not text:
+                raise ApiError(409, "quiz_invalid", "This quiz contains invalid answer choices.")
+            option_id = str(uuid4())
+            option_mapping[option_id] = original_id
+            public_choices.append({"id": option_id, "text": text})
+            private_choices.append({"id": option_id, "text": text})
+        rng.shuffle(public_choices)
+        if kind == "true_false" and not option_mapping:
+            raise ApiError(409, "quiz_invalid", "This true/false question has no choices.")
+        original_answer = str(private.get("answer", ""))
+        if kind == "true_false" and original_answer.casefold() in {"true", "false"}:
+            original_answer = original_answer.casefold()
+        answer_option_id = next(
+            (
+                str(choice["id"])
+                for choice in private_choices
+                if option_mapping[str(choice["id"])] == original_answer
+                or (
+                    kind == "true_false"
+                    and (
+                        option_mapping[str(choice["id"])].casefold() == original_answer.casefold()
+                        or choice["text"].casefold() == original_answer.casefold()
+                    )
+                )
+            ),
+            None,
+        )
+        if kind in {"multiple_choice", "true_false"} and answer_option_id is None:
+            raise ApiError(409, "quiz_invalid", "This quiz has an invalid answer key.")
+        private["id"] = question_id
+        private["choices"] = private_choices
+        if answer_option_id is not None:
+            private["answer"] = answer_option_id
+        public_question: dict[str, Any] = {
+            "id": question_id,
+            "prompt": str(source.get("prompt", "")),
+            "kind": kind,
+            "level": source.get("level") if isinstance(source.get("level"), int) else None,
+            "concepts": [],
+            "choices": public_choices,
+            "interaction": {
+                "response_type": "single_choice"
+                if kind in {"multiple_choice", "true_false"}
+                else "free_text"
+            },
+        }
+        concepts = source.get("concept_ids", [])
+        if isinstance(concepts, list) and concepts:
+            concept_rows = await conn.fetch(
+                "SELECT id,canonical_name FROM class_concepts WHERE class_id=?1 "
+                "AND status='validated' AND id IN ("
+                + ",".join(f"?{index + 2}" for index in range(len(concepts)))
+                + ") ORDER BY canonical_name COLLATE NOCASE,id",
+                material.get("class_id") or material.get("origin_class_id"),
+                *[str(item) for item in concepts],
+            )
+            public_question["concepts"] = [{"label": row["canonical_name"]} for row in concept_rows]
+            private["concept_labels"] = {
+                str(row["id"]): str(row["canonical_name"]) for row in concept_rows
+            }
+        if public_question["level"] is None:
+            public_question.pop("level")
+        family_id = str(source.get("family_id") or _digest(source.get("prompt", "")))
+        source_item_id = str(source.get("id", ""))
+        item_class_id = material.get("class_id") or material.get("origin_class_id")
+        bank_item = (
+            await conn.fetchrow(
+                "SELECT id,exposure_count FROM class_question_bank_items "
+                "WHERE id=?1 AND class_id=?2",
+                source_item_id,
+                item_class_id,
+            )
+            if item_class_id
+            else None
+        )
+        bank_item_id = str(bank_item["id"]) if bank_item is not None else None
+        public_json = json.dumps(public_question, ensure_ascii=False, separators=(",", ":"))
+        private_json = json.dumps(private, ensure_ascii=False, separators=(",", ":"))
+        evidence_eligible = bool(
+            material.get("assessment_validation_state") == "validated"
+            and private.get("source_chunk_revision_ids")
+        )
+        await conn.execute(
+            "INSERT INTO quiz_run_questions "
+            "(id,run_id,material_id,bank_item_id,ordinal,family_id,public_snapshot,"
+            "private_snapshot,option_mapping,snapshot_sha256,evidence_eligible) "
+            "VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            question_id,
+            run_id,
+            material["id"],
+            bank_item_id,
+            ordinal,
+            family_id,
+            public_json,
+            private_json,
+            json.dumps(option_mapping, separators=(",", ":")),
+            _digest({"public": public_question, "private": private}),
+            int(evidence_eligible),
+        )
+        if bank_item_id:
+            await record_question_exposure(
+                conn,
+                run_id=run_id,
+                question_id=question_id,
+                bank_item_id=bank_item_id,
+                private_snapshot=private,
+            )
+            await conn.execute(
+                "UPDATE class_question_bank_items SET exposure_count=exposure_count+1 WHERE id=?1",
+                bank_item_id,
+            )
 
 
 async def _record_metric(
@@ -301,11 +581,7 @@ async def _record_metric(
     if sample_rows:
         samples = [int(r["latency_ms"]) for r in sample_rows]
         n = len(samples)
-        median_ms = (
-            (samples[n // 2 - 1] + samples[n // 2]) / 2
-            if n % 2 == 0
-            else samples[n // 2]
-        )
+        median_ms = (samples[n // 2 - 1] + samples[n // 2]) / 2 if n % 2 == 0 else samples[n // 2]
         p95_idx = min(n - 1, max(0, int(math.ceil(0.95 * n)) - 1))
         p95_ms = samples[p95_idx]
         await conn.execute(
@@ -320,6 +596,9 @@ async def _record_metric(
 async def _complete_run_if_ready(
     conn: SQLiteConnection, run_id: str, material: dict[str, Any]
 ) -> None:
+    run = await conn.fetchrow("SELECT * FROM quiz_runs WHERE id=?1", run_id)
+    if run is None:
+        return
     open_count = await conn.fetchval(
         "SELECT count(*) FROM quiz_question_attempts WHERE run_id = ?1 "
         "AND state NOT IN ('completed', 'skipped')",
@@ -327,19 +606,37 @@ async def _complete_run_if_ready(
     )
     if open_count:
         return
-    questions = _questions(material)
-    count = await conn.fetchval(
-        "SELECT count(*) FROM quiz_question_attempts WHERE run_id = ?1",
-        run_id,
-    )
-    if count != len(questions):
-        return
+    if run.get("assessment_type") == "mastery_ladder":
+        active_concepts = await conn.fetchval(
+            "SELECT count(*) FROM mastery_ladder_concepts c "
+            "JOIN mastery_ladder_sessions l ON l.id=c.ladder_id "
+            "WHERE l.run_id=?1 AND c.state='active'",
+            run_id,
+        )
+        if int(active_concepts or 0) > 0:
+            return
+        questions = await conn.fetchval(
+            "SELECT count(*) FROM quiz_question_attempts WHERE run_id=?1 "
+            "AND state IN ('completed','skipped')",
+            run_id,
+        )
+        count = questions
+    else:
+        questions = await conn.fetchval(
+            "SELECT count(*) FROM quiz_run_questions WHERE run_id=?1", run_id
+        )
+        count = await conn.fetchval(
+            "SELECT count(*) FROM quiz_question_attempts WHERE run_id = ?1",
+            run_id,
+        )
+        if not questions or count != questions:
+            return
     correct = await conn.fetchval(
         "SELECT count(*) FROM quiz_question_attempts WHERE run_id = ?1 "
         "AND state = 'completed' AND correct = 1",
         run_id,
     )
-    score = round(int(correct) * 100 / max(1, len(questions)), 2)
+    score = round(int(correct) * 100 / max(1, int(questions)), 2)
     completed = await conn.fetchrow(
         "UPDATE quiz_runs SET status = 'completed', score_percent = ?2, "
         "completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
@@ -355,7 +652,6 @@ async def _complete_run_if_ready(
         "WHERE run_id = ?1 AND final_answer IS NOT NULL",
         run_id,
     )
-    run = await conn.fetchrow("SELECT material_id,owner_id FROM quiz_runs WHERE id = ?1", run_id)
     await conn.execute(
         "INSERT OR IGNORE INTO study_material_attempts "
         "(id,material_id,owner_id,answers,score_percent) VALUES (?1,?2,?3,?4,?5)",
@@ -365,6 +661,17 @@ async def _complete_run_if_ready(
         json.dumps({row["question_id"]: row["final_answer"] for row in answers}),
         score,
     )
+    answered_count = int(
+        await conn.fetchval(
+            "SELECT count(*) FROM assessment_outcomes WHERE run_id=?1 "
+            "AND status IN ('correct','incorrect')",
+            run_id,
+        )
+        or 0
+    )
+    if answered_count:
+        await award_run_completion(conn, run=run)
+    await materialize_released_evidence_for_run(conn, run_id=run_id)
 
 
 async def _evaluation_context(
@@ -468,8 +775,29 @@ async def _run_evaluation(
         failed = True
         logger.info("quiz_reasoning_evaluation_failed category=%s", type(exc).__name__)
     latency_ms = int((time.monotonic() - started) * 1000)
+    access_revoked = False
     async with db.acquire() as conn:
         async with conn.transaction():
+            # Provider work runs outside SQLite transactions. Revalidate access
+            # while holding the finalization transaction so a removed member or
+            # newly unreleased material cannot receive a late acceptance.
+            if not failed and decision is not None:
+                access_row = await conn.fetchrow(
+                    "SELECT r.material_id,r.owner_id FROM quiz_question_attempts a "
+                    "JOIN quiz_runs r ON r.id=a.run_id WHERE a.id=?1",
+                    attempt_id,
+                )
+                if access_row is None or str(access_row["owner_id"]) != str(request.state.user_id):
+                    access_revoked = True
+                else:
+                    try:
+                        await material_access(
+                            conn, access_row["material_id"], access_row["owner_id"]
+                        )
+                    except ApiError:
+                        access_revoked = True
+                if access_revoked:
+                    failed = True
             if failed or decision is None:
                 await conn.execute(
                     "UPDATE quiz_reasoning_evaluations SET status = 'failed', "
@@ -549,6 +877,8 @@ async def _run_evaluation(
                     retry=retry,
                     turns=through_turn,
                 )
+    if access_revoked:
+        raise ApiError(404, "not_found", "The requested resource was not found.")
     if failed:
         raise ApiError(
             503,
@@ -565,7 +895,12 @@ async def create_quiz_run(
 ) -> dict[str, Any]:
     owner_id, db = await _authorize(request)
     material = await _owned_material(db, material_id, owner_id)
-    questions = _questions(material)
+    if await db.fetchval("SELECT 1 FROM mastery_ladder_sessions WHERE material_id=?1", material_id):
+        raise ApiError(
+            409,
+            "ladder_route_required",
+            "Use the Mastery Ladder controls to start or resume this assessment.",
+        )
     async with db.acquire() as conn:
         async with conn.transaction():
             existing = await conn.fetchrow(
@@ -582,27 +917,69 @@ async def create_quiz_run(
                         "idempotency_conflict",
                         "This run request ID was already used for another quiz mode.",
                     )
+                if int(existing.get("snapshot_version", 0)) < 1:
+                    raise ApiError(
+                        409,
+                        "legacy_run_snapshot_unavailable",
+                        "This older run cannot be resumed safely. Start a new quiz run.",
+                    )
                 run = existing
             else:
+                # Idempotent replay must recover the already-pinned run even if
+                # its source became unavailable after the original request.
+                # Current source authorization is required only for new runs.
+                if material.get("assessment_validation_state") != "validated":
+                    raise ApiError(
+                        409,
+                        "assessment_unvalidated",
+                        "This older assessment has no validated grading record. "
+                        "Generate a new quiz before starting a graded run.",
+                    )
+                questions = _questions(material)
+                if material.get("class_id") is not None:
+                    await validate_material_bank_sources(
+                        conn,
+                        material_id=str(material_id),
+                        class_id=str(material["class_id"]),
+                        user_id=str(owner_id),
+                    )
                 run_id = uuid4()
                 await conn.execute(
-                    "INSERT INTO quiz_runs (id, material_id, owner_id, operation_id, mode) "
-                    "VALUES (?1, ?2, ?3, ?4, ?5)",
+                    "INSERT INTO quiz_runs "
+                    "(id,material_id,owner_id,operation_id,mode,snapshot_version,"
+                    "feedback_release_policy) VALUES (?1,?2,?3,?4,?5,1,?6)",
                     run_id,
                     material_id,
                     owner_id,
                     payload.operation_id,
                     payload.mode,
+                    material.get("feedback_release_policy", "after_completion"),
+                )
+                await _pin_run_questions(
+                    conn,
+                    run_id=str(run_id),
+                    material=material,
+                    questions=questions,
+                )
+                await conn.executemany(
+                    "INSERT INTO quiz_question_attempts (id,run_id,question_id) VALUES (?1,?2,?3)",
+                    [
+                        (
+                            str(uuid4()),
+                            str(run_id),
+                            str(
+                                await conn.fetchval(
+                                    "SELECT id FROM quiz_run_questions "
+                                    "WHERE run_id=?1 AND ordinal=?2",
+                                    run_id,
+                                    ordinal,
+                                )
+                            ),
+                        )
+                        for ordinal in range(len(questions))
+                    ],
                 )
                 if payload.mode == "reasoning":
-                    await conn.executemany(
-                        "INSERT INTO quiz_question_attempts (id, run_id, question_id) "
-                        "VALUES (?1, ?2, ?3)",
-                        [
-                            (str(uuid4()), str(run_id), str(question["id"]))
-                            for question in questions
-                        ],
-                    )
                     await conn.execute(
                         "INSERT INTO quiz_reasoning_metrics (metric_date, question_attempt_count) "
                         "VALUES (?1, ?2) ON CONFLICT(metric_date) DO UPDATE SET "
@@ -620,12 +997,38 @@ async def quiz_run_history(material_id: UUID, request: Request) -> dict[str, Any
     owner_id, db = await _authorize(request)
     await _owned_material(db, material_id, owner_id, require_ready=False)
     rows = await db.fetch(
-        "SELECT id, mode, status, score_percent, created_at, completed_at FROM quiz_runs "
+        "SELECT id,mode,status,score_percent,feedback_release_policy,created_at,completed_at "
+        "FROM quiz_runs "
         "WHERE material_id = ?1 AND owner_id = ?2 ORDER BY created_at DESC LIMIT 50",
         material_id,
         owner_id,
     )
-    return {"items": rows}
+    manually_released = bool(
+        await db.fetchval(
+            "SELECT 1 FROM study_material_feedback_releases WHERE material_id=?1", material_id
+        )
+    )
+    return {
+        "items": [
+            {
+                "id": row["id"],
+                "mode": row["mode"],
+                "status": row["status"],
+                "score_percent": (
+                    row["score_percent"]
+                    if (
+                        row["feedback_release_policy"] == "after_completion"
+                        and row["status"] == "completed"
+                    )
+                    or (row["feedback_release_policy"] == "manual" and manually_released)
+                    else None
+                ),
+                "created_at": row["created_at"],
+                "completed_at": row["completed_at"],
+            }
+            for row in rows
+        ]
+    }
 
 
 @router.get("/api/study-materials/{material_id}/runs/{run_id}")
@@ -633,6 +1036,8 @@ async def get_quiz_run(material_id: UUID, run_id: UUID, request: Request) -> dic
     owner_id, db = await _authorize(request)
     material = await _owned_material(db, material_id, owner_id, require_ready=False)
     run = await _owned_run(db, material_id, run_id, owner_id)
+    if run.get("assessment_type") == "mastery_ladder":
+        raise ApiError(404, "not_found", "The requested quiz run was not found.")
     return await _run_payload(db, run, material)
 
 
@@ -645,9 +1050,10 @@ async def submit_reasoning(
     request: Request,
 ) -> dict[str, Any]:
     owner_id, db = await _authorize(request)
-    material = await _owned_material(db, material_id, owner_id)
-    question = _question(material, question_id)
+    await _owned_material(db, material_id, owner_id)
     run = await _owned_run(db, material_id, run_id, owner_id)
+    _require_ladder_api(request, run)
+    question, _ = await _run_question(db, str(run_id), question_id)
     if run["mode"] != "reasoning":
         raise ApiError(
             409, "wrong_quiz_mode", "Reasoning actions are available only in Reasoning Mode."
@@ -794,9 +1200,10 @@ async def retry_reasoning(
     material_id: UUID, run_id: UUID, question_id: str, payload: OperationRequest, request: Request
 ) -> dict[str, Any]:
     owner_id, db = await _authorize(request)
-    material = await _owned_material(db, material_id, owner_id)
-    question = _question(material, question_id)
+    await _owned_material(db, material_id, owner_id)
     run = await _owned_run(db, material_id, run_id, owner_id)
+    _require_ladder_api(request, run)
+    question, _ = await _run_question(db, str(run_id), question_id)
     if run["mode"] != "reasoning":
         raise ApiError(
             409, "wrong_quiz_mode", "Reasoning actions are available only in Reasoning Mode."
@@ -891,8 +1298,9 @@ async def skip_question(
 ) -> dict[str, Any]:
     owner_id, db = await _authorize(request)
     material = await _owned_material(db, material_id, owner_id)
-    question = _question(material, question_id)
     run = await _owned_run(db, material_id, run_id, owner_id)
+    _require_ladder_api(request, run)
+    question, _ = await _run_question(db, str(run_id), question_id)
     if run["mode"] != "reasoning":
         raise ApiError(
             409, "wrong_quiz_mode", "Skip confirmation is available only in Reasoning Mode."
@@ -945,6 +1353,21 @@ async def skip_question(
                     "SELECT count(*) FROM quiz_reasoning_turns WHERE attempt_id = ?1", attempt["id"]
                 ),
             )
+            question_row = await conn.fetchrow(
+                "SELECT * FROM quiz_run_questions WHERE run_id=?1 AND id=?2",
+                run_id,
+                question_id,
+            )
+            if question_row is not None:
+                await record_assessment_outcome(
+                    conn,
+                    run=run,
+                    attempt={"id": attempt["id"]},
+                    question_row=question_row,
+                    status="skipped",
+                    correctness=None,
+                    reasoning_status="none",
+                )
             await _complete_run_if_ready(conn, str(run_id), material)
     return await _attempt_payload(db, attempt["id"], question)
 
@@ -960,6 +1383,12 @@ def _is_correct(question: dict[str, Any], submitted: str) -> bool:
             )
         return submitted == expected
     if kind == "true_false":
+        choices = question.get("choices", [])
+        choice_ids = {str(item.get("id", "")) for item in choices if isinstance(item, dict)}
+        if choice_ids:
+            if submitted not in choice_ids:
+                raise ApiError(400, "invalid_answer", "Choose True or False before submitting.")
+            return submitted == expected
         if submitted.casefold() not in {"true", "false"}:
             raise ApiError(400, "invalid_answer", "Choose True or False before submitting.")
         return submitted.casefold() == expected.casefold()
@@ -986,13 +1415,14 @@ async def submit_final_answer(
 ) -> dict[str, Any]:
     owner_id, db = await _authorize(request)
     material = await _owned_material(db, material_id, owner_id)
-    question = _question(material, question_id)
     run = await _owned_run(db, material_id, run_id, owner_id)
-    if run["mode"] != "reasoning":
+    _require_ladder_api(request, run)
+    question, _ = await _run_question(db, str(run_id), question_id)
+    if run["mode"] not in {"reasoning", "standard"}:
         raise ApiError(
             409,
             "wrong_quiz_mode",
-            "Reasoning answer submission is available only in Reasoning Mode.",
+            "This quiz run does not support answer submission.",
         )
     attempt = await db.fetchrow(
         "SELECT * FROM quiz_question_attempts WHERE run_id = ?1 AND question_id = ?2",
@@ -1021,13 +1451,18 @@ async def submit_final_answer(
                     )
                 return await _attempt_payload(conn, attempt["id"], question)
             _check_expected_version(payload.expected_version, int(current["version"]))
-            if current["state"] != "reasoning_accepted":
+            if run["mode"] == "reasoning" and current["state"] != "reasoning_accepted":
                 raise ApiError(
                     409,
                     "reasoning_required",
                     "Submit meaningful reasoning and wait for backend acceptance "
                     "before submitting your answer.",
                 )
+            if run["mode"] == "standard" and current["state"] not in {
+                "awaiting_reasoning",
+                "reasoning_accepted",
+            }:
+                raise ApiError(409, "attempt_terminal", "This question is already finished.")
             correct = _is_correct(question, payload.answer)
             turns = await conn.fetch(
                 "SELECT sequence_number, source, text FROM quiz_reasoning_turns "
@@ -1040,10 +1475,11 @@ async def submit_final_answer(
             # Freeze answer and submitted reasoning before feedback generation.
             await conn.execute(
                 "UPDATE quiz_question_attempts SET state = 'submitted', final_answer = ?2, "
+                "answer_status='answered', "
                 "answer_operation_id = ?3, answer_operation_digest = ?4, correct = ?5, "
                 "submitted_through_turn = ?6, submitted_snapshot_hash = ?7, "
                 "submitted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
-                "feedback_status = 'pending', "
+                "feedback_status = ?9, "
                 "feedback_operation_id = ?8, version = version + 1, "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
                 attempt["id"],
@@ -1054,22 +1490,51 @@ async def submit_final_answer(
                 through_turn,
                 snapshot_hash,
                 feedback_operation_id,
+                "pending"
+                if run["mode"] == "reasoning" and run.get("assessment_type") != "mastery_ladder"
+                else "not_requested",
             )
-            await conn.execute(
-                "INSERT INTO quiz_feedback_operations "
-                "(id, attempt_id, operation_id, status, feedback_version) "
-                "VALUES (?1, ?2, ?3, 'pending', ?4)",
-                uuid4(),
-                attempt["id"],
-                feedback_operation_id,
-                QUIZ_REASONING_FEEDBACK_VERSION,
-            )
+            if run["mode"] == "reasoning" and run.get("assessment_type") != "mastery_ladder":
+                await conn.execute(
+                    "INSERT INTO quiz_feedback_operations "
+                    "(id, attempt_id, operation_id, status, feedback_version) "
+                    "VALUES (?1, ?2, ?3, 'pending', ?4)",
+                    uuid4(),
+                    attempt["id"],
+                    feedback_operation_id,
+                    QUIZ_REASONING_FEEDBACK_VERSION,
+                )
             await conn.execute(
                 "UPDATE quiz_question_attempts SET state = 'completed', "
                 "completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
                 "WHERE id = ?1 AND state = 'submitted'",
                 attempt["id"],
             )
+            question_row = await conn.fetchrow(
+                "SELECT * FROM quiz_run_questions WHERE run_id=?1 AND id=?2",
+                run_id,
+                question_id,
+            )
+            defer_ladder_rubric = bool(
+                run.get("assessment_type") == "mastery_ladder"
+                and run.get("grading_policy") == "reasoning_required"
+            )
+            if question_row is not None and not defer_ladder_rubric:
+                reasoning_status = (
+                    "sufficient"
+                    if current.get("accepted_snapshot_hash")
+                    and int(current.get("accepted_through_turn") or 0) > 0
+                    else "none"
+                )
+                await record_assessment_outcome(
+                    conn,
+                    run=run,
+                    attempt={"id": attempt["id"]},
+                    question_row=question_row,
+                    status="correct" if correct else "incorrect",
+                    correctness=1.0 if correct else 0.0,
+                    reasoning_status=reasoning_status,
+                )
             await _complete_run_if_ready(conn, str(run_id), material)
             final_context = {
                 "question": {
@@ -1085,6 +1550,8 @@ async def submit_final_answer(
                 "authoritative_grade": "correct" if correct else "incorrect",
                 "reasoning_turns": turns,
             }
+    if run["mode"] != "reasoning" or run.get("assessment_type") == "mastery_ladder":
+        return await _attempt_payload(db, attempt["id"], question)
     if payload.wait_for_feedback:
         await _generate_feedback(
             request.app.state.quiz_reasoning_service,
@@ -1171,9 +1638,10 @@ async def retry_feedback(
     background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     owner_id, db = await _authorize(request)
-    material = await _owned_material(db, material_id, owner_id)
-    question = _question(material, question_id)
+    await _owned_material(db, material_id, owner_id)
     run = await _owned_run(db, material_id, run_id, owner_id)
+    _require_ladder_api(request, run)
+    question, _ = await _run_question(db, str(run_id), question_id)
     if run["mode"] != "reasoning":
         raise ApiError(
             409, "wrong_quiz_mode", "Reasoning feedback is available only in Reasoning Mode."
@@ -1250,10 +1718,9 @@ async def retry_feedback(
 
 @router.get("/api/quiz-reasoning/metrics")
 async def get_quiz_reasoning_metrics(request: Request) -> dict[str, Any]:
-    owner_id, db = await _authorize(request)
-    rows = await db.fetch(
-        "SELECT * FROM quiz_reasoning_metrics ORDER BY metric_date DESC LIMIT 30"
-    )
+    await _require_admin(request)
+    db = database(request)
+    rows = await db.fetch("SELECT * FROM quiz_reasoning_metrics ORDER BY metric_date DESC LIMIT 30")
     return {"items": rows}
 
 

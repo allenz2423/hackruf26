@@ -26,6 +26,12 @@ from app.api.schemas import (
 from app.config import Settings
 from app.live_modes import TutorMode
 from app.services.calculator import CalculatorInputError, evaluate_expression
+from app.services.class_access import (
+    can_view_assessment_key,
+    can_view_unreleased,
+    class_access,
+    is_effectively_published,
+)
 from app.services.lean_proofs import (
     LeanProofBusy,
     LeanProofInputError,
@@ -34,12 +40,6 @@ from app.services.lean_proofs import (
 )
 from app.services.live_sessions import LiveSessionTicketStore
 from app.services.source_context import source_excerpts
-from app.services.class_access import (
-    can_view_assessment_key,
-    can_view_unreleased,
-    class_access,
-    is_effectively_published,
-)
 
 logger = logging.getLogger("screen_tutor.api")
 router = APIRouter()

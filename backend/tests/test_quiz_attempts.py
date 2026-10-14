@@ -8,10 +8,12 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+from app.api.errors import ApiError
 from app.api.quiz_attempts import _record_metric
 from app.config import Settings
 from app.main import create_app
@@ -62,6 +64,17 @@ class BlockingReasoningService(FakeReasoningService):
         return ReasoningDecision(status="sufficient", reason="Relevant attempt", follow_up=None)
 
 
+class CapturingStudyTutor:
+    def __init__(self):
+        self.context = None
+
+    async def reply(self, context, messages, *, request_id):
+        from app.api.schemas import StudyTutorResponse
+
+        self.context = context
+        return StudyTutorResponse(reply="Try comparing the two components' responsibilities.")
+
+
 class ReasoningQuizApiTests(unittest.TestCase):
     def setUp(self):
         self.storage = tempfile.TemporaryDirectory()
@@ -102,10 +115,14 @@ class ReasoningQuizApiTests(unittest.TestCase):
         database = self.client.app.state.database
         self.client.portal.call(
             database.execute,
-            "INSERT INTO study_materials (id, class_id, kind, title, status, content) "
-            "VALUES (?1, ?2, 'quiz', 'Kernel quiz', 'ready', ?3)",
+            "INSERT INTO study_materials "
+            "(id,origin_class_id,resource_scope,owner_id,kind,title,status,content,"
+            "assessment_validation_state,assessment_validation_version) "
+            "VALUES (?1,?2,'personal',?3,'quiz','Kernel quiz','ready',?4,"
+            "'validated','test-validator-v1')",
             self.material_id,
             self.class_id,
+            self.user["id"],
             json.dumps({"questions": [self.question]}),
         )
         self.service = FakeReasoningService()
@@ -119,10 +136,21 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()
 
+    def run_question_id(self, run_id):
+        run = self.client.get(f"/api/study-materials/{self.material_id}/runs/{run_id}").json()
+        return run["questions"][0]["id"]
+
+    def run_option_id(self, run_id, source_option_id):
+        source = next(item for item in self.question["choices"] if item["id"] == source_option_id)
+        run = self.client.get(f"/api/study-materials/{self.material_id}/runs/{run_id}").json()
+        return next(
+            item["id"] for item in run["questions"][0]["choices"] if item["text"] == source["text"]
+        )
+
     def submit_reasoning(self, run_id, text, *, operation_id=None):
         attempt = self.current_attempt(run_id)
         return self.client.post(
-            f"/api/study-materials/{self.material_id}/runs/{run_id}/questions/{self.question['id']}/reasoning",
+            f"/api/study-materials/{self.material_id}/runs/{run_id}/questions/{attempt['question_id']}/reasoning",
             json={
                 "operation_id": operation_id or str(uuid4()),
                 "text": text,
@@ -134,17 +162,61 @@ class ReasoningQuizApiTests(unittest.TestCase):
     def current_attempt(self, run_id):
         response = self.client.get(f"/api/study-materials/{self.material_id}/runs/{run_id}")
         self.assertEqual(response.status_code, 200, response.text)
-        return next(
-            attempt
-            for attempt in response.json()["attempts"]
-            if attempt["question_id"] == self.question["id"]
+        return response.json()["attempts"][0]
+
+    def test_new_runs_fail_closed_for_unvalidated_legacy_personal_and_shared_assessments(self):
+        database = self.client.app.state.database
+        self.client.portal.call(
+            database.execute,
+            "UPDATE study_materials SET assessment_validation_state='legacy_unvalidated' "
+            "WHERE id=?1",
+            self.material_id,
         )
+        legacy_shared_id = str(uuid4())
+        self.client.portal.call(
+            database.execute,
+            "INSERT INTO study_materials "
+            "(id,class_id,resource_scope,owner_id,created_by,publication_state,kind,title,status,content,"
+            "assessment_validation_state) VALUES (?1,?2,'student_contribution',NULL,?3,'draft',"
+            "'quiz','Legacy shared','ready',?4,'legacy_unvalidated')",
+            legacy_shared_id,
+            self.class_id,
+            self.user["id"],
+            json.dumps({"questions": [self.question]}),
+        )
+        shared = self.client.post(
+            f"/api/study-materials/{legacy_shared_id}/runs",
+            json={"operation_id": str(uuid4()), "mode": "standard"},
+        )
+        self.assertEqual(shared.status_code, 409, shared.text)
+        self.assertEqual(shared.json()["code"], "assessment_unvalidated")
+
+        personal_id = str(uuid4())
+        self.client.portal.call(
+            database.execute,
+            "INSERT INTO study_materials "
+            "(id,origin_class_id,resource_scope,owner_id,kind,title,status,content,"
+            "assessment_validation_state) VALUES (?1,?2,'personal',?3,'quiz','Legacy personal',"
+            "'ready',?4,'legacy_unvalidated')",
+            personal_id,
+            self.class_id,
+            self.user["id"],
+            json.dumps({"questions": [self.question]}),
+        )
+        personal = self.client.post(
+            f"/api/study-materials/{personal_id}/runs",
+            json={"operation_id": str(uuid4()), "mode": "reasoning"},
+        )
+        self.assertEqual(personal.status_code, 409, personal.text)
+        self.assertEqual(personal.json()["code"], "assessment_unvalidated")
 
     def submit_answer(self, run_id, answer, *, operation_id=None, **options):
         attempt = self.current_attempt(run_id)
+        if answer in {"a", "b"}:
+            answer = self.run_option_id(run_id, answer)
         return self.client.post(
             f"/api/study-materials/{self.material_id}/runs/{run_id}"
-            f"/questions/{self.question['id']}/answer",
+            f"/questions/{attempt['question_id']}/answer",
             json={
                 "operation_id": operation_id or str(uuid4()),
                 "answer": answer,
@@ -159,11 +231,15 @@ class ReasoningQuizApiTests(unittest.TestCase):
         ]
         run = self.create_run()
         base = f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
-        base += f"/questions/{self.question['id']}"
+        base += f"/questions/{self.run_question_id(run['run_id'])}"
 
         locked = self.client.post(
             f"{base}/answer",
-            json={"operation_id": str(uuid4()), "answer": "b", "expected_version": 0},
+            json={
+                "operation_id": str(uuid4()),
+                "answer": self.run_option_id(run["run_id"], "b"),
+                "expected_version": 0,
+            },
         )
         self.assertEqual(locked.status_code, 409)
         self.assertEqual(locked.json()["code"], "reasoning_required")
@@ -194,7 +270,7 @@ class ReasoningQuizApiTests(unittest.TestCase):
             f"{base}/answer",
             json={
                 "operation_id": answer_operation_id,
-                "answer": "b",
+                "answer": self.run_option_id(run["run_id"], "b"),
                 "expected_version": revised.json()["version"],
             },
         )
@@ -209,12 +285,15 @@ class ReasoningQuizApiTests(unittest.TestCase):
             f"{base}/answer",
             json={
                 "operation_id": answer_operation_id,
-                "answer": "b",
+                "answer": self.run_option_id(run["run_id"], "b"),
                 "expected_version": 0,
             },
         )
         self.assertEqual(replayed_answer.status_code, 200, replayed_answer.text)
-        self.assertEqual(replayed_answer.json()["final_answer"], "b")
+        self.assertEqual(
+            replayed_answer.json()["final_answer"],
+            "The user-facing desktop and application suite",
+        )
         refreshed = self.client.get(
             f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
         ).json()
@@ -281,7 +360,7 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.service.failure = False
         retry_operation_id = str(uuid4())
         retry = self.client.post(
-            f"/api/study-materials/{self.material_id}/runs/{run['run_id']}/questions/{self.question['id']}/reasoning/retry",
+            f"/api/study-materials/{self.material_id}/runs/{run['run_id']}/questions/{self.run_question_id(run['run_id'])}/reasoning/retry",
             json={
                 "operation_id": retry_operation_id,
                 "expected_version": self.current_attempt(run["run_id"])["version"],
@@ -291,7 +370,7 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.assertEqual(retry.json()["state"], "reasoning_accepted")
         self.assertEqual(len(retry.json()["reasoning_turns"]), 1)
         retry_replay = self.client.post(
-            f"/api/study-materials/{self.material_id}/runs/{run['run_id']}/questions/{self.question['id']}/reasoning/retry",
+            f"/api/study-materials/{self.material_id}/runs/{run['run_id']}/questions/{self.run_question_id(run['run_id'])}/reasoning/retry",
             json={"operation_id": retry_operation_id, "expected_version": 1},
         )
         self.assertEqual(retry_replay.status_code, 200, retry_replay.text)
@@ -303,7 +382,7 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.client.app.state.quiz_reasoning_service = service
         run = self.create_run()
         base = f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
-        base += f"/questions/{self.question['id']}"
+        base += f"/questions/{self.run_question_id(run['run_id'])}"
         with ThreadPoolExecutor(max_workers=1) as pool:
             pending = pool.submit(
                 self.submit_reasoning, run["run_id"], "A meaningful but not yet graded thought."
@@ -360,7 +439,7 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.service.feedback_failure = False
         feedback_path = (
             f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
-            f"/questions/{self.question['id']}/feedback/retry"
+            f"/questions/{self.run_question_id(run['run_id'])}/feedback/retry"
         )
         retry_id = str(uuid4())
         retried = self.client.post(
@@ -376,7 +455,10 @@ class ReasoningQuizApiTests(unittest.TestCase):
             f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
         ).json()
         self.assertEqual(refreshed_retry["attempts"][0]["feedback_status"], "available")
-        self.assertEqual(refreshed_retry["attempts"][0]["final_answer"], "b")
+        self.assertEqual(
+            refreshed_retry["attempts"][0]["final_answer"],
+            "The user-facing desktop and application suite",
+        )
         self.assertFalse(refreshed_retry["attempts"][0]["correct"])
         self.assertEqual(
             self.client.portal.call(
@@ -403,7 +485,9 @@ class ReasoningQuizApiTests(unittest.TestCase):
             json={
                 "run_id": standard["run_id"],
                 "operation_id": str(uuid4()),
-                "answers": {"kernel-difference": "a"},
+                "answers": {
+                    standard["questions"][0]["id"]: self.run_option_id(standard["run_id"], "a")
+                },
             },
         )
         self.assertEqual(submitted.status_code, 200, submitted.text)
@@ -415,6 +499,208 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.assertEqual(run_state["status"], "completed")
         history = self.client.get(f"/api/study-materials/{self.material_id}/runs").json()["items"]
         self.assertEqual({item["mode"] for item in history}, {"standard"})
+
+    def test_run_question_and_grading_are_immutable_and_material_detail_is_allowlisted(self):
+        run = self.create_run("standard")
+        question = run["questions"][0]
+        self.assertNotEqual(question["id"], self.question["id"])
+        self.assertNotIn("answer", question)
+        self.assertNotEqual(question["choices"][0]["id"], self.question["choices"][0]["id"])
+        detail = self.client.get(f"/api/study-materials/{self.material_id}")
+        self.assertEqual(detail.status_code, 200, detail.text)
+        material_question = detail.json()["content"]["questions"][0]
+        self.assertEqual(set(material_question), {"prompt", "kind"})
+        self.assertNotIn("answer", detail.text)
+        self.assertNotIn('"choices"', detail.text)
+
+        changed = {
+            **self.question,
+            "prompt": "A later mutable edit that this run must not use",
+            "answer": "b",
+            "explanation": "Changed after this run began.",
+        }
+        self.client.portal.call(
+            self.client.app.state.database.execute,
+            "UPDATE study_materials SET content=?2 WHERE id=?1",
+            self.material_id,
+            json.dumps({"questions": [changed]}),
+        )
+        refreshed = self.client.get(
+            f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
+        ).json()
+        self.assertEqual(refreshed["questions"][0]["prompt"], self.question["prompt"])
+        correct_choice = next(
+            item["id"]
+            for item in question["choices"]
+            if item["text"] == self.question["choices"][0]["text"]
+        )
+        submitted = self.client.post(
+            f"/api/study-materials/{self.material_id}/attempts",
+            json={
+                "run_id": run["run_id"],
+                "operation_id": str(uuid4()),
+                "answers": {question["id"]: correct_choice},
+            },
+        )
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        self.assertTrue(submitted.json()["question_results"][0]["correct"])
+
+    def test_manual_release_gates_scores_and_tutor_answer_context(self):
+        self.client.portal.call(
+            self.client.app.state.database.execute,
+            "UPDATE study_materials SET feedback_release_policy='manual' WHERE id=?1",
+            self.material_id,
+        )
+        run = self.create_run("standard")
+        q = run["questions"][0]
+        learning_concept_id = str(uuid4())
+        database = self.client.app.state.database
+        snapshot = self.client.portal.call(
+            database.fetchrow,
+            "SELECT id,private_snapshot FROM quiz_run_questions WHERE run_id=?1 AND id=?2",
+            run["run_id"],
+            q["id"],
+        )
+        private_snapshot = json.loads(snapshot["private_snapshot"])
+        private_snapshot.update(
+            {
+                "level": 1,
+                "concept_ids": [learning_concept_id],
+                "concept_labels": {learning_concept_id: "Operating systems"},
+                "source_chunk_revision_ids": [str(uuid4())],
+            }
+        )
+        self.client.portal.call(
+            database.execute,
+            "UPDATE quiz_run_questions SET private_snapshot=?2,evidence_eligible=1 WHERE id=?1",
+            snapshot["id"],
+            json.dumps(private_snapshot),
+        )
+        answer_id = next(
+            item["id"]
+            for item in q["choices"]
+            if item["text"] == self.question["choices"][0]["text"]
+        )
+        submitted = self.client.post(
+            f"/api/study-materials/{self.material_id}/attempts",
+            json={
+                "run_id": run["run_id"],
+                "operation_id": str(uuid4()),
+                "answers": {q["id"]: answer_id},
+            },
+        )
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        self.assertFalse(submitted.json()["feedback_available"])
+        self.assertIsNone(submitted.json()["question_results"][0]["correct"])
+        state = self.client.get(
+            f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
+        ).json()
+        self.assertFalse(state["feedback_policy"]["feedback_available"])
+        self.assertNotIn("correct", state["attempts"][0])
+        self.assertEqual(
+            self.client.portal.call(
+                database.fetchval,
+                "SELECT count(*) FROM mastery_evidence WHERE owner_id=?1",
+                self.user["id"],
+            ),
+            0,
+        )
+        tutor = CapturingStudyTutor()
+        self.client.app.state.study_tutor_service = tutor
+        hint = self.client.post(
+            "/api/study-tutor",
+            json={
+                "material_id": self.material_id,
+                "question_id": q["id"],
+                "attempt_id": run["run_id"],
+                "messages": [{"role": "user", "text": "Can I have a hint?"}],
+            },
+        )
+        self.assertEqual(hint.status_code, 200, hint.text)
+        self.assertNotIn("answer", tutor.context["question"])
+        self.assertEqual(tutor.context["correct_answer"], "")
+        self.assertEqual(tutor.context["course_excerpts"], "")
+
+        release_body = {"operation_id": str(uuid4())}
+        release_path = f"/api/study-materials/{self.material_id}/feedback-release"
+        release = self.client.post(release_path, json=release_body)
+        self.assertEqual(release.status_code, 200, release.text)
+        self.assertEqual(
+            self.client.portal.call(
+                database.fetchval,
+                "SELECT count(*) FROM mastery_evidence WHERE owner_id=?1",
+                self.user["id"],
+            ),
+            1,
+        )
+        replayed_release = self.client.post(release_path, json=release_body)
+        self.assertEqual(replayed_release.status_code, 200, replayed_release.text)
+        self.assertTrue(replayed_release.json()["already_released"])
+        self.assertEqual(
+            self.client.portal.call(
+                database.fetchval,
+                "SELECT count(*) FROM mastery_evidence WHERE owner_id=?1",
+                self.user["id"],
+            ),
+            1,
+        )
+        released = self.client.get(
+            f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
+        ).json()
+        self.assertTrue(released["feedback_policy"]["feedback_available"])
+        self.assertTrue(released["attempts"][0]["correct"])
+        released_hint = self.client.post(
+            "/api/study-tutor",
+            json={
+                "material_id": self.material_id,
+                "question_id": q["id"],
+                "attempt_id": run["run_id"],
+                "messages": [{"role": "user", "text": "What is the answer?"}],
+            },
+        )
+        self.assertEqual(released_hint.status_code, 200, released_hint.text)
+        self.assertEqual(tutor.context["correct_answer"], self.question["choices"][0]["text"])
+        self.assertNotIn(tutor.context["correct_answer"], {choice["id"] for choice in q["choices"]})
+
+    def test_feedback_release_rechecks_manager_inside_write_transaction(self):
+        database = self.client.app.state.database
+        self.client.portal.call(
+            database.execute,
+            "UPDATE study_materials SET class_id=?2,origin_class_id=NULL,"
+            "resource_scope='class_owned',owner_id=NULL,created_by=?3,"
+            "publication_state='published',feedback_release_policy='manual' "
+            "WHERE id=?1",
+            self.material_id,
+            self.class_id,
+            self.user["id"],
+        )
+        material = {
+            "id": self.material_id,
+            "kind": "quiz",
+            "resource_scope": "class_owned",
+            "owner_id": None,
+            "feedback_release_policy": "manual",
+        }
+        authorized = {"is_owner": True, "capabilities": ["manage_permissions"]}
+        release_path = f"/api/study-materials/{self.material_id}/feedback-release"
+        with patch(
+            "app.api.class_question_bank.material_access",
+            side_effect=[
+                (material, authorized),
+                ApiError(403, "insufficient_permission", "Manager permission was revoked."),
+            ],
+        ) as access_check:
+            response = self.client.post(release_path, json={"operation_id": str(uuid4())})
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(access_check.call_count, 2)
+        self.assertEqual(
+            self.client.portal.call(
+                database.fetchval,
+                "SELECT count(*) FROM study_material_feedback_releases WHERE material_id=?1",
+                self.material_id,
+            ),
+            0,
+        )
 
     def test_run_and_attempt_operations_are_owner_scoped_and_content_bound(self):
         run = self.create_run()
@@ -446,7 +732,7 @@ class ReasoningQuizApiTests(unittest.TestCase):
         run = self.create_run()
         path = (
             f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
-            f"/questions/{self.question['id']}/reasoning"
+            f"/questions/{self.run_question_id(run['run_id'])}/reasoning"
         )
         missing_version = self.client.post(
             path,
@@ -494,18 +780,18 @@ class ReasoningQuizApiTests(unittest.TestCase):
 
         answer_path = (
             f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
-            f"/questions/{self.question['id']}/answer"
+            f"/questions/{self.run_question_id(run['run_id'])}/answer"
         )
         missing_answer_version = self.client.post(
             answer_path,
-            json={"operation_id": str(uuid4()), "answer": "a"},
+            json={"operation_id": str(uuid4()), "answer": self.run_option_id(run["run_id"], "a")},
         )
         self.assertEqual(missing_answer_version.status_code, 400)
         stale_answer = self.client.post(
             answer_path,
             json={
                 "operation_id": str(uuid4()),
-                "answer": "a",
+                "answer": self.run_option_id(run["run_id"], "a"),
                 "expected_version": 0,
             },
         )
@@ -518,6 +804,15 @@ class ReasoningQuizApiTests(unittest.TestCase):
             [0, 20, 30, 40],
         )
 
+        forbidden = self.client.get("/api/quiz-reasoning/metrics")
+        self.assertEqual(forbidden.status_code, 403)
+
+        # Aggregate diagnostic metrics are intentionally administrator-only.
+        self.client.portal.call(
+            self.client.app.state.database.execute,
+            "UPDATE users SET is_admin=1 WHERE id=?1",
+            self.user["id"],
+        )
         metrics = self.client.get("/api/quiz-reasoning/metrics")
         self.assertEqual(metrics.status_code, 200)
         items = metrics.json()["items"]
@@ -545,13 +840,13 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.submit_reasoning(run["run_id"], "The kernel controls hardware directly.")
         answer_path = (
             f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
-            f"/questions/{self.question['id']}/answer"
+            f"/questions/{self.run_question_id(run['run_id'])}/answer"
         )
         sync_res = self.client.post(
             answer_path,
             json={
                 "operation_id": str(uuid4()),
-                "answer": "a",
+                "answer": self.run_option_id(run["run_id"], "a"),
                 "expected_version": self.current_attempt(run["run_id"])["version"],
                 "wait_for_feedback": True,
             },
@@ -561,7 +856,6 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.assertEqual(sync_res.json()["feedback_status"], "available")
         self.assertTrue(sync_res.json()["correct"])
         self.assertIsNotNone(sync_res.json()["reasoning_feedback"])
-
 
     def test_fixture_set_is_manually_reviewable_and_not_a_runtime_rule_list(self):
         fixture_path = Path(__file__).parent / "fixtures" / "reasoning-sufficiency.json"

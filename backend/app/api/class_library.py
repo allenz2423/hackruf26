@@ -15,7 +15,7 @@ from typing import Annotated, Any, Literal
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, Request, Response, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 
 from app.api.dependencies import (
@@ -35,6 +35,7 @@ from app.api.schemas import (
     MaterialDetail,
     MaterialSummary,
     QuestionAttemptResult,
+    QuestionBankGenerationRequest,
     ResourcePublicationUpdate,
     StudyMaterialCreate,
     StudyMaterialFlagCreate,
@@ -46,10 +47,9 @@ from app.api.schemas import (
 )
 from app.api.upload_documents import create_default_document, document_detail
 from app.config import Settings
-from app.services.database import SQLiteConnection, SQLiteDatabase, json_value
 from app.services.class_access import (
-    can_view_unreleased,
     can_view_assessment_key,
+    can_view_unreleased,
     class_access,
     is_class_manager,
     is_effectively_published,
@@ -58,8 +58,30 @@ from app.services.class_access import (
     require_capability,
     require_resource_mutation,
 )
+from app.services.database import SQLiteConnection, SQLiteDatabase, json_value
 from app.services.gemini_content import MAX_NOTE_CONTEXT_CHARS, GeminiContentService
+from app.services.learning_scoring import (
+    award_run_completion,
+    materialize_released_evidence_for_run,
+    record_assessment_outcome,
+)
+from app.services.question_bank import (
+    create_generated_assessment,
+    create_validated_private_assessment,
+    validate_material_bank_sources,
+)
 from app.services.source_context import source_excerpts
+from app.services.source_index import (
+    begin_index_job,
+    fetch_authorized_chunk,
+    file_sha256,
+    make_source_blocks,
+    persist_revision,
+    process_queued_jobs,
+    queue_ready_note_index,
+    retry_ready_note_index,
+    search_authorized_sources,
+)
 from app.services.storage import LocalPrivateStorage, UploadTooLarge
 from app.services.study_files import StudyFileFailure, compiler_path, create_guide_files
 
@@ -85,6 +107,8 @@ FILE_TYPES: dict[str, tuple[str, str]] = {
 LECTURE_KINDS = {"lecture_video", "lecture_audio"}
 NOTE_KINDS = {"notes", "document", "syllabus", "slides", "lecture_video", "lecture_audio"}
 ASSESSMENT_EXTENSIONS = {".pdf", ".docx", ".pptx", ".txt", ".md", ".png", ".jpg", ".jpeg"}
+SHARED_ASSESSMENT_GENERATION_DEADLINE_SECONDS = 70
+PRIVATE_ASSESSMENT_GENERATION_DEADLINE_SECONDS = 70
 
 
 async def _authorize(request: Request) -> tuple[UUID, SQLiteDatabase, Settings]:
@@ -159,6 +183,7 @@ def _upload_summary(row: dict[str, Any]) -> UploadSummary:
         created_by=row.get("created_by"),
         publication_state=row.get("publication_state", "published"),
         release_at=row.get("release_at"),
+        source_index_status=row.get("source_index_status", "unindexed"),
     )
 
 
@@ -217,7 +242,10 @@ def _material_item_count(content: object, kind: str, fallback: int = 0) -> int:
 def _material_summary(row: dict[str, Any]) -> MaterialSummary:
     values = dict(row)
     latest = None
-    if values.get("latest_score") is not None:
+    policy = row.get("feedback_release_policy", "after_completion")
+    feedback_released = bool(values.get("feedback_released"))
+    score_allowed = policy == "after_completion" or (policy == "manual" and feedback_released)
+    if values.get("latest_score") is not None and score_allowed:
         latest = {"score_percent": values["latest_score"], "completed_at": values["latest_completed_at"]}
     content = json_value(values.get("content"), {})
     return MaterialSummary(
@@ -245,20 +273,40 @@ def _material_summary(row: dict[str, Any]) -> MaterialSummary:
         created_by=row.get("created_by"),
         publication_state=row.get("publication_state", "published"),
         release_at=row.get("release_at"),
+        feedback_release_policy=row.get("feedback_release_policy", "after_completion"),
     )
 
 
 def _public_material_content(
-    kind: str, value: object, *, visible_source_ids: set[str] | None = None
+    kind: str,
+    value: object,
+    *,
+    visible_source_ids: set[str] | None = None,
+    include_assessment_feedback: bool = False,
 ) -> dict | None:
     content = json_value(value)
     if not isinstance(content, dict):
         return None
     result = json.loads(json.dumps(content))
     if kind in {"quiz", "practice_exam"}:
-        for question in result.get("questions", []):
-            for key in ("answer", "accepted_answers", "rubric", "explanation"):
-                question.pop(key, None)
+        questions = result.get("questions", [])
+        # Assessment delivery happens through immutable runs, never material detail.
+        safe_questions = []
+        for question in questions if isinstance(questions, list) else []:
+            if not isinstance(question, dict):
+                continue
+            item = {
+                "prompt": str(question.get("prompt", ""))[:5_000],
+                "kind": str(question.get("kind", "short_answer")),
+            }
+            if isinstance(question.get("level"), int):
+                item["level"] = question["level"]
+            safe_questions.append(item)
+        return {
+            "format": kind,
+            "question_count": len(safe_questions),
+            "questions": safe_questions,
+        }
     collections = [result.get("questions", []), result.get("sections", []), result.get("cards", [])]
     if visible_source_ids is not None:
         for group in collections:
@@ -844,6 +892,43 @@ async def list_uploads(class_id: UUID, request: Request) -> dict[str, list[Uploa
     ]}
 
 
+@router.get("/api/classes/{class_id}/sources/search")
+async def search_class_sources(
+    class_id: UUID,
+    request: Request,
+    response: Response,
+    query: str = Query(min_length=1, max_length=500),
+    upload_id: UUID | None = None,
+    limit: int = Query(default=8, ge=1, le=20),
+) -> dict[str, list[dict[str, Any]]]:
+    user_id, database, _ = await _authorize(request)
+    await _rate_limit(request, "source_search_rate_limiter", user_id)
+    response.headers["Cache-Control"] = "private, no-store"
+    results = await search_authorized_sources(
+        database, class_id=str(class_id), user_id=str(user_id), query=query,
+        upload_id=str(upload_id) if upload_id else None, limit=limit,
+    )
+    # Search results contain excerpts of class material and must not enter shared caches.
+    return results
+
+
+@router.get("/api/classes/{class_id}/sources/chunks/{chunk_revision_id}")
+async def get_class_source_chunk(
+    class_id: UUID,
+    chunk_revision_id: UUID,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    user_id, database, _ = await _authorize(request)
+    await _rate_limit(request, "source_search_rate_limiter", user_id)
+    result = await fetch_authorized_chunk(
+        database, class_id=str(class_id), user_id=str(user_id),
+        chunk_revision_id=str(chunk_revision_id),
+    )
+    response.headers["Cache-Control"] = "private, no-store"
+    return result
+
+
 @router.get("/api/uploads/{upload_id}")
 async def get_upload(upload_id: UUID, request: Request) -> UploadDetail:
     user_id, database, _ = await _authorize(request)
@@ -1060,12 +1145,15 @@ async def delete_upload(upload_id: UUID, request: Request) -> Response:
 @router.post("/api/uploads/{upload_id}/retry", status_code=202)
 async def retry_upload(upload_id: UUID, request: Request, background_tasks: BackgroundTasks) -> UploadSummary:
     user_id, database, _ = await _authorize(request)
-    if getattr(request.app.state, "gemini_content_service", None) is None:
-        raise ApiError(503, "content_processing_unavailable", "Course material processing is unavailable.")
     async with database.acquire() as connection:
         async with connection.transaction():
             current = await connection.fetchrow(
-                "SELECT n.status,n.class_id,n.created_by,a.id AS assessment_id "
+                "SELECT n.status,n.source_index_status,n.processing_revision,"
+                "n.class_id,n.created_by,"
+                "n.resource_scope,n.publication_state,n.release_at,a.id AS assessment_id,"
+                "a.owner_id AS assessment_owner,a.has_student_responses,"
+                "a.score_percent,a.grading_result,"
+                "a.answer_key_release_state,a.answer_key_release_at "
                 "FROM course_notes n LEFT JOIN uploaded_assessments a ON a.note_id=n.id "
                 "WHERE n.id=?1", upload_id,
             )
@@ -1073,8 +1161,41 @@ async def retry_upload(upload_id: UUID, request: Request, background_tasks: Back
                 raise ApiError(404, "not_found", "The requested resource was not found.")
             access = await class_access(connection, current["class_id"], user_id)
             require_resource_mutation(access, user_id, current["created_by"], "edit")
+            if current["status"] == "ready" and current["source_index_status"] == "failed":
+                assessment = {
+                    "owner_id": current["assessment_owner"],
+                    "has_student_responses": current["has_student_responses"],
+                    "score_percent": current["score_percent"],
+                    "grading_result": current["grading_result"],
+                }
+                if current["assessment_id"] is not None and (
+                    is_private_assessment(assessment)
+                    or not can_view_assessment_key({**assessment, **current}, access, user_id)
+                ):
+                    raise ApiError(404, "not_found", "The requested resource was not found.")
+                queued = await retry_ready_note_index(
+                    connection, note_id=str(upload_id),
+                    processing_revision=current["processing_revision"],
+                )
+                if not queued:
+                    raise ApiError(
+                        409, "source_index_retry_conflict", "The source index could not be retried."
+                    )
+                row = await connection.fetchrow(
+                    "SELECT * FROM course_notes WHERE id=?1", upload_id
+                )
+                background_tasks.add_task(
+                    _retry_source_index_job, request.app, str(upload_id),
+                    current["processing_revision"],
+                )
+                return _upload_summary(row)
             if current["status"] != "failed":
                 raise ApiError(409, "upload_not_failed", "Only failed uploads can be retried.")
+            if getattr(request.app.state, "gemini_content_service", None) is None:
+                raise ApiError(
+                    503, "content_processing_unavailable",
+                    "Course material processing is unavailable.",
+                )
             row = await connection.fetchrow(
                 "UPDATE course_notes SET status = 'processing', processing_progress = 0, "
                 "failure_code = NULL, processed_at = NULL, processing_revision = processing_revision + 1, "
@@ -1094,6 +1215,13 @@ async def retry_upload(upload_id: UUID, request: Request, background_tasks: Back
     else:
         background_tasks.add_task(_process_upload_job, request.app, upload_id, row["processing_revision"])
     return _upload_summary(row)
+
+
+async def _retry_source_index_job(
+    application: Any, note_id: str, processing_revision: int
+) -> None:
+    """Retry local indexing only; extracted text and provider-derived fields remain unchanged."""
+    await process_queued_jobs(application, limit=1, note_id=note_id)
 
 
 async def _process_upload_job(
@@ -1117,27 +1245,42 @@ async def _process_upload_job(
         )
         if row is None:
             return
+        if not await begin_index_job(database, str(upload_id), row["processing_revision"]):
+            return
         if row["source_type"] == "pasted_text":
             result = await asyncio.to_thread(content_service.process_text, row["extracted_text"], row["kind"])
+            path = None
         else:
             path = storage.path_for(row["storage_key"])
             result = await asyncio.to_thread(content_service.process_upload, path, row["kind"], row["mime_type"])
-        completed = await database.execute(
-            "UPDATE course_notes SET extracted_text = ?2, summary = ?3, key_topics = ?4, "
-            "transcript_segments = ?5, duration_seconds = ?6, syllabus_outline = ?7, "
-            "status = 'ready', processing_progress = 100, failure_code = NULL, processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
-            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-            "WHERE id = ?1 AND status = 'processing' AND processing_revision = ?8",
-            upload_id,
-            result["extracted_text"],
-            result["summary"],
-            json.dumps(result["key_topics"]),
-            json.dumps(result["transcript_segments"]),
-            result["duration_seconds"],
-            json.dumps(result["syllabus_outline"]) if result["syllabus_outline"] is not None else None,
-            row["processing_revision"],
+        extracted_text = result["extracted_text"]
+        transcript_segments = result.get("transcript_segments", [])
+        blocks = await asyncio.to_thread(
+            make_source_blocks,
+            path=path,
+            kind=row["kind"],
+            source_type=row["source_type"],
+            mime_type=row["mime_type"],
+            extracted_text=extracted_text,
+            transcript_segments=transcript_segments,
         )
-        if completed != "UPDATE 0":
+        source_hash = await asyncio.to_thread(file_sha256, path)
+        async with database.acquire() as connection:
+            async with connection.transaction():
+                revision_id = await persist_revision(
+                    connection,
+                    note_id=str(upload_id),
+                    processing_revision=row["processing_revision"],
+                    source_hash=source_hash,
+                    extracted_text=extracted_text,
+                    extraction_method=(
+                        blocks[0].extraction_method if blocks else "extracted_text"
+                    ),
+                    blocks=blocks,
+                    mark_note_ready=True,
+                    upload_result=result,
+                )
+        if revision_id is not None:
             await create_default_document(application, upload_id)
     except Exception as exc:
         logger.error(
@@ -1149,9 +1292,19 @@ async def _process_upload_job(
             return
         try:
             await database.execute(
-                "UPDATE course_notes SET status = 'failed', failure_code = 'processing_failed', "
+                "UPDATE course_notes SET status='failed', source_index_status='failed', "
+                "failure_code='processing_failed', "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
                 "WHERE id = ?1 AND status = 'processing' AND processing_revision = ?2",
+                upload_id,
+                row["processing_revision"],
+            )
+            await database.execute(
+                "UPDATE source_index_jobs SET status='failed',"
+                "last_error_code='upload_processing_failed',"
+                "completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),"
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                "WHERE note_id=?1 AND processing_revision=?2 AND status IN ('running','queued')",
                 upload_id,
                 row["processing_revision"],
             )
@@ -1296,6 +1449,11 @@ async def _process_assessment_job(
                     analysis["grade_confidence"],
                 )
         await create_default_document(application, UUID(str(note_id)))
+        if not is_private_assessment(analysis):
+            await queue_ready_note_index(
+                database, note_id=str(note_id), processing_revision=active_revision
+            )
+            await process_queued_jobs(application, limit=1, note_id=str(note_id))
     except Exception as exc:
         logger.error(
             "assessment_processing_failed assessment_id=%s category=%s",
@@ -1351,31 +1509,47 @@ async def _reprocess_upload_job(
         )
         if row is None:
             return
+        if not await begin_index_job(database, str(upload_id), row["processing_revision"]):
+            return
         if use_extracted_text or row["source_type"] == "pasted_text":
             result = await asyncio.to_thread(content_service.process_text, row["extracted_text"], row["kind"])
+            path = None
         else:
+            path = storage.path_for(row["storage_key"])
             result = await asyncio.to_thread(
                 content_service.process_upload,
-                storage.path_for(row["storage_key"]),
+                path,
                 row["kind"],
                 row["mime_type"],
             )
-        completed = await database.execute(
-            "UPDATE course_notes SET extracted_text = ?2, summary = ?3, key_topics = ?4, "
-            "transcript_segments = ?5, duration_seconds = ?6, syllabus_outline = ?7, "
-            "status = 'ready', processing_progress = 100, failure_code = NULL, processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
-            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-            "WHERE id = ?1 AND status = 'processing' AND processing_revision = ?8",
-            upload_id,
-            result["extracted_text"],
-            result["summary"],
-            json.dumps(result["key_topics"]),
-            json.dumps(result["transcript_segments"]),
-            result["duration_seconds"],
-            json.dumps(result["syllabus_outline"]) if result["syllabus_outline"] is not None else None,
-            row["processing_revision"],
+        extracted_text = result["extracted_text"]
+        transcript_segments = result.get("transcript_segments", [])
+        blocks = await asyncio.to_thread(
+            make_source_blocks,
+            path=path,
+            kind=row["kind"],
+            source_type=row["source_type"],
+            mime_type=row["mime_type"],
+            extracted_text=extracted_text,
+            transcript_segments=transcript_segments,
         )
-        if completed != "UPDATE 0":
+        source_hash = await asyncio.to_thread(file_sha256, path)
+        async with database.acquire() as connection:
+            async with connection.transaction():
+                revision_id = await persist_revision(
+                    connection,
+                    note_id=str(upload_id),
+                    processing_revision=row["processing_revision"],
+                    source_hash=source_hash,
+                    extracted_text=extracted_text,
+                    extraction_method=(
+                        blocks[0].extraction_method if blocks else "extracted_text"
+                    ),
+                    blocks=blocks,
+                    mark_note_ready=True,
+                    upload_result=result,
+                )
+        if revision_id is not None:
             await create_default_document(application, upload_id)
     except Exception as exc:
         logger.error(
@@ -1387,9 +1561,19 @@ async def _reprocess_upload_job(
             return
         try:
             await database.execute(
-                "UPDATE course_notes SET status = 'failed', failure_code = 'processing_failed', "
+                "UPDATE course_notes SET status='failed', source_index_status='failed', "
+                "failure_code='processing_failed', "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
                 "WHERE id = ?1 AND status = 'processing' AND processing_revision = ?2",
+                upload_id,
+                row["processing_revision"],
+            )
+            await database.execute(
+                "UPDATE source_index_jobs SET status='failed',"
+                "last_error_code='upload_processing_failed',"
+                "completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),"
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                "WHERE note_id=?1 AND processing_revision=?2 AND status IN ('running','queued')",
                 upload_id,
                 row["processing_revision"],
             )
@@ -1465,7 +1649,8 @@ async def update_resource_publication(
         )
     else:
         row = await db.fetchrow(
-            "SELECT id,class_id,created_by,resource_scope FROM study_materials WHERE id=?1",
+            "SELECT id,class_id,created_by,resource_scope,kind,status "
+            "FROM study_materials WHERE id=?1",
             resource_id,
         )
     if row is None or row["class_id"] is None:
@@ -1489,12 +1674,31 @@ async def update_resource_publication(
     published_at = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z") \
         if payload.state == "published" else None
     table = "course_notes" if resource_type == "uploads" else "study_materials"
-    updated = await db.fetchrow(
-        f"UPDATE {table} SET publication_state=?2,release_at=?3,published_at=?4, "
-        "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 "
-        "RETURNING id,publication_state,release_at,published_at",
-        resource_id, payload.state, release_at, published_at,
-    )
+    async with db.acquire() as connection:
+        async with connection.transaction():
+            if (
+                resource_type == "study_materials"
+                and row["kind"] in {"quiz", "practice_exam"}
+                and payload.state in {"published", "scheduled"}
+            ):
+                if row["status"] != "ready":
+                    raise ApiError(
+                        409,
+                        "material_not_ready",
+                        "Wait for generation to finish before publishing.",
+                    )
+                await validate_material_bank_sources(
+                    connection,
+                    material_id=str(resource_id),
+                    class_id=str(row["class_id"]),
+                    user_id=str(user_id),
+                )
+            updated = await connection.fetchrow(
+                f"UPDATE {table} SET publication_state=?2,release_at=?3,published_at=?4, "
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 "
+                "RETURNING id,publication_state,release_at,published_at",
+                resource_id, payload.state, release_at, published_at,
+            )
     return dict(updated)
 
 
@@ -1648,7 +1852,8 @@ async def _create_material_job(
         return
     try:
         material = await database.fetchrow(
-            "SELECT m.id,m.class_id,m.origin_class_id,m.owner_id,m.created_by,m.kind,m.scope,m.options,m.generation_instructions, "
+            "SELECT m.id,m.class_id,m.origin_class_id,m.owner_id,m.created_by,m.resource_scope,"
+            "m.kind,m.scope,m.options,m.generation_instructions, "
             "c.name AS class_name "
             "FROM study_materials m LEFT JOIN course_classes c ON c.id = COALESCE(m.class_id,m.origin_class_id) "
             "WHERE m.id = ?1 AND m.status = 'generating'",
@@ -1703,6 +1908,34 @@ async def _create_material_job(
             }})
         if not sources or len(sources) != len(source_rows):
             raise RuntimeError("no generation sources remain accessible")
+        if material["kind"] in {"quiz", "practice_exam"}:
+            # Personal assessments are kept owner-private and do not write to
+            # the class bank, but they must still pass the same structured
+            # source, answer, rubric, leakage, language, and duplicate checks.
+            if material.get("resource_scope") != "personal":
+                raise RuntimeError(
+                    "shared assessments must be generated through the validated bank"
+                )
+            origin_class_id = material.get("origin_class_id") or material.get("class_id")
+            actor_id = material.get("created_by") or material.get("owner_id")
+            if origin_class_id is None or actor_id is None:
+                raise RuntimeError("private assessment generation lost its source owner")
+            await asyncio.wait_for(
+                create_validated_private_assessment(
+                    database,
+                    material_id=str(material_id),
+                    class_id=str(origin_class_id),
+                    user_id=str(actor_id),
+                    material_kind=material["kind"],
+                    options=json_value(material["options"], {}),
+                    language=str(json_value(material["options"], {}).get("language") or "en"),
+                    additional_instructions=material.get("generation_instructions"),
+                    source_rows=sources,
+                    service=service,
+                ),
+                timeout=PRIVATE_ASSESSMENT_GENERATION_DEADLINE_SECONDS,
+            )
+            return
         await database.execute(
             "UPDATE study_materials SET context_truncated = ?2 WHERE id = ?1",
             material_id,
@@ -1778,6 +2011,8 @@ async def create_study_material(
     await _rate_limit(request, "generation_rate_limiter", user_id)
     scope = payload.scope.model_dump(mode="json")
     options = payload.options.model_dump(mode="json", exclude_none=True)
+    if payload.kind in {"quiz", "practice_exam"}:
+        options["language"] = payload.language
     if payload.kind != "practice_exam" and options.get("time_limit_minutes") is not None:
         raise ApiError(400, "invalid_options", "A time limit is available only for practice exams.")
     if options.get("question_types") is not None and payload.kind not in {"quiz", "practice_exam"}:
@@ -1792,13 +2027,244 @@ async def create_study_material(
     resource_scope = "personal" if personal else "student_contribution"
     material_class_id = None if personal else class_id
     publication_state = None if personal else "draft"
+    feedback_release_policy = payload.feedback_release_policy or (
+        "manual" if not personal and payload.kind == "practice_exam" else "after_completion"
+    )
+    if not personal and payload.kind in {"quiz", "practice_exam"}:
+        # Shared assessments must originate in the validated source-linked bank.
+        # This preserves the existing Study UI while preventing an arbitrary
+        # provider response from becoming a publishable class assessment.
+        source_ids = [str(source["id"]) for source in sources]
+        placeholders = ",".join(f"?{index + 2}" for index in range(len(source_ids)))
+        concepts = await database.fetch(
+            "SELECT DISTINCT c.id FROM class_concepts c "
+            "JOIN class_concept_source_refs ref ON ref.concept_id=c.id "
+            "AND ref.class_id=c.class_id "
+            "JOIN source_chunk_revisions cr ON cr.id=ref.chunk_revision_id "
+            "JOIN source_revisions sr ON sr.id=cr.revision_id "
+            "JOIN source_index_heads h ON h.note_id=sr.note_id AND h.revision_id=sr.id "
+            "JOIN course_notes n ON n.id=sr.note_id "
+            "WHERE c.class_id=?1 AND c.status='validated' AND n.id IN (" + placeholders + ") "
+            "AND n.status='ready' AND n.source_index_status='ready' "
+            "ORDER BY c.id LIMIT 50",
+            class_id,
+            *source_ids,
+        )
+        if not concepts:
+            raise ApiError(
+                409,
+                "validated_concepts_required",
+                "Review and validate source-backed class concepts before sharing a quiz or exam.",
+            )
+        operation_id = payload.operation_id or uuid4()
+        digest_payload = payload.model_dump(mode="json", exclude={"operation_id"})
+        operation_digest = hashlib.sha256(
+            json.dumps(
+                digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        async with database.acquire() as connection:
+            async with connection.transaction():
+                existing = await connection.fetchrow(
+                    "SELECT * FROM class_question_generation_operations "
+                    "WHERE class_id=?1 AND requester_id=?2 AND operation_id=?3",
+                    class_id,
+                    user_id,
+                    operation_id,
+                )
+                if existing is not None:
+                    if existing["request_digest"] != operation_digest:
+                        raise ApiError(
+                            409,
+                            "idempotency_conflict",
+                            "This operation ID was already used with different "
+                            "generation settings.",
+                        )
+                    if existing["status"] == "complete" and existing.get("material_id"):
+                        existing_material = await connection.fetchrow(
+                            "SELECT * FROM study_materials WHERE id=?1 AND class_id=?2",
+                            existing["material_id"],
+                            class_id,
+                        )
+                        if existing_material is not None:
+                            return _material_summary(existing_material)
+                    if existing["status"] == "running":
+                        raise ApiError(
+                            409,
+                            "generation_in_progress",
+                            "This generation operation is already running.",
+                        )
+                    raise ApiError(
+                        503,
+                        "question_generation_failed",
+                        "This generation operation failed. Retry with a new operation ID.",
+                    )
+                await connection.execute(
+                    "INSERT INTO class_question_generation_operations "
+                    "(id,class_id,requester_id,operation_id,request_digest,status) "
+                    "VALUES (?1,?2,?3,?4,?5,'running')",
+                    uuid4(),
+                    class_id,
+                    user_id,
+                    operation_id,
+                    operation_digest,
+                )
+        request_payload = QuestionBankGenerationRequest(
+            operation_id=operation_id,
+            kind=payload.kind,
+            concept_ids=[UUID(str(item["id"])) for item in concepts],
+            upload_ids=[UUID(source_id) for source_id in source_ids],
+            count=payload.options.count,
+            level=(1 if payload.options.difficulty == "easier" else
+                   3 if payload.options.difficulty == "harder" else None),
+            question_types=payload.options.question_types or ["multiple_choice"],
+            language=payload.language,
+            additional_instructions=payload.additional_instructions,
+            feedback_release_policy=feedback_release_policy,
+        )
+        try:
+            generated = await asyncio.wait_for(
+                create_generated_assessment(
+                    database,
+                    class_id=str(class_id),
+                    user_id=str(user_id),
+                    payload=request_payload,
+                    service=request.app.state.gemini_content_service,
+                    model_name=settings.gemini_text_model,
+                ),
+                timeout=SHARED_ASSESSMENT_GENERATION_DEADLINE_SECONDS,
+            )
+        except TimeoutError:
+            await database.execute(
+                "UPDATE class_question_generation_operations SET status='failed',"
+                "error_code='provider_timeout',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                "WHERE class_id=?1 AND requester_id=?2 AND operation_id=?3 AND status='running'",
+                class_id,
+                user_id,
+                operation_id,
+            )
+            raise ApiError(
+                503,
+                "question_generation_timeout",
+                "Question generation timed out. Try again shortly.",
+            ) from None
+        except ApiError as exc:
+            await database.execute(
+                "UPDATE class_question_generation_operations SET status='failed',error_code=?4,"
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                "WHERE class_id=?1 AND requester_id=?2 AND operation_id=?3 AND status='running'",
+                class_id,
+                user_id,
+                operation_id,
+                exc.code[:80],
+            )
+            raise
+        except Exception as exc:
+            logger.info("question_generation_failed category=%s", type(exc).__name__)
+            await database.execute(
+                "UPDATE class_question_generation_operations SET status='failed',"
+                "error_code='generation_failed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                "WHERE class_id=?1 AND requester_id=?2 AND operation_id=?3 AND status='running'",
+                class_id,
+                user_id,
+                operation_id,
+            )
+            raise ApiError(
+                503,
+                "question_generation_failed",
+                "The assessment could not be generated and validated. "
+                "Retry with a new operation ID.",
+            ) from None
+        row = await database.fetchrow(
+            "SELECT * FROM study_materials WHERE id=?1", generated["material_id"]
+        )
+        if row is None:
+            raise ApiError(
+                503,
+                "question_generation_failed",
+                "The shared assessment could not be saved.",
+            )
+        await database.execute(
+            "UPDATE class_question_generation_operations SET status='complete',material_id=?4,"
+            "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+            "WHERE class_id=?1 AND requester_id=?2 AND operation_id=?3 AND status='running'",
+            class_id,
+            user_id,
+            operation_id,
+            generated["material_id"],
+        )
+        return _material_summary(row)
+    private_assessment_operation = (
+        (payload.operation_id or uuid4())
+        if personal and payload.kind in {"quiz", "practice_exam"}
+        else None
+    )
+    private_assessment_digest: str | None = None
+    if private_assessment_operation is not None:
+        private_assessment_digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "request": payload.model_dump(mode="json", exclude={"operation_id"}),
+                    "resolved_source_ids": [str(source["id"]) for source in sources],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
     async with database.acquire() as connection:
         async with connection.transaction():
+            if private_assessment_operation is not None:
+                previous = await connection.fetchrow(
+                    "SELECT * FROM class_question_generation_operations "
+                    "WHERE class_id=?1 AND requester_id=?2 AND operation_id=?3",
+                    class_id,
+                    user_id,
+                    private_assessment_operation,
+                )
+                if previous is not None:
+                    if previous["request_digest"] != private_assessment_digest:
+                        raise ApiError(
+                            409,
+                            "idempotency_conflict",
+                            "This operation ID was already used with different "
+                            "generation settings.",
+                        )
+                    if previous["status"] == "complete" and previous.get("material_id"):
+                        existing_material = await connection.fetchrow(
+                            "SELECT * FROM study_materials WHERE id=?1 AND owner_id=?2 "
+                            "AND resource_scope='personal'",
+                            previous["material_id"],
+                            user_id,
+                        )
+                        if existing_material is not None:
+                            return _material_summary(existing_material)
+                    if previous["status"] == "running":
+                        raise ApiError(
+                            409,
+                            "generation_in_progress",
+                            "This generation operation is already running.",
+                        )
+                    raise ApiError(
+                        503,
+                        "question_generation_failed",
+                        "This generation operation failed. Retry with a new operation ID.",
+                    )
+                await connection.execute(
+                    "INSERT INTO class_question_generation_operations "
+                    "(id,class_id,requester_id,operation_id,request_digest,status) "
+                    "VALUES (?1,?2,?3,?4,?5,'running')",
+                    uuid4(),
+                    class_id,
+                    user_id,
+                    private_assessment_operation,
+                    private_assessment_digest,
+                )
             row = await connection.fetchrow(
                 "INSERT INTO study_materials "
                 "(id,class_id,origin_class_id,resource_scope,owner_id,created_by,publication_state, "
-                "kind,title,status,scope,options,generation_instructions) "
-                "VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'generating',?10,?11,?12) "
+                "feedback_release_policy,kind,title,status,scope,options,generation_instructions) "
+                "VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'generating',?11,?12,?13) "
                 "RETURNING *",
                 uuid4(),
                 material_class_id,
@@ -1807,6 +2273,7 @@ async def create_study_material(
                 user_id if personal else None,
                 user_id,
                 publication_state,
+                feedback_release_policy,
                 payload.kind,
                 title,
                 json.dumps(scope),
@@ -1822,6 +2289,18 @@ async def create_study_material(
                     for index, source in enumerate(sources)
                 ],
             )
+            if private_assessment_operation is not None:
+                await connection.execute(
+                    "UPDATE class_question_generation_operations SET status='complete',"
+                    "material_id=?4,"
+                    "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                    "WHERE class_id=?1 AND requester_id=?2 AND operation_id=?3 "
+                    "AND status='running'",
+                    class_id,
+                    user_id,
+                    private_assessment_operation,
+                    row["id"],
+                )
     background_tasks.add_task(_create_material_job, request.app, row["id"])
     return MaterialSummary(
         id=row["id"],
@@ -1831,6 +2310,7 @@ async def create_study_material(
         created_by=row["created_by"],
         publication_state=row["publication_state"],
         release_at=row["release_at"],
+        feedback_release_policy=feedback_release_policy,
         kind=row["kind"],
         title=row["title"],
         scope=json_value(row["scope"], {}),
@@ -1851,10 +2331,14 @@ async def list_study_materials(
     access = await _owned_class(database, class_id, user_id)
     rows = await database.fetch(
         "SELECT m.*, COALESCE(json_extract(m.options, '$.count'), 0) AS requested_count, "
-        "(SELECT a.score_percent FROM study_material_attempts a WHERE a.material_id = m.id AND a.owner_id=?2 "
+        "(SELECT a.score_percent FROM study_material_attempts a "
+        "WHERE a.material_id = m.id AND a.owner_id=?2 "
         "ORDER BY a.completed_at DESC LIMIT 1) AS latest_score, "
-        "(SELECT a.completed_at FROM study_material_attempts a WHERE a.material_id = m.id AND a.owner_id=?2 "
+        "(SELECT a.completed_at FROM study_material_attempts a "
+        "WHERE a.material_id = m.id AND a.owner_id=?2 "
         "ORDER BY a.completed_at DESC LIMIT 1) AS latest_completed_at "
+        ",(SELECT 1 FROM study_material_feedback_releases f "
+        "WHERE f.material_id=m.id) AS feedback_released "
         "FROM study_materials m "
         "WHERE (m.class_id = ?1 OR (m.resource_scope='personal' AND m.origin_class_id=?1 AND m.owner_id=?2)) "
         "ORDER BY m.created_at DESC, m.id",
@@ -1878,10 +2362,14 @@ async def list_personal_study_materials(request: Request) -> dict[str, list[Mate
     user_id, database, _ = await _authorize(request)
     rows = await database.fetch(
         "SELECT m.*,COALESCE(json_extract(m.options,'$.count'),0) AS requested_count, "
-        "(SELECT a.score_percent FROM study_material_attempts a WHERE a.material_id=m.id "
+        "(SELECT a.score_percent FROM study_material_attempts a "
+        "WHERE a.material_id=m.id "
         "AND a.owner_id=?1 ORDER BY a.completed_at DESC LIMIT 1) AS latest_score, "
-        "(SELECT a.completed_at FROM study_material_attempts a WHERE a.material_id=m.id "
+        "(SELECT a.completed_at FROM study_material_attempts a "
+        "WHERE a.material_id=m.id "
         "AND a.owner_id=?1 ORDER BY a.completed_at DESC LIMIT 1) AS latest_completed_at "
+        ",(SELECT 1 FROM study_material_feedback_releases f "
+        "WHERE f.material_id=m.id) AS feedback_released "
         "FROM study_materials m WHERE m.resource_scope='personal' AND m.owner_id=?1 "
         "ORDER BY m.created_at DESC,m.id",
         user_id,
@@ -1890,25 +2378,40 @@ async def list_personal_study_materials(request: Request) -> dict[str, list[Mate
 
 
 @router.get("/api/study-materials/{material_id}")
-async def get_study_material(material_id: UUID, request: Request) -> MaterialDetail:
+async def get_study_material(
+    material_id: UUID, request: Request, response: Response
+) -> MaterialDetail:
     user_id, database, _ = await _authorize(request)
     material, access = await material_access(database, material_id, user_id)
     row = await database.fetchrow(
         "SELECT m.*,COALESCE(json_extract(m.options,'$.count'),0) AS requested_count, "
-        "(SELECT a.score_percent FROM study_material_attempts a WHERE a.material_id=m.id "
+        "(SELECT a.score_percent FROM study_material_attempts a "
+        "WHERE a.material_id=m.id "
         "AND a.owner_id=?2 ORDER BY a.completed_at DESC LIMIT 1) AS latest_score, "
-        "(SELECT a.completed_at FROM study_material_attempts a WHERE a.material_id=m.id "
+        "(SELECT a.completed_at FROM study_material_attempts a "
+        "WHERE a.material_id=m.id "
         "AND a.owner_id=?2 ORDER BY a.completed_at DESC LIMIT 1) AS latest_completed_at "
+        ",(SELECT 1 FROM study_material_feedback_releases f "
+        "WHERE f.material_id=m.id) AS feedback_released "
         "FROM study_materials m WHERE m.id=?1", material_id, user_id,
     )
+    response.headers["Cache-Control"] = "private, no-store"
     visible_source_ids = await _visible_material_source_ids(
         database, material_id, user_id, material, access
+    )
+    feedback_released = bool(
+        await database.fetchval(
+            "SELECT 1 FROM study_material_feedback_releases WHERE material_id=?1", material_id
+        )
     )
     summary = _material_summary(row)
     return MaterialDetail(
         **summary.model_dump(),
         content=_public_material_content(
-            row["kind"], row["content"], visible_source_ids=visible_source_ids
+            row["kind"],
+            row["content"],
+            visible_source_ids=visible_source_ids,
+            include_assessment_feedback=feedback_released,
         ),
         download_urls={
             format: f"/api/study-materials/{material_id}/files/{format}"
@@ -2049,102 +2552,75 @@ async def submit_attempt(
     if row["status"] != "ready":
         raise ApiError(409, "material_not_ready", "Wait for this study material to finish generating.")
 
-    run = None
-    answers_digest = hashlib.sha256(
-        json.dumps(payload.answers, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
     if payload.run_id is not None:
         run = await database.fetchrow(
-            "SELECT * FROM quiz_runs WHERE id = ?1 AND material_id = ?2 AND owner_id = ?3",
+            "SELECT * FROM quiz_runs WHERE id=?1 AND material_id=?2 AND owner_id=?3",
             payload.run_id, material_id, user_id,
         )
         if run is None:
             raise ApiError(404, "not_found", "The requested quiz run was not found.")
-        if run["mode"] != "standard":
-            raise ApiError(409, "wrong_quiz_mode", "Use the Reasoning Mode submission flow for this quiz run.")
-        if payload.operation_id is None:
-            raise ApiError(400, "operation_id_required", "A submission operation ID is required.")
-        if run["status"] == "completed":
-            if (run["submission_operation_id"] != str(payload.operation_id)
-                    or run["submission_digest"] != answers_digest):
-                raise ApiError(409, "answer_immutable", "This quiz run already has a submitted answer.")
-        elif run["submission_operation_id"] is not None and (
-            run["submission_operation_id"] != str(payload.operation_id)
-            or run["submission_digest"] != answers_digest
-        ):
-            raise ApiError(409, "idempotency_conflict", "This submission operation ID was already used with different answers.")
-    else:
-        # Keep the old standard-mode API usable, while preventing it from
-        # bypassing an explicitly started Reasoning Mode run.
-        if access is not None and not access["is_owner"]:
+        if run.get("assessment_type") == "mastery_ladder":
             raise ApiError(
                 409,
-                "quiz_run_required",
-                "Start a quiz run before submitting an answer in a shared class.",
+                "ladder_route_required",
+                "Use the Mastery Ladder controls to submit this response.",
             )
-        active_reasoning_run = await database.fetchval(
-            "SELECT count(*) FROM quiz_runs WHERE material_id = ?1 AND owner_id = ?2 "
-            "AND mode = 'reasoning' AND status = 'in_progress'",
-            material_id, user_id,
-        )
-        if active_reasoning_run:
-            raise ApiError(409, "reasoning_required", "Finish or skip the active Reasoning Mode run before submitting a standard attempt.")
-    content = json_value(row["content"], {})
-    questions = content.get("questions", []) if isinstance(content, dict) else []
-    question_by_id = {str(question["id"]): question for question in questions}
-    if not question_by_id or any(question_id not in question_by_id for question_id in payload.answers):
-        raise ApiError(400, "invalid_answers", "The submission contains an unknown question.")
-
-    results: list[QuestionAttemptResult] = []
-    visible_source_ids = await _visible_material_source_ids(
-        database, material_id, user_id, row, access
-    )
-    correct_count = 0
-    for question_id, question in question_by_id.items():
-        submitted = payload.answers.get(question_id)
-        answer = str(question.get("answer", ""))
-        if submitted is None:
-            correct = False
-        elif question["kind"] == "short_answer":
-            accepted = [answer, *(question.get("accepted_answers") or [])]
-            correct = _normalize_answer(submitted) in {_normalize_answer(str(value)) for value in accepted}
-        elif question["kind"] == "multiple_choice":
-            correct = submitted.strip() == answer
-        else:
-            correct = _normalize_answer(submitted) == _normalize_answer(answer)
-        correct_count += int(correct)
-        correct_answer = answer
-        if question["kind"] == "multiple_choice":
-            choice = next((choice for choice in question.get("choices", []) if choice.get("id") == answer), None)
-            if choice:
-                correct_answer = choice["text"]
-        results.append(
-            QuestionAttemptResult(
-                question_id=question_id,
-                correct=correct,
-                submitted_answer=submitted,
-                correct_answer=correct_answer,
-                explanation=question.get("explanation", ""),
-                sources=[
-                    source for source in question.get("sources", [])
-                    if str(source.get("upload_id")) in visible_source_ids
-                ],
+        if run["mode"] != "standard":
+            raise ApiError(
+                409,
+                "wrong_quiz_mode",
+                "Use the Reasoning Mode submission flow for this quiz run.",
             )
+        if int(run.get("snapshot_version", 0)) < 1:
+            raise ApiError(
+                409, "legacy_run_snapshot_unavailable",
+                "This older run has no immutable questions. Start a new quiz run.",
+            )
+        if payload.operation_id is None:
+            raise ApiError(400, "operation_id_required", "A submission operation ID is required.")
+        answers_digest = hashlib.sha256(
+            json.dumps(payload.answers, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        snapshots = await database.fetch(
+            "SELECT id,public_snapshot,private_snapshot,family_id,evidence_eligible "
+            "FROM quiz_run_questions "
+            "WHERE run_id=?1 ORDER BY ordinal,id", payload.run_id,
         )
-    score = round(correct_count * 100 / len(question_by_id), 2)
-    attempt_id = payload.run_id or uuid4()
-    if run is None:
-        attempt_id = await database.fetchval(
-            "INSERT INTO study_material_attempts (id,material_id,owner_id,answers,score_percent) "
-            "VALUES (?1,?2,?3,?4,?5) RETURNING id",
-            attempt_id, material_id, user_id, json.dumps(payload.answers), score,
-        )
-    else:
+        snapshot_ids = {str(item["id"]) for item in snapshots}
+        if not snapshots or not set(payload.answers).issubset(snapshot_ids):
+            raise ApiError(400, "invalid_answers", "The submission contains an unknown question.")
+        correct_count = 0
+        result_data: list[tuple[dict, dict, str, bool, dict]] = []
+        for item in snapshots:
+            question_id = str(item["id"])
+            question = json_value(item["private_snapshot"], {})
+            public = json_value(item["public_snapshot"], {})
+            submitted = str(payload.answers.get(question_id, ""))
+            if not submitted:
+                correct = False
+            elif question.get("kind") == "multiple_choice":
+                allowed = {str(choice.get("id")) for choice in question.get("choices", [])}
+                if submitted not in allowed:
+                    raise ApiError(400, "invalid_answer", "Choose one of the listed answers.")
+                correct = submitted == str(question.get("answer", ""))
+            elif question.get("kind") == "true_false":
+                allowed = {str(choice.get("id")) for choice in question.get("choices", [])}
+                if submitted not in allowed:
+                    raise ApiError(400, "invalid_answer", "Choose True or False.")
+                correct = submitted == str(question.get("answer", ""))
+            else:
+                accepted = [question.get("answer", ""), *(question.get("accepted_answers") or [])]
+                correct = any(_normalize_answer(submitted) == _normalize_answer(str(value))
+                              for value in accepted)
+            correct_count += int(correct)
+            result_data.append((question, public, submitted, correct, item))
+        score = round(correct_count * 100 / len(snapshots), 2)
         async with database.acquire() as connection:
             async with connection.transaction():
                 current = await connection.fetchrow(
-                    "SELECT status, submission_operation_id, submission_digest FROM quiz_runs WHERE id = ?1",
-                    payload.run_id,
+                    "SELECT * FROM quiz_runs WHERE id=?1 AND material_id=?2 AND owner_id=?3",
+                    payload.run_id, material_id, user_id,
                 )
                 if current is None:
                     raise ApiError(404, "not_found", "The requested quiz run was not found.")
@@ -2152,27 +2628,191 @@ async def submit_attempt(
                     if (current["submission_operation_id"] != str(payload.operation_id)
                             or current["submission_digest"] != answers_digest):
                         raise ApiError(409, "answer_immutable", "This quiz run already has a submitted answer.")
+                elif current["submission_operation_id"] is not None:
+                    raise ApiError(
+                        409,
+                        "idempotency_conflict",
+                        "This submission operation ID is already in use.",
+                    )
                 else:
-                    changed = await connection.fetchrow(
-                        "UPDATE quiz_runs SET submission_operation_id = ?2, submission_digest = ?3, "
-                        "status = 'completed', score_percent = ?4, "
-                        "completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
-                        "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-                        "WHERE id = ?1 AND status = 'in_progress' RETURNING id",
+                    for question, _public, submitted, correct, _snapshot in result_data:
+                        question_id = str(question["id"])
+                        attempt = await connection.fetchrow(
+                            "SELECT id,state FROM quiz_question_attempts "
+                            "WHERE run_id=?1 AND question_id=?2",
+                            payload.run_id, question_id,
+                        )
+                        if attempt is None or attempt["state"] not in {
+                            "awaiting_reasoning", "reasoning_accepted"
+                        }:
+                            raise ApiError(
+                                409,
+                                "attempt_terminal",
+                                "A question in this run is already finished.",
+                            )
+                        await connection.execute(
+                            "UPDATE quiz_question_attempts SET state='completed',final_answer=?3,"
+                            "answer_status=?4,answer_operation_id=?5,answer_operation_digest=?6,correct=?7,"
+                            "submitted_through_turn=0,submitted_snapshot_hash=?8,"
+                            "submitted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),"
+                            "completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),"
+                            "feedback_status='not_requested',version=version+1,"
+                            "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+                            attempt["id"], question_id, submitted,
+                            "answered" if submitted else "unanswered", str(payload.operation_id),
+                            hashlib.sha256(submitted.encode("utf-8")).hexdigest(),
+                            int(correct), hashlib.sha256(b"[]").hexdigest(),
+                        )
+                    await connection.execute(
+                        "UPDATE quiz_runs SET submission_operation_id=?2,submission_digest=?3,"
+                        "status='completed',score_percent=?4,"
+                        "completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),"
+                        "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                        "WHERE id=?1 AND status='in_progress'",
                         payload.run_id, payload.operation_id, answers_digest, score,
                     )
-                    if changed is None:
-                        raise ApiError(409, "answer_immutable", "This quiz run already has a submitted answer.")
                     await connection.execute(
-                        "INSERT INTO study_material_attempts (id,material_id,owner_id,answers,score_percent) "
-                        "VALUES (?1,?2,?3,?4,?5)",
+                        "INSERT OR IGNORE INTO study_material_attempts "
+                        "(id,material_id,owner_id,answers,score_percent) VALUES (?1,?2,?3,?4,?5)",
                         payload.run_id, material_id, user_id, json.dumps(payload.answers), score,
                     )
+                    completed_run = await connection.fetchrow(
+                        "SELECT * FROM quiz_runs WHERE id=?1 AND owner_id=?2",
+                        payload.run_id,
+                        user_id,
+                    )
+                    for question, _public, submitted, correct, snapshot in result_data:
+                        question_id = str(question["id"])
+                        attempt = await connection.fetchrow(
+                            "SELECT * FROM quiz_question_attempts "
+                            "WHERE run_id=?1 AND question_id=?2",
+                            payload.run_id,
+                            question_id,
+                        )
+                        status = "unanswered" if not submitted else (
+                            "correct" if correct else "incorrect"
+                        )
+                        await record_assessment_outcome(
+                            connection,
+                            run=completed_run,
+                            attempt=attempt,
+                            question_row={
+                                "id": question_id,
+                                "private_snapshot": question,
+                                "family_id": snapshot["family_id"],
+                                "evidence_eligible": snapshot["evidence_eligible"],
+                            },
+                            status=status,
+                            correctness=(None if not submitted else float(correct)),
+                            reasoning_status="none",
+                        )
+                    answered_count = sum(bool(item[2]) for item in result_data)
+                    if answered_count:
+                        await award_run_completion(connection, run=completed_run)
+                    await materialize_released_evidence_for_run(
+                        connection, run_id=str(payload.run_id)
+                    )
+        released = bool(
+            current.get("feedback_release_policy", "after_completion") == "after_completion"
+            or await database.fetchval(
+                "SELECT 1 FROM study_material_feedback_releases WHERE material_id=?1", material_id
+            )
+        ) and current.get("feedback_release_policy", "after_completion") != "never"
+        results = []
+        for question, public, submitted, correct, _snapshot in result_data:
+            result = {"question_id": public["id"]}
+            if released:
+                answer_id = str(question.get("answer", ""))
+                answer_choice = next((item for item in public.get("choices", [])
+                                      if item.get("id") == answer_id), None)
+                selected_choice = next((item for item in public.get("choices", [])
+                                        if item.get("id") == submitted), None)
+                result.update({
+                    "correct": correct if submitted else None,
+                    "submitted_answer": selected_choice["text"] if selected_choice else submitted,
+                    "correct_answer": (
+                        answer_choice["text"]
+                        if answer_choice
+                        else str(question.get("answer", ""))
+                    ),
+                    "explanation": str(question.get("explanation", "")),
+                    "sources": [],
+                })
+            results.append(QuestionAttemptResult(**result))
+        return AttemptResult(
+            attempt_id=payload.run_id,
+            score_percent=score if released else None,
+            correct_count=correct_count if released else None,
+            feedback_available=released,
+            question_results=results,
+        )
+
+    # Compatibility for old personal quizzes only. Shared resources must use
+    # run-pinned snapshots so they cannot be graded against later edits.
+    if row["resource_scope"] != "personal" or str(row["owner_id"]) != str(user_id):
+        raise ApiError(409, "quiz_run_required", "Start this assessment to submit an answer.")
+    if int(row.get("assessment_engine_version") or 0) >= 1:
+        raise ApiError(
+            409,
+            "quiz_run_required",
+            "This validated assessment requires an immutable quiz run. Start a new run to submit.",
+        )
+    if row.get("assessment_validation_state") != "validated":
+        raise ApiError(
+            409,
+            "assessment_unvalidated",
+            "This older assessment has no validated grading record. Generate a new quiz "
+            "before submitting an answer.",
+        )
+    content = json_value(row["content"], {})
+    questions = content.get("questions", []) if isinstance(content, dict) else []
+    question_by_id = {str(question["id"]): question for question in questions}
+    if not question_by_id or any(key not in question_by_id for key in payload.answers):
+        raise ApiError(400, "invalid_answers", "The submission contains an unknown question.")
+    results = []
+    correct_count = 0
+    for question_id, question in question_by_id.items():
+        submitted = payload.answers.get(question_id, "")
+        answer = str(question.get("answer", ""))
+        if question.get("kind") == "short_answer":
+            accepted = [answer, *(question.get("accepted_answers") or [])]
+            correct = any(_normalize_answer(submitted) == _normalize_answer(str(value))
+                          for value in accepted)
+        elif question.get("kind") == "multiple_choice":
+            correct = submitted == answer
+        else:
+            correct = _normalize_answer(submitted) == _normalize_answer(answer)
+        correct_count += int(correct)
+        results.append((question_id, question, submitted, correct))
+    score = round(correct_count * 100 / len(question_by_id), 2)
+    attempt_id = await database.fetchval(
+        "INSERT INTO study_material_attempts (id,material_id,owner_id,answers,score_percent) "
+        "VALUES (?1,?2,?3,?4,?5) RETURNING id",
+        uuid4(), material_id, user_id, json.dumps(payload.answers), score,
+    )
+    released = row.get("feedback_release_policy", "after_completion") == "after_completion"
+    if row.get("feedback_release_policy") == "manual":
+        released = bool(await database.fetchval(
+            "SELECT 1 FROM study_material_feedback_releases WHERE material_id=?1", material_id
+        ))
+    if row.get("feedback_release_policy") == "never":
+        released = False
     return AttemptResult(
         attempt_id=attempt_id,
-        score_percent=score,
-        correct_count=correct_count,
-        question_results=results,
+        score_percent=score if released else None,
+        correct_count=correct_count if released else None,
+        feedback_available=released,
+        question_results=[
+            QuestionAttemptResult(
+                question_id=question_id,
+                correct=correct if released else None,
+                submitted_answer=submitted if released else None,
+                correct_answer=str(question.get("answer", "")) if released else None,
+                explanation=str(question.get("explanation", "")) if released else None,
+                sources=[],
+            )
+            for question_id, question, submitted, correct in results
+        ],
     )
 
 

@@ -11,8 +11,11 @@ import {
   deleteUploadApi,
   retryUploadApi,
   getSyllabusApi,
-  updateResourcePublicationApi
+  updateResourcePublicationApi,
+  searchClassSourcesApi,
+  getClassSourceChunkApi
 } from "./api.js";
+import { sourceChunkMarkup, sourceSearchHitMarkup } from "./source-search.js";
 
 const ACCEPTED_EXTENSIONS = new Set(["pdf", "docx", "pptx", "txt", "md", "png", "jpg", "jpeg", "mp4", "webm", "mov", "mp3", "m4a", "wav"]);
 const MAX_FILE_SIZE = 250 * 1024 * 1024;
@@ -141,6 +144,9 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
   const readyCount = klass.uploads.filter((upload) => upload.status === "ready").length;
   const workingCount = klass.uploads.filter((upload) => ["processing", "transcribing", "uploading"].includes(upload.status)).length;
   const localSyllabus = klass.uploads.find((upload) => upload.outline);
+  const searchableUploads = klass.uploads.filter((upload) =>
+    getBackendUploadId(upload)
+    && upload.status === "ready");
 
   root.innerHTML = `
     <section class="section-stack">
@@ -191,6 +197,28 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
           </div>
         </section>
       ` : ""}
+      ${backendClassId && classHasCapability(klass, "read") ? `
+        <section class="panel source-search-panel" aria-labelledby="source-search-title">
+          <div class="source-search-heading">
+            <div>
+              <h2 id="source-search-title">Search course sources</h2>
+              <p class="muted">Search indexed material available to you. The server checks access and release status for every search and fetch.</p>
+            </div>
+          </div>
+          <form class="source-search-form" role="search" aria-label="Search course sources" id="source-search-form">
+            <label class="field source-search-query"><span>Search terms</span><input type="search" name="query" required maxlength="300" autocomplete="off" placeholder="e.g. DNA replication" /></label>
+            <label class="field source-search-filter"><span>Source</span><select name="upload_id">
+              <option value="">All released sources</option>
+              ${searchableUploads.map((upload) => `<option value="${escapeHtml(getBackendUploadId(upload))}">${escapeHtml(upload.name || "Course material")}</option>`).join("")}
+            </select></label>
+            <button class="btn btn-secondary source-search-submit" type="submit">Search sources</button>
+          </form>
+          ${searchableUploads.length ? "" : `<p class="field-hint">No ready backend sources are available to search yet. Search becomes available after a source finishes processing and indexing.</p>`}
+          <p class="field-hint source-search-status" id="source-search-status" role="status" aria-live="polite"></p>
+          <ol class="source-search-results" id="source-search-results" aria-label="Source search results" aria-live="polite"></ol>
+          <div class="source-chunk-detail" id="source-chunk-detail" hidden aria-live="polite"></div>
+        </section>
+      ` : ""}
       ${classHasCapability(klass, "create") ? `<div class="upload-zone-wrapper">
         <label class="upload-zone" for="upload-input">
           <span class="upload-zone-icon">${icon("upload", { size: 26 })}</span>
@@ -237,6 +265,156 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
   const list = root.querySelector("#upload-list");
   const filters = root.querySelector("#upload-filters");
   const pasteBtn = root.querySelector("#paste-text-btn");
+  const sourceSearchForm = root.querySelector("#source-search-form");
+  const sourceSearchStatus = root.querySelector("#source-search-status");
+  const sourceSearchResults = root.querySelector("#source-search-results");
+  const sourceChunkDetail = root.querySelector("#source-chunk-detail");
+  let activeSearchController = null;
+  let activeChunkController = null;
+  let sourceSearchGeneration = 0;
+  let activeChunkButton = null;
+
+  function clearSourceChunk({ restoreFocus = false } = {}) {
+    activeChunkController?.abort();
+    activeChunkController = null;
+    if (sourceChunkDetail) {
+      sourceChunkDetail.hidden = true;
+      sourceChunkDetail.textContent = "";
+    }
+    sourceSearchResults?.querySelectorAll("[data-source-chunk]").forEach((button) => {
+      button.setAttribute("aria-expanded", "false");
+    });
+    if (restoreFocus) activeChunkButton?.focus();
+    activeChunkButton = null;
+  }
+
+  if (sourceSearchForm && sourceSearchStatus && sourceSearchResults && sourceChunkDetail) {
+    const queryInput = sourceSearchForm.elements.query;
+    const uploadFilter = sourceSearchForm.elements.upload_id;
+    const searchButton = sourceSearchForm.querySelector('button[type="submit"]');
+    sourceSearchForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const query = String(queryInput.value || "").trim();
+      if (!query) {
+        sourceSearchStatus.textContent = "Enter a topic or phrase to search.";
+        queryInput.focus();
+        return;
+      }
+      activeSearchController?.abort();
+      activeChunkController?.abort();
+      clearSourceChunk();
+      activeSearchController = new AbortController();
+      const controller = activeSearchController;
+      const generation = ++sourceSearchGeneration;
+      sourceSearchResults.innerHTML = "";
+      sourceSearchStatus.textContent = "Searching released sources…";
+      searchButton.disabled = true;
+      sourceSearchForm.setAttribute("aria-busy", "true");
+      try {
+        const results = await searchClassSourcesApi(backendClassId, {
+          query,
+          uploadId: uploadFilter.value || null,
+          limit: 20,
+          signal: controller.signal
+        });
+        if (controller.signal.aborted || generation !== sourceSearchGeneration) return;
+        sourceSearchResults.innerHTML = results.map((item, index) => sourceSearchHitMarkup(item, index)).filter(Boolean).join("");
+        const count = sourceSearchResults.querySelectorAll("[data-source-chunk]").length;
+        sourceSearchStatus.textContent = count
+          ? `Found ${count} source ${count === 1 ? "passage" : "passages"}. Select one to load its exact indexed text.`
+          : "No matching passages were found in released, indexed sources.";
+      } catch (error) {
+        if (controller.signal.aborted || generation !== sourceSearchGeneration) return;
+        sourceSearchStatus.textContent = error.message || "Could not search course sources. Try again.";
+      } finally {
+        if (generation === sourceSearchGeneration) {
+          searchButton.disabled = false;
+          sourceSearchForm.removeAttribute("aria-busy");
+          activeSearchController = null;
+        }
+      }
+    });
+
+    sourceSearchResults.addEventListener("click", async (event) => {
+      const button = event.target.closest("[data-source-chunk]");
+      if (!button) return;
+      const chunkRevisionId = button.dataset.sourceChunk;
+      if (!chunkRevisionId) return;
+      clearSourceChunk();
+      const controller = new AbortController();
+      activeChunkController = controller;
+      activeChunkButton = button;
+      button.setAttribute("aria-expanded", "true");
+      sourceChunkDetail.hidden = false;
+      sourceChunkDetail.textContent = "Loading the exact source revision…";
+      sourceSearchStatus.textContent = "Loading selected source passage…";
+      try {
+        const chunk = await getClassSourceChunkApi(backendClassId, chunkRevisionId, { signal: controller.signal });
+        if (controller.signal.aborted || activeChunkController !== controller) return;
+        if (chunk.chunk_revision_id !== chunkRevisionId || typeof chunk.text !== "string") {
+          throw new Error("The server did not return the exact indexed source revision. Search again.");
+        }
+        sourceChunkDetail.innerHTML = sourceChunkMarkup(chunk);
+        sourceSearchStatus.textContent = "Exact indexed source loaded.";
+      } catch (error) {
+        if (controller.signal.aborted || activeChunkController !== controller) return;
+        clearSourceChunk({ restoreFocus: true });
+        sourceSearchStatus.textContent = "The selected source could not be loaded. It may have changed or access may have been removed.";
+      }
+    });
+
+    sourceChunkDetail.addEventListener("click", (event) => {
+      if (event.target.closest("[data-close-source-chunk]")) clearSourceChunk({ restoreFocus: true });
+    });
+
+    sourceChunkDetail.addEventListener("click", async (event) => {
+      const button = event.target.closest("[data-open-original-source]");
+      if (!button || button.disabled) return;
+      const controller = activeChunkController;
+      if (!controller || controller.signal.aborted) return;
+      button.disabled = true;
+      sourceSearchStatus.textContent = "Opening the authorized original source…";
+      try {
+        const citation = JSON.parse(button.dataset.sourceCitation || "{}");
+        if (!citation.upload_id) throw new Error("This passage has no original source link.");
+        const detail = await getUploadDetailApi(citation.upload_id);
+        if (controller.signal.aborted || activeChunkController !== controller || !button.isConnected) return;
+        if (!detail.id || detail.status !== "ready") {
+          throw new Error("This source is no longer ready to open. Search again for the latest version.");
+        }
+        const upload = {
+          id: detail.id,
+          backendId: detail.id,
+          name: detail.title || detail.original_filename || citation.name || "Course material",
+          kind: detail.kind,
+          size: detail.file_size_bytes || 0,
+          content: detail.extracted_text || "",
+          fileUrl: detail.file_url,
+          originalFilename: detail.original_filename,
+          status: detail.status
+        };
+        const extension = String(detail.original_filename || "").split(".").pop().toLowerCase();
+        const initialView = ["docx", "pptx", "txt", "md"].includes(extension) ? "text" : "original";
+        const { openUploadPreview } = await import("./file-preview.js");
+        if (controller.signal.aborted || activeChunkController !== controller || !button.isConnected) return;
+        await openUploadPreview(upload, { citation, initialView });
+        sourceSearchStatus.textContent = `Opened the original source at ${sourceLocatorText(citation)}.`;
+      } catch (error) {
+        if (controller.signal.aborted || activeChunkController !== controller || !button.isConnected) return;
+        sourceSearchStatus.textContent = error.message || "The original source could not be opened. Search again or try later.";
+        button.disabled = false;
+        button.focus();
+      } finally {
+        if (button.isConnected) button.disabled = false;
+      }
+    });
+
+    window.addEventListener("hashchange", () => {
+      sourceSearchGeneration += 1;
+      activeSearchController?.abort();
+      activeChunkController?.abort();
+    }, { once: true });
+  }
 
   function renderFilters() {
     filters.innerHTML = FILTERS.map(({ label, kind }) => {

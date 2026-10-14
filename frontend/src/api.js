@@ -207,6 +207,86 @@ export function clearTutorMemoryApi(classId = null) {
   return tutorMemoryRequest(tutorMemoryPath(classId), { method: "DELETE" });
 }
 
+// The backend derives learner identity from the authenticated session. Never
+// accept an owner/user ID from a dashboard caller.
+export async function getLearningProgressApi(windowDays = 30) {
+  if (!Number.isInteger(windowDays) || windowDays < 7 || windowDays > 90) {
+    throw new RangeError("Learning progress window must be between 7 and 90 days.");
+  }
+  return await apiFetch(`/api/learning/progress?window_days=${windowDays}`);
+}
+
+export function getLearningConceptApi(conceptId, { signal } = {}) {
+  return apiFetch(`/api/learning/concepts/${encodeURIComponent(conceptId)}`, { signal });
+}
+
+export function getLearningPreferencesApi({ signal } = {}) {
+  return apiFetch("/api/learning/preferences", { signal });
+}
+
+export function updateLearningPreferencesApi(chosenGoal) {
+  if (!["balanced", "build_foundation", "exam_prep", "review"].includes(chosenGoal)) {
+    throw new Error("Choose a supported learning goal.");
+  }
+  return apiFetch("/api/learning/preferences", {
+    method: "PUT", body: JSON.stringify({ chosen_goal: chosenGoal })
+  });
+}
+
+export function getLearningProgressHistoryApi({ days = 90, conceptId = null, signal } = {}) {
+  if (!Number.isInteger(days) || days < 7 || days > 365) {
+    throw new RangeError("Progress history window must be between 7 and 365 days.");
+  }
+  const params = new URLSearchParams({ days: String(days) });
+  if (conceptId) params.set("concept_id", conceptId);
+  return apiFetch(`/api/learning/progress/history?${params}`, { signal });
+}
+
+export function getLearningRecommendationsApi({ signal } = {}) {
+  return apiFetch("/api/learning/recommendations", { signal });
+}
+
+export function updateLearningRecommendationStateApi(recommendationId, state) {
+  if (!["active", "completed", "dismissed"].includes(state)) {
+    throw new Error("Recommendation state must be active, completed, or dismissed.");
+  }
+  return apiFetch(`/api/learning/recommendations/${encodeURIComponent(recommendationId)}/state`, {
+    method: "PATCH", body: JSON.stringify({ state })
+  });
+}
+
+export function createMasteryLadderApi(payload) {
+  return apiFetch("/api/mastery-ladders", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function getMasteryLadderApi(ladderId, { signal } = {}) {
+  return apiFetch(`/api/mastery-ladders/${encodeURIComponent(ladderId)}`, { signal });
+}
+
+export function submitMasteryLadderResponseApi(ladderId, conceptId, payload) {
+  return apiFetch(`/api/mastery-ladders/${encodeURIComponent(ladderId)}/concepts/${encodeURIComponent(conceptId)}/response`, {
+    method: "POST", body: JSON.stringify(payload)
+  });
+}
+
+export function skipMasteryLadderConceptApi(ladderId, conceptId, payload) {
+  return apiFetch(`/api/mastery-ladders/${encodeURIComponent(ladderId)}/concepts/${encodeURIComponent(conceptId)}/skip`, {
+    method: "POST", body: JSON.stringify(payload)
+  });
+}
+
+export function submitMasteryLadderReasoningApi(ladderId, conceptId, payload) {
+  return apiFetch(`/api/mastery-ladders/${encodeURIComponent(ladderId)}/concepts/${encodeURIComponent(conceptId)}/reasoning`, {
+    method: "POST", body: JSON.stringify(payload)
+  });
+}
+
+export function retryMasteryLadderReasoningApi(ladderId, conceptId, payload) {
+  return apiFetch(`/api/mastery-ladders/${encodeURIComponent(ladderId)}/concepts/${encodeURIComponent(conceptId)}/reasoning/retry`, {
+    method: "POST", body: JSON.stringify(payload)
+  });
+}
+
 export async function askStudyTutorApi(payload, { signal } = {}) {
   const controller = new AbortController();
   let timedOut = false;
@@ -308,6 +388,103 @@ export async function leaveClassApi(classId) {
   return apiFetch(`/api/classes/${encodeURIComponent(classId)}/leave`, { method: "POST" });
 }
 
+function classConceptGraphPath(classId, suffix = "") {
+  return `/api/classes/${encodeURIComponent(classId)}/concept-graph${suffix}`;
+}
+
+function classConceptPath(classId, suffix = "") {
+  return `/api/classes/${encodeURIComponent(classId)}/concepts${suffix}`;
+}
+
+export function getClassConceptGraphApi(classId, { signal } = {}) {
+  return apiFetch(classConceptGraphPath(classId), { signal });
+}
+
+export function getClassConceptGraphReviewApi(classId, { signal } = {}) {
+  return apiFetch(classConceptGraphPath(classId, "/review"), { signal });
+}
+
+export function getClassConceptMergeHistoryApi(classId, { signal } = {}) {
+  return apiFetch(classConceptGraphPath(classId, "/merges"), { signal, cache: "no-store" });
+}
+
+export function createClassConceptApi(classId, concept) {
+  return apiFetch(classConceptPath(classId), {
+    method: "POST", body: JSON.stringify(concept)
+  });
+}
+
+export function updateClassConceptApi(classId, conceptId, changes, expectedVersion) {
+  return apiFetch(classConceptPath(classId, `/${encodeURIComponent(conceptId)}`), {
+    method: "PATCH", body: JSON.stringify({ ...changes, expected_version: expectedVersion })
+  });
+}
+
+export function addClassConceptAliasApi(classId, conceptId, { name, language = "und" }) {
+  return apiFetch(classConceptPath(classId, `/${encodeURIComponent(conceptId)}/aliases`), {
+    method: "POST", body: JSON.stringify({ name, language })
+  });
+}
+
+export function deleteClassConceptAliasApi(classId, conceptId, aliasId, expectedVersion) {
+  const version = Number(expectedVersion);
+  if (!Number.isSafeInteger(version) || version < 1) throw new Error("Refresh the concept before removing this alias.");
+  const query = `?expected_version=${version}`;
+  return apiFetch(classConceptPath(classId, `/${encodeURIComponent(conceptId)}/aliases/${encodeURIComponent(aliasId)}${query}`), {
+    method: "DELETE"
+  });
+}
+
+export function decideClassConceptAliasApi(classId, conceptId, aliasId, decision, expectedVersion) {
+  return apiFetch(`/api/classes/${encodeURIComponent(classId)}/concepts/${encodeURIComponent(conceptId)}/aliases/${encodeURIComponent(aliasId)}/decision`, {
+    method: "POST",
+    body: JSON.stringify({ decision, expected_version: expectedVersion })
+  });
+}
+
+export function mergeClassConceptApi(classId, conceptId, targetConceptId, expectedVersion) {
+  return apiFetch(classConceptPath(classId, `/${encodeURIComponent(conceptId)}/merge`), {
+    method: "POST", body: JSON.stringify({ target_concept_id: targetConceptId, expected_version: expectedVersion })
+  });
+}
+
+export function decideClassConceptApi(classId, conceptId, decision, expectedVersion) {
+  return apiFetch(classConceptPath(classId, `/${encodeURIComponent(conceptId)}/decision`), {
+    method: "POST", body: JSON.stringify({ decision, expected_version: expectedVersion })
+  });
+}
+
+export function createClassConceptEdgeApi(classId, edge) {
+  return apiFetch(`/api/classes/${encodeURIComponent(classId)}/concept-edges`, {
+    method: "POST", body: JSON.stringify(edge)
+  });
+}
+
+export function decideClassConceptEdgeApi(classId, edgeId, decision, expectedVersion) {
+  return apiFetch(`/api/classes/${encodeURIComponent(classId)}/concept-edges/${encodeURIComponent(edgeId)}/decision`, {
+    method: "POST", body: JSON.stringify({ decision, expected_version: expectedVersion })
+  });
+}
+
+export function deleteClassConceptEdgeApi(classId, edgeId, expectedVersion) {
+  const version = Number(expectedVersion);
+  if (!Number.isSafeInteger(version) || version < 1) throw new Error("Refresh the relationship before removing it.");
+  const query = `?expected_version=${version}`;
+  return apiFetch(`/api/classes/${encodeURIComponent(classId)}/concept-edges/${encodeURIComponent(edgeId)}${query}`, {
+    method: "DELETE"
+  });
+}
+
+export function startClassConceptExtractionApi(classId, uploadId) {
+  return apiFetch(classConceptGraphPath(classId, "/extractions"), {
+    method: "POST", body: JSON.stringify({ upload_id: uploadId })
+  });
+}
+
+export function getClassConceptExtractionApi(classId, operationId, { signal } = {}) {
+  return apiFetch(classConceptGraphPath(classId, `/extractions/${encodeURIComponent(operationId)}`), { signal });
+}
+
 export async function updateResourcePublicationApi(resourceType, resourceId, { state, releaseAt = null }) {
   if (!["uploads", "study_materials"].includes(resourceType)) throw new Error("Unsupported resource type.");
   return apiFetch(`/api/resources/${resourceType}/${encodeURIComponent(resourceId)}/publication`, {
@@ -320,6 +497,28 @@ export async function updateResourcePublicationApi(resourceType, resourceId, { s
 export async function getUploadsApi(classId) {
   const res = await apiFetch(`/api/classes/${encodeURIComponent(classId)}/uploads`);
   return res.items || [];
+}
+
+/** Search the current authorized source index. Results contain snippets only. */
+export async function searchClassSourcesApi(classId, {
+  query,
+  uploadId = null,
+  limit = 20,
+  signal
+} = {}) {
+  const boundedLimit = Math.max(1, Math.min(50, Math.trunc(Number(limit) || 20)));
+  const params = new URLSearchParams({ query: String(query || "").trim(), limit: String(boundedLimit) });
+  if (uploadId) params.set("upload_id", uploadId);
+  const res = await apiFetch(`/api/classes/${encodeURIComponent(classId)}/sources/search?${params}`, { signal });
+  return res.items || res.results || [];
+}
+
+/** Fetch one immutable indexed chunk after the student explicitly selects it. */
+export async function getClassSourceChunkApi(classId, chunkRevisionId, { signal } = {}) {
+  return apiFetch(
+    `/api/classes/${encodeURIComponent(classId)}/sources/chunks/${encodeURIComponent(chunkRevisionId)}`,
+    { signal }
+  );
 }
 
 export async function uploadFileApi(classId, file, kind = null, title = null) {
@@ -397,9 +596,13 @@ export async function createStudyMaterialApi(classId, {
   scope = { kind: "all" },
   options = { count: 10, difficulty: "mixed" },
   additionalInstructions = "",
-  destination = "personal"
+  destination = "personal",
+  language = null,
+  operationId = null
 }) {
   const body = { kind, scope, options, destination };
+  if (typeof language === "string" && language.trim()) body.language = language.trim();
+  if (typeof operationId === "string" && operationId.trim()) body.operation_id = operationId.trim();
   if (typeof additionalInstructions === "string" && additionalInstructions.trim()) {
     body.additional_instructions = additionalInstructions.trim();
   }
@@ -457,9 +660,16 @@ export async function deleteStudyMaterialApi(materialId) {
 
 // Attempts endpoints
 export async function submitAttemptApi(materialId, answers, { runId = null, operationId = null } = {}) {
+  if (!runId || !operationId) {
+    throw new TypeError("A quiz run and operation ID are required for remote answer submission.");
+  }
+  if (!answers || typeof answers !== "object" || Array.isArray(answers)
+    || Object.entries(answers).some(([questionId, answer]) => !questionId || typeof answer !== "string")) {
+    throw new TypeError("Quiz answers must map run question IDs to answer strings.");
+  }
   const body = { answers };
-  if (runId) body.run_id = runId;
-  if (operationId) body.operation_id = operationId;
+  body.run_id = runId;
+  body.operation_id = operationId;
   return await apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/attempts`, {
     method: "POST",
     body: JSON.stringify(body)

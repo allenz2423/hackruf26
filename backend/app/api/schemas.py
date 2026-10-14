@@ -27,7 +27,9 @@ class LiveSessionRequest(BaseModel):
     def uploads_need_a_class(self) -> LiveSessionRequest:
         if self.upload_ids is not None and self.class_id is None:
             raise ValueError("upload_ids requires class_id.")
-        if self.mode == TutorMode.QUIZ_REASONING and (self.class_id is not None or self.upload_ids is not None):
+        if self.mode == TutorMode.QUIZ_REASONING and (
+            self.class_id is not None or self.upload_ids is not None
+        ):
             raise ValueError("Quiz reasoning voice sessions cannot include class uploads.")
         return self
 
@@ -38,8 +40,12 @@ class TutorRecapContent(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     summary: str = Field(min_length=1, max_length=800)
     topics: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(max_length=6)
-    observed_progress: list[Annotated[str, Field(min_length=1, max_length=240)]] = Field(max_length=4)
-    practice_targets: list[Annotated[str, Field(min_length=1, max_length=240)]] = Field(max_length=4)
+    observed_progress: list[Annotated[str, Field(min_length=1, max_length=240)]] = Field(
+        max_length=4
+    )
+    practice_targets: list[Annotated[str, Field(min_length=1, max_length=240)]] = Field(
+        max_length=4
+    )
     next_step: str = Field(max_length=400)
 
 
@@ -117,7 +123,9 @@ class HealthResponse(BaseModel):
 
 # The class card colors and icons the browser's "Edit class" offers.
 # Keep in step with frontend/src/class-style.js. A null icon means "show the class initial".
-ClassColor = Literal["slate", "teal", "moss", "ochre", "rust", "berry", "plum", "indigo", "graphite"]
+ClassColor = Literal[
+    "slate", "teal", "moss", "ochre", "rust", "berry", "plum", "indigo", "graphite"
+]
 ClassIcon = Literal[
     "sigma", "calculator", "flask", "atom", "dna", "leaf", "globe", "landmark",
     "scale", "languages", "book", "code", "chart", "music", "palette", "lightbulb",
@@ -228,6 +236,135 @@ class TranscriptSegment(BaseModel):
         return self
 
 
+class ConceptCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    canonical_name: str = Field(min_length=1, max_length=160, strict=True)
+    description: str = Field(min_length=1, max_length=1_500, strict=True)
+    parent_concept_id: UUID | None = None
+    source_chunk_revision_ids: list[UUID] = Field(default_factory=list, max_length=8)
+
+
+class ConceptPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    expected_version: int = Field(ge=1)
+    canonical_name: str | None = Field(default=None, min_length=1, max_length=160, strict=True)
+    description: str | None = Field(default=None, min_length=1, max_length=1_500, strict=True)
+    parent_concept_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def require_a_change(self) -> ConceptPatch:
+        if not (self.model_fields_set - {"expected_version"}):
+            raise ValueError("Provide at least one concept field to update.")
+        return self
+
+
+class ConceptAliasCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=160, strict=True)
+    language: str = Field(
+        default="und", min_length=2, max_length=35,
+        pattern=r"^(?:und|[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)$", strict=True,
+    )
+
+
+class ConceptDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    decision: Literal["approve", "reject", "deprecate"]
+    expected_version: int = Field(ge=1)
+
+
+class ConceptMerge(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    target_concept_id: UUID
+    expected_version: int = Field(ge=1)
+
+
+class ConceptEdgeCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    from_concept_id: UUID
+    to_concept_id: UUID
+    type: Literal["part_of", "prerequisite_for", "related_to", "applied_in"]
+    necessity: Literal["essential", "helpful"] | None = None
+    provenance: Literal["explicit", "inferred"]
+    explanation: str = Field(min_length=1, max_length=1_000, strict=True)
+    source_chunk_revision_ids: list[UUID] = Field(min_length=1, max_length=8)
+
+    @model_validator(mode="after")
+    def validate_necessity(self) -> ConceptEdgeCreate:
+        if self.type == "prerequisite_for" and self.necessity is None:
+            raise ValueError("Prerequisite edges require an essential/helpful necessity.")
+        if self.type != "prerequisite_for" and self.necessity is not None:
+            raise ValueError("Necessity applies only to prerequisite edges.")
+        return self
+
+
+class ConceptExtractionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    upload_id: UUID
+
+
+class ConceptExtractionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    operation_id: str
+    status: Literal["queued", "running", "complete", "failed", "superseded"]
+
+
+class ConceptGraphAIAlias(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=160)
+    language: str = Field(
+        default="und", min_length=2, max_length=35,
+        pattern=r"^(?:und|[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)$",
+    )
+
+
+class ConceptGraphAIConcept(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    key: str = Field(min_length=1, max_length=64)
+    canonical_name: str = Field(min_length=1, max_length=160)
+    description: str = Field(min_length=1, max_length=1_500)
+    aliases: list[ConceptGraphAIAlias] = Field(default_factory=list, max_length=8)
+    parent_key: str | None = Field(default=None, max_length=64)
+    existing_concept_id: UUID | None = None
+    provenance: Literal["explicit", "inferred"]
+    source_chunk_revision_ids: list[UUID] = Field(min_length=1, max_length=8)
+
+
+class ConceptGraphAIEdge(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    from_key: str = Field(min_length=1, max_length=64)
+    to_key: str = Field(min_length=1, max_length=64)
+    type: Literal["part_of", "prerequisite_for", "related_to", "applied_in"]
+    necessity: Literal["essential", "helpful"] | None = None
+    provenance: Literal["explicit", "inferred"]
+    explanation: str = Field(min_length=1, max_length=1_000)
+    source_chunk_revision_ids: list[UUID] = Field(min_length=1, max_length=8)
+
+    @model_validator(mode="after")
+    def validate_necessity(self) -> ConceptGraphAIEdge:
+        if (self.type == "prerequisite_for") != (self.necessity is not None):
+            raise ValueError("Only prerequisite edges have a necessity value.")
+        return self
+
+
+class ConceptGraphAIOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    concepts: list[ConceptGraphAIConcept] = Field(max_length=24)
+    edges: list[ConceptGraphAIEdge] = Field(max_length=48)
+
+
 class UploadSummary(BaseModel):
     id: UUID
     class_id: UUID
@@ -247,6 +384,7 @@ class UploadSummary(BaseModel):
     created_by: UUID | None = None
     publication_state: Literal["draft", "scheduled", "published"] = "published"
     release_at: datetime | None = None
+    source_index_status: Literal["unindexed", "processing", "ready", "failed"] = "unindexed"
 
 
 class UploadDetail(UploadSummary):
@@ -348,11 +486,17 @@ class StudyOptions(BaseModel):
 
 class StudyMaterialCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    operation_id: UUID | None = None
     kind: StudyMaterialKind
     scope: MaterialsScope = Field(default_factory=lambda: AllMaterialsScope(kind="all"))
     options: StudyOptions = Field(default_factory=StudyOptions)
     additional_instructions: str | None = Field(default=None, max_length=2000)
+    language: str = Field(
+        default="en", min_length=2, max_length=35,
+        pattern=r"^(?:auto|[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)$",
+    )
     destination: Literal["personal", "class_contribution"] = "personal"
+    feedback_release_policy: Literal["after_completion", "manual", "never"] | None = None
 
     @field_validator("additional_instructions", mode="before")
     @classmethod
@@ -368,6 +512,8 @@ class StudyMaterialCreate(BaseModel):
             raise ValueError(
                 "Additional instructions are available only for quizzes and practice exams."
             )
+        if self.language != "en" and self.kind not in {"quiz", "practice_exam"}:
+            raise ValueError("Question language is available only for quizzes and practice exams.")
         return self
 
 
@@ -384,6 +530,7 @@ class MaterialSummary(BaseModel):
     created_by: UUID | None = None
     publication_state: Literal["draft", "scheduled", "published"] | None = "published"
     release_at: datetime | None = None
+    feedback_release_policy: Literal["after_completion", "manual", "never"] = "after_completion"
     kind: StudyMaterialKind
     title: str
     scope: dict
@@ -409,19 +556,106 @@ class AttemptSubmission(BaseModel):
     operation_id: UUID | None = None
 
 
+class QuestionBankGenerationRequest(BaseModel):
+    """Manager-authorized, source-grounded generation request."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    operation_id: UUID
+    kind: Literal["quiz", "practice_exam"] = "quiz"
+    concept_ids: list[UUID] = Field(default_factory=list, max_length=50)
+    upload_ids: list[UUID] = Field(default_factory=list, max_length=50)
+    count: int = Field(default=10, ge=4, le=100)
+    level: Literal[1, 2, 3, 4] | None = None
+    language: str = Field(default="en", min_length=2, max_length=35)
+    question_types: list[StudyQuestionKind] = Field(
+        default_factory=lambda: ["multiple_choice"], min_length=1, max_length=3
+    )
+    additional_instructions: str | None = Field(default=None, max_length=2000)
+    feedback_release_policy: Literal["after_completion", "manual", "never"] | None = None
+
+    @field_validator("concept_ids", "upload_ids")
+    @classmethod
+    def unique_uuid_selections(cls, value: list[UUID]) -> list[UUID]:
+        if len(value) != len(set(value)):
+            raise ValueError("Selections must be unique.")
+        return value
+
+    @field_validator("question_types")
+    @classmethod
+    def unique_question_types(cls, value: list[StudyQuestionKind]) -> list[StudyQuestionKind]:
+        if len(value) != len(set(value)):
+            raise ValueError("Question types must be unique.")
+        return value
+
+
+class QuestionBankAIChoice(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    id: str = Field(min_length=1, max_length=20)
+    text: str = Field(min_length=1, max_length=1000)
+
+
+class QuestionBankAIItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    assignment_id: str = Field(min_length=1, max_length=80)
+    prompt: str = Field(min_length=1, max_length=5000)
+    kind: StudyQuestionKind
+    choices: list[QuestionBankAIChoice] = Field(default_factory=list, max_length=8)
+    answer: str = Field(min_length=1, max_length=5000)
+    accepted_answers: list[str] = Field(default_factory=list, max_length=20)
+    explanation: str = Field(min_length=1, max_length=5000)
+    rubric: str = Field(min_length=1, max_length=2000)
+    level: int = Field(ge=1, le=4)
+    language: str = Field(min_length=2, max_length=35)
+    assessment_target: str = Field(min_length=1, max_length=300)
+    concept_ids: list[str] = Field(min_length=1, max_length=8)
+    source_chunk_revision_ids: list[str] = Field(min_length=1, max_length=8)
+
+
+class QuestionBankAIGeneration(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    questions: list[QuestionBankAIItem] = Field(min_length=1, max_length=100)
+
+
+class QuestionBankAIReviewItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    index: int = Field(ge=0, le=99)
+    source_supported: bool
+    concept_aligned: bool
+    answer_correct: bool
+    distractors_valid: bool
+    unambiguous: bool
+    level_aligned: bool
+    language_valid: bool
+    leakage_free: bool
+    duplicate_family: bool
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class QuestionBankAIReview(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reviews: list[QuestionBankAIReviewItem] = Field(min_length=1, max_length=100)
+
+
 class QuestionAttemptResult(BaseModel):
     question_id: str
-    correct: bool
+    correct: bool | None = None
     submitted_answer: str | None = None
-    correct_answer: str
-    explanation: str
+    correct_answer: str | None = None
+    explanation: str | None = None
     sources: list[dict] = Field(default_factory=list)
 
 
 class AttemptResult(BaseModel):
     attempt_id: UUID
-    score_percent: float = Field(ge=0, le=100)
-    correct_count: int = Field(ge=0)
+    score_percent: float | None = Field(default=None, ge=0, le=100)
+    correct_count: int | None = Field(default=None, ge=0)
+    feedback_available: bool = False
     question_results: list[QuestionAttemptResult]
 
 
@@ -759,7 +993,9 @@ class LoginRequest(BaseModel):
 
 
 # The ids the browser's "Create your own Jot" offers. Keep in step with frontend/src/avatar.js.
-AvatarColor = Literal["slate", "ocean", "mint", "moss", "sunny", "tangerine", "coral", "berry", "grape"]
+AvatarColor = Literal[
+    "slate", "ocean", "mint", "moss", "sunny", "tangerine", "coral", "berry", "grape"
+]
 AvatarFace = Literal["happy", "wink", "sleepy", "surprised", "grin"]
 AvatarAccessory = Literal["none", "glasses", "cap", "headphones", "party", "crown"]
 
@@ -839,7 +1075,9 @@ class ProfileUpdate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    username: str | None = Field(default=None, min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")
+    username: str | None = Field(
+        default=None, min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$"
+    )
     email: str | None = Field(default=None, max_length=254)
     avatar: Avatar | None = None
 

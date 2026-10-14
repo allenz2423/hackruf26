@@ -12,8 +12,8 @@ from google import genai
 from google.genai import types
 
 from app.api.schemas import TutorMemoryState, TutorRecapContent
-from app.services.database import SQLiteConnection, SQLiteDatabase
 from app.services.class_access import class_access
+from app.services.database import SQLiteConnection, SQLiteDatabase
 from app.services.gemini_content import _provider_response_schema
 
 MAX_TRANSCRIPT_CHARS = 40_000

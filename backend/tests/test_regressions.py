@@ -140,10 +140,13 @@ class QuizScoringRegressionTests(unittest.IsolatedAsyncioTestCase):
             "Isolated scoring fixture",
         )
         await self.database.execute(
-            "INSERT INTO study_materials (id, class_id, kind, title, status, content) "
-            "VALUES (?1, ?2, 'quiz', 'Scoring fixture', 'ready', ?3)",
+            "INSERT INTO study_materials "
+            "(id,origin_class_id,resource_scope,owner_id,created_by,kind,title,status,content,"
+            "assessment_validation_state) "
+            "VALUES (?1,?2,'personal',?3,?3,'quiz','Scoring fixture','ready',?4,'validated')",
             self.material_id,
             class_id,
+            self.user["id"],
             json.dumps({"questions": self.questions}),
         )
 
@@ -201,6 +204,45 @@ class QuizScoringRegressionTests(unittest.IsolatedAsyncioTestCase):
         result = await self.submit({"canonical": "animal   storage polysaccharide"})
         self.assertTrue(
             next(q.correct for q in result.question_results if q.question_id == "canonical")
+        )
+
+    async def test_unvalidated_legacy_personal_assessment_cannot_be_newly_graded(self) -> None:
+        from app.api.errors import ApiError
+
+        await self.database.execute(
+            "UPDATE study_materials SET assessment_validation_state='legacy_unvalidated' "
+            "WHERE id=?1",
+            self.material_id,
+        )
+        with self.assertRaises(ApiError) as raised:
+            await self.submit({"negative": "-1"})
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.code, "assessment_unvalidated")
+        self.assertEqual(
+            await self.database.fetchval(
+                "SELECT count(*) FROM study_material_attempts WHERE material_id=?1",
+                self.material_id,
+            ),
+            0,
+        )
+
+    async def test_modern_validated_personal_assessment_requires_run_snapshot(self) -> None:
+        from app.api.errors import ApiError
+
+        await self.database.execute(
+            "UPDATE study_materials SET assessment_engine_version=1 WHERE id=?1",
+            self.material_id,
+        )
+        with self.assertRaises(ApiError) as raised:
+            await self.submit({"negative": "-1"})
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.code, "quiz_run_required")
+        self.assertEqual(
+            await self.database.fetchval(
+                "SELECT count(*) FROM study_material_attempts WHERE material_id=?1",
+                self.material_id,
+            ),
+            0,
         )
 
     def test_normalization_preserves_mathematical_punctuation(self) -> None:

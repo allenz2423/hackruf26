@@ -16,6 +16,7 @@ from uuid import uuid4
 from fastapi import BackgroundTasks
 from pypdf import PdfWriter
 from starlette.requests import Request
+from starlette.responses import Response
 
 from app.api.class_library import (
     _process_assessment_job,
@@ -204,10 +205,10 @@ class SourceLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.request(),
             BackgroundTasks(),
         )
-        detail = await get_study_material(self.material_id, self.request())
+        detail = await get_study_material(self.material_id, self.request(), Response())
         self.assertEqual(detail.source_warnings, ["changed"])
         await self.db.execute("DELETE FROM course_notes WHERE id = ?1", self.note_id)
-        detail = await get_study_material(self.material_id, self.request())
+        detail = await get_study_material(self.material_id, self.request(), Response())
         self.assertEqual(detail.source_warnings, ["changed", "missing"])
         self.assertEqual(await self.db.fetchval("SELECT count(*) FROM study_material_files"), 1)
         self.assertEqual(await self.db.fetchval("SELECT count(*) FROM study_material_attempts"), 1)
@@ -221,13 +222,14 @@ class SourceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await patch_upload(
             self.note_id, UploadPatch(kind="notes"), self.request(), BackgroundTasks()
         )
-        detail = await get_study_material(self.material_id, self.request())
+        detail = await get_study_material(self.material_id, self.request(), Response())
         self.assertEqual(detail.source_warnings, [])
 
     async def test_old_queued_jobs_cannot_claim_a_newly_edited_source(self):
         await self.db.execute(
             "UPDATE course_notes SET status = 'processing', extracted_text = 'New edit' "
-            "WHERE id = ?1", self.note_id,
+            "WHERE id = ?1",
+            self.note_id,
         )
         process = Mock()
         self.application.state.gemini_content_service = SimpleNamespace(process_text=process)
@@ -330,6 +332,9 @@ class SourceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "legacy.sqlite3"
             schema = Path("backend/app/services/sqlite_schema.sql").read_text()
+            source_index_start = schema.index("-- Immutable source revisions")
+            source_index_end = schema.index("CREATE TABLE IF NOT EXISTS study_materials")
+            schema = schema[:source_index_start] + schema[source_index_end:]
             schema = "\n".join(
                 line
                 for line in schema.splitlines()
@@ -337,6 +342,7 @@ class SourceLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     column in line
                     for column in (
                         "processing_revision",
+                        "source_index_status",
                         "sources_outdated",
                         "sources_missing",
                         "context_truncated",

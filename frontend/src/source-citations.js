@@ -11,9 +11,22 @@ export function formatSourceCitation(source) {
   if (source.page != null) parts.push(`p. ${source.page}`);
   if (source.slide != null) parts.push(`slide ${source.slide}`);
   if (source.timestamp_seconds != null) {
-    const minutes = Math.floor(source.timestamp_seconds / 60);
-    const seconds = Math.floor(source.timestamp_seconds % 60).toString().padStart(2, "0");
-    parts.push(`${minutes}:${seconds}`);
+    const formatTime = (value) => {
+      const minutes = Math.floor(value / 60);
+      const seconds = Math.floor(value % 60).toString().padStart(2, "0");
+      return `${minutes}:${seconds}`;
+    };
+    const start = formatTime(source.timestamp_seconds);
+    const end = source.timestamp_end_seconds != null && Number.isFinite(Number(source.timestamp_end_seconds))
+      ? formatTime(Number(source.timestamp_end_seconds))
+      : null;
+    parts.push(end && end !== start ? `${start}–${end}` : start);
+  }
+  if (source.paragraph != null) parts.push(`paragraph ${source.paragraph}`);
+  if (source.block_order_start != null) {
+    parts.push(source.block_order_end != null && source.block_order_end !== source.block_order_start
+      ? `text blocks ${source.block_order_start}–${source.block_order_end}`
+      : `text block ${source.block_order_start}`);
   }
   return parts.join(" · ") || (source.upload_id ? `Source ${String(source.upload_id).slice(0, 8)}` : "Source reference");
 }

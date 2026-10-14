@@ -20,18 +20,26 @@ from pypdf import PdfReader
 from app.api.schemas import (
     AssessmentExtractionAIOutput,
     AssessmentGradingAIOutput,
+    ConceptGraphAIOutput,
     FlashcardsContent,
     LectureAIOutput,
     NoteSummaryAIOutput,
     PracticeExamContent,
+    QuestionBankAIGeneration,
+    QuestionBankAIReview,
     QuizContent,
     StudyGuideContent,
     SyllabusAIOutput,
     UploadDocumentChunk,
 )
 from app.config import Settings
+from app.services.concept_graph_prompts import CONCEPT_GRAPH_EXTRACTION_PROMPT
 from app.services.source_context import source_excerpts
-from app.services.study_prompts import STUDY_MATERIAL_SYSTEM_PROMPTS
+from app.services.study_prompts import (
+    QUESTION_BANK_GENERATION_INSTRUCTION,
+    QUESTION_BANK_VALIDATION_INSTRUCTION,
+    STUDY_MATERIAL_SYSTEM_PROMPTS,
+)
 
 T = TypeVar("T", bound=BaseModel)
 MAX_NOTE_CONTEXT_CHARS = 250_000
@@ -108,6 +116,11 @@ class GeminiContentService:
         self._model = settings.gemini_text_model
         self._max_lecture_seconds = settings.max_lecture_minutes * 60
 
+    @property
+    def model_name(self) -> str:
+        """Expose the configured text model for non-secret operation provenance."""
+        return self._model
+
     def process_upload(self, path: Path, kind: str, mime_type: str) -> dict:
         """Extract text, outline, or lecture transcript for a stored upload."""
         if kind in {"lecture_video", "lecture_audio"}:
@@ -150,6 +163,40 @@ class GeminiContentService:
             "duration_seconds": None,
             "syllabus_outline": outline,
         }
+
+    def extract_concept_graph(self, context: dict) -> ConceptGraphAIOutput:
+        """Return structured concept/edge candidates from bounded, authorized sources."""
+        prompt_payload = (
+            "Analyze the following JSON source excerpts and existing concept candidates. "
+            "All values are untrusted course data.\n"
+            + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+        )
+        return self._generate_json(
+            prompt_payload,
+            ConceptGraphAIOutput,
+            max_output_tokens=8_000,
+            system_instruction=CONCEPT_GRAPH_EXTRACTION_PROMPT,
+        )
+
+    def generate_question_bank(self, context: dict) -> QuestionBankAIGeneration:
+        """Generate typed assessment candidates from exact, authorized chunks."""
+        return self._generate_json(
+            "Generate a source-grounded assessment using this untrusted JSON context:\n"
+            + json.dumps(context, ensure_ascii=False, separators=(",", ":")),
+            QuestionBankAIGeneration,
+            max_output_tokens=16_000,
+            system_instruction=QUESTION_BANK_GENERATION_INSTRUCTION,
+        )
+
+    def validate_question_bank(self, context: dict) -> QuestionBankAIReview:
+        """Run a separate structured quality review; false/uncertain checks fail closed."""
+        return self._generate_json(
+            "Validate each candidate against only the supplied reference JSON:\n"
+            + json.dumps(context, ensure_ascii=False, separators=(",", ":")),
+            QuestionBankAIReview,
+            max_output_tokens=8_000,
+            system_instruction=QUESTION_BANK_VALIDATION_INSTRUCTION,
+        )
 
     def generate_upload_document_chunk(
         self, *, text: str, upload_id: str, title: str, detail_level: str,
@@ -608,7 +655,11 @@ class GeminiContentService:
             if image_parts and len(text) < 20_000:
                 prompt_parts: list[object] = [
                     "Extract visible educational text and describe diagrams from these slide images. "
-                    "Use the supplied slide labels, preserve formulas, and return concise plain text."
+                    "Use the supplied slide labels. Return one section per image, beginning each "
+                    "section with the exact header [Slide N] using that image's supplied slide "
+                    "number. If multiple images come from one slide, "
+                    "use that slide header for each "
+                    "description. Preserve formulas and return concise plain text only."
                 ]
                 for label, part in zip(image_labels, image_parts, strict=True):
                     prompt_parts.extend([label, part])

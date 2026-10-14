@@ -129,10 +129,31 @@ async def create_database(settings: Settings) -> SQLiteDatabase:
     schema = Path(__file__).with_name("sqlite_schema.sql").read_text(encoding="utf-8")
     await connection.executescript(schema)
     await _add_missing_columns(connection)
+    # These indexes depend on additive columns and are installed after the
+    # populated-database migration has supplied them.
+    await connection.execute("DROP INDEX IF EXISTS class_concept_aliases_name_idx")
+    await connection.execute(
+        "CREATE UNIQUE INDEX class_concept_aliases_name_idx ON class_concept_aliases "
+        "(class_id,normalized_name) WHERE status IN ('proposed','validated')"
+    )
+    await connection.execute("DROP INDEX IF EXISTS class_concept_extraction_jobs_status_idx")
+    await connection.execute(
+        "CREATE INDEX class_concept_extraction_jobs_status_idx ON class_concept_extraction_jobs "
+        "(status,available_at,created_at,id)"
+    )
+    await connection.execute(
+        "UPDATE source_index_heads SET processing_revision=(SELECT processing_revision "
+        "FROM source_revisions WHERE id=source_index_heads.revision_id) "
+        "WHERE processing_revision=0"
+    )
     await _migrate_shared_class_schema(connection)
     await _migrate_class_capability_schema(connection)
     triggers = Path(__file__).with_name("source_triggers.sql").read_text(encoding="utf-8")
     await connection.executescript(triggers)
+    concept_triggers = Path(__file__).with_name("concept_graph_triggers.sql").read_text(
+        encoding="utf-8"
+    )
+    await connection.executescript(concept_triggers)
     return SQLiteDatabase(connection)
 
 
@@ -182,6 +203,24 @@ async def recover_interrupted_jobs(database: SQLiteDatabase) -> None:
                 "completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
                 "WHERE status = 'pending'"
             )
+            await connection.execute(
+                "UPDATE mastery_ladder_rubric_jobs SET status='failed', "
+                "error_code='rubric_interrupted', "
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), "
+                "completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                "WHERE status='pending'"
+            )
+            await connection.execute(
+                "UPDATE mastery_ladder_operations SET status='failed', "
+                "error_code='operation_interrupted', "
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                "WHERE status='pending'"
+            )
+            await connection.execute(
+                "UPDATE class_question_generation_operations SET status='failed', "
+                "error_code='generation_interrupted',"
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE status='running'"
+            )
 
 
 def json_value(value: object, fallback: object = None) -> object:
@@ -201,6 +240,10 @@ async def _add_missing_columns(connection: aiosqlite.Connection) -> None:
     for table, additions in {
         "course_notes": {
             "processing_revision": "INTEGER NOT NULL DEFAULT 0",
+            "source_index_status": (
+                "TEXT NOT NULL DEFAULT 'unindexed' CHECK "
+                "(source_index_status IN ('unindexed','processing','ready','failed'))"
+            ),
             "resource_scope": (
                 "TEXT NOT NULL DEFAULT 'class_owned' CHECK "
                 "(resource_scope IN ('class_owned', 'student_contribution'))"
@@ -231,6 +274,47 @@ async def _add_missing_columns(connection: aiosqlite.Connection) -> None:
             "publication_state": "TEXT DEFAULT 'published'",
             "release_at": "TEXT",
             "published_at": "TEXT",
+            "feedback_release_policy": (
+                "TEXT NOT NULL DEFAULT 'after_completion' CHECK "
+                "(feedback_release_policy IN ('after_completion','manual','never'))"
+            ),
+            "assessment_validation_state": (
+                "TEXT NOT NULL DEFAULT 'legacy_unvalidated' CHECK "
+                "(assessment_validation_state IN ('legacy_unvalidated','validated'))"
+            ),
+            "assessment_validation_version": "TEXT",
+            "assessment_engine_version": (
+                "INTEGER NOT NULL DEFAULT 0 CHECK (assessment_engine_version IN (0,1))"
+            ),
+        },
+        "source_index_heads": {
+            "processing_revision": (
+                "INTEGER NOT NULL DEFAULT 0 CHECK (processing_revision >= 0)"
+            ),
+        },
+        "quiz_runs": {
+            "snapshot_version": "INTEGER NOT NULL DEFAULT 0",
+            "assessment_type": (
+                "TEXT NOT NULL DEFAULT 'quiz' CHECK (assessment_type IN ('quiz','mastery_ladder'))"
+            ),
+            "grading_policy": (
+                "TEXT NOT NULL DEFAULT 'objective_only' CHECK "
+                "(grading_policy IN ('objective_only','reasoning_optional','reasoning_required'))"
+            ),
+            "feedback_release_policy": (
+                "TEXT NOT NULL DEFAULT 'after_completion' CHECK "
+                "(feedback_release_policy IN ('after_completion','manual','never'))"
+            ),
+            "feedback_released_at": "TEXT",
+        },
+        "quiz_run_questions": {
+            "evidence_eligible": "INTEGER NOT NULL DEFAULT 0 CHECK (evidence_eligible IN (0,1))",
+        },
+        "quiz_question_attempts": {
+            "answer_status": (
+                "TEXT NOT NULL DEFAULT 'unanswered' "
+                "CHECK (answer_status IN ('answered','unanswered'))"
+            ),
         },
         "study_material_attempts": {
             "owner_id": "TEXT REFERENCES users(id) ON DELETE CASCADE",
@@ -246,6 +330,29 @@ async def _add_missing_columns(connection: aiosqlite.Connection) -> None:
         "quiz_reasoning_metrics": {
             "latency_median_ms": "REAL NOT NULL DEFAULT 0",
             "latency_p95_ms": "REAL NOT NULL DEFAULT 0",
+        },
+        "class_concept_aliases": {
+            "status": (
+                "TEXT NOT NULL DEFAULT 'validated' CHECK "
+                "(status IN ('proposed','validated','rejected'))"
+            ),
+        },
+        "class_concept_extraction_jobs": {
+            "available_at": "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            "prompt_version": (
+                "TEXT NOT NULL DEFAULT 'concept-graph-extraction-v1'"
+            ),
+            "model_name": "TEXT",
+        },
+        "mastery_snapshots": {
+            "current_level": (
+                "INTEGER CHECK (current_level IS NULL OR current_level BETWEEN 1 AND 4)"
+            ),
+        },
+        "assessment_outcomes": {
+            "quality_weight": (
+                "REAL NOT NULL DEFAULT 1.0 CHECK (quality_weight >= 0 AND quality_weight <= 1)"
+            ),
         },
     }.items():
         cursor = await connection.execute(f"PRAGMA table_info({table})")
@@ -341,6 +448,13 @@ async def _migrate_shared_class_schema(connection: aiosqlite.Connection) -> None
                 "owner_id TEXT REFERENCES users(id) ON DELETE CASCADE, "
                 "created_by TEXT REFERENCES users(id) ON DELETE SET NULL, "
                 "publication_state TEXT, release_at TEXT, published_at TEXT, "
+                "feedback_release_policy TEXT NOT NULL DEFAULT 'after_completion' "
+                "CHECK (feedback_release_policy IN ('after_completion','manual','never')), "
+                "assessment_validation_state TEXT NOT NULL DEFAULT 'legacy_unvalidated' "
+                "CHECK (assessment_validation_state IN ('legacy_unvalidated','validated')), "
+                "assessment_validation_version TEXT, "
+                "assessment_engine_version INTEGER NOT NULL DEFAULT 0 "
+                "CHECK (assessment_engine_version IN (0,1)), "
                 "kind TEXT NOT NULL CHECK (kind IN ('quiz','practice_exam','study_guide','flashcards')), "
                 "title TEXT NOT NULL CHECK (trim(title) <> ''), "
                 "status TEXT NOT NULL DEFAULT 'generating' CHECK (status IN ('generating','ready','failed')), "
@@ -366,12 +480,18 @@ async def _migrate_shared_class_schema(connection: aiosqlite.Connection) -> None
             )
             await connection.execute(
                 "INSERT INTO study_materials_new (id,class_id,origin_class_id,resource_scope,owner_id,"
-                "created_by,publication_state,release_at,published_at,kind,title,status,scope,options,"
+                "created_by,publication_state,release_at,published_at,feedback_release_policy,"
+                "assessment_validation_state,assessment_validation_version,assessment_engine_version,"
+                "kind,title,status,scope,options,"
                 "generation_instructions,content,failure_code,created_at,updated_at,generated_at,"
                 "sources_outdated,sources_missing,context_truncated) "
                 "SELECT id,class_id,COALESCE(origin_class_id,class_id),COALESCE(resource_scope,'class_owned'),"
                 "owner_id,created_by,COALESCE(publication_state,'published'),release_at,"
-                "COALESCE(published_at,created_at),kind,title,status,scope,options,generation_instructions,"
+                "COALESCE(published_at,created_at),COALESCE(feedback_release_policy,'after_completion'),"
+                "COALESCE(assessment_validation_state,'legacy_unvalidated'),"
+                "assessment_validation_version,"
+                "COALESCE(assessment_engine_version,0),"
+                "kind,title,status,scope,options,generation_instructions,"
                 "content,failure_code,created_at,updated_at,generated_at,sources_outdated,sources_missing,"
                 "context_truncated FROM study_materials"
             )

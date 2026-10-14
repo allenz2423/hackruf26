@@ -5,7 +5,7 @@ import { LiveSessionController } from "../src/live-session.js";
 import { MaterialStage, MAX_PAGE_DIMENSION } from "../src/material-stage.js";
 import { citedPdfUrl, uploadDocumentSectionsHtml } from "../src/file-preview.js";
 import { quizTutorContext, readQuizTutorContext } from "../src/quiz-tutor-context.js";
-import { renderQuizPlayer } from "../src/quiz-player.js";
+import { renderQuestionInput, renderQuizPlayer } from "../src/quiz-player.js";
 import { sourceCitationHtml, sourceWarningsHtml } from "../src/source-citations.js";
 import { submitReasoningApi } from "../src/api.js";
 import { defaultPracticeTestTimeLimit } from "../src/study.js";
@@ -39,6 +39,13 @@ test("Reasoning Mode API mutations require and send the current attempt version"
     operationId: "operation", text: "A thought", expectedVersion: 7
   });
   assert.equal(requests[0].body.expected_version, 7);
+});
+
+test("free-response run questions render an editable text answer", () => {
+  const html = renderQuestionInput({ kind: "free_response" }, 3);
+  assert.match(html, /<textarea/);
+  assert.match(html, /name="question-3"/);
+  assert.match(html, /data-answer-text/);
 });
 
 test("congested frame samples are dropped and the next current sample can send", (t) => {
@@ -176,15 +183,20 @@ test("remote quizzes start in Standard mode and offer an isolated opt-in Reasoni
       requests.push({ path, body: JSON.parse(options.body) });
       return { ok: true, status: 201, text: async () => JSON.stringify({
         run_id: "run-fixture", material_id: "material-fixture", mode: "reasoning",
-        status: "in_progress", attempts: []
+        status: "in_progress",
+        feedback_policy: { release: "after_submission", feedback_available: false },
+        questions: [{
+          id: "run-q1", prompt: "What does the kernel do?", kind: "multiple_choice", level: 1,
+          concepts: [{ id: "concept-1", label: "Operating systems" }],
+          choices: [{ id: "option-a", text: "Manage hardware" }, { id: "option-b", text: "Display the desktop" }],
+          interaction: { response_type: "single_choice" }
+        }],
+        attempts: [{ question_id: "run-q1", state: "awaiting_reasoning", version: 0 }]
       }) };
     }
   });
   renderQuizPlayer(root, {
-    id: "material-fixture", title: "A quiz", type: "Quiz", isRemote: true,
-    questions: [{ id: "q1", prompt: "What does the kernel do?", kind: "multiple_choice", choices: [
-      { id: "a", text: "Manage hardware" }, { id: "b", text: "Display the desktop" }
-    ] }]
+    id: "material-fixture", title: "A quiz", type: "Quiz", isRemote: true, questions: []
   });
   assert.match(root.innerHTML, /Standard quiz/);
   assert.match(root.innerHTML, /Reasoning Mode/);
@@ -193,9 +205,64 @@ test("remote quizzes start in Standard mode and offer an isolated opt-in Reasoni
   await start.events.get("click")();
   assert.equal(requests[0].body.mode, "reasoning");
   assert.match(root.innerHTML, /Explain your thinking/);
-  assert.match(root.innerHTML, /value="a"/);
-  assert.match(root.innerHTML, /type="radio" name="question-0" value="a" \/>/);
+  assert.match(root.innerHTML, /value="option-a"/);
+  assert.match(root.innerHTML, /type="radio" name="question-0" value="option-a" \/>/);
   assert.match(root.innerHTML, /type="submit" disabled>Submit answer/);
+});
+
+test("reopening a completed remote Standard run renders its released review and offers an explicit retake", async (t) => {
+  const start = new Element(), alert = new Element();
+  alert.hidden = true;
+  const selectedMode = { value: "standard" };
+  const stored = new Map();
+  const root = {
+    innerHTML: "",
+    querySelectorAll: () => [],
+    querySelector(selector) {
+      if (selector === "[data-start-quiz]") return start;
+      if (selector === ".quiz-start-error") return alert;
+      if (selector === 'input[name="quiz-mode"]:checked') return selectedMode;
+      return new Element();
+    }
+  };
+  const requests = [];
+  globals(t, {
+    window: {
+      sessionStorage: {
+        getItem: (key) => stored.get(key) || null,
+        setItem: (key, value) => stored.set(key, value),
+        removeItem: (key) => stored.delete(key)
+      },
+      addEventListener() {}, removeEventListener() {}, setTimeout() {}, clearTimeout() {}
+    },
+    fetch: async (path, options) => {
+      requests.push({ path, body: JSON.parse(options.body) });
+      return { ok: true, status: 201, text: async () => JSON.stringify({
+        run_id: "run-complete", material_id: "material-fixture", mode: "standard", status: "completed",
+        feedback_policy: { release: "after_completion", feedback_available: true },
+        questions: [{
+          id: "run-q1", prompt: "Choose one", kind: "multiple_choice", level: 1, concepts: [],
+          choices: [{ id: "option-a", text: "A" }, { id: "option-b", text: "B" }],
+          interaction: { response_type: "single_choice" }
+        }],
+        attempts: [{
+          question_id: "run-q1", state: "completed", final_answer: "option-b", correct: true,
+          correct_answer: "B", explanation: "B is correct."
+        }],
+        score_percent: 100, correct_count: 1
+      }) };
+    }
+  });
+  renderQuizPlayer(root, {
+    id: "material-fixture", title: "A quiz", type: "Quiz", isRemote: true, questions: []
+  });
+
+  await start.events.get("click")();
+  assert.equal(requests.length, 1);
+  assert.match(root.innerHTML, /100%/);
+  assert.match(root.innerHTML, /Answer key:/);
+  assert.match(root.innerHTML, /Retake quiz/);
+  assert.doesNotMatch(root.innerHTML, /Flag question/);
 });
 
 class Element {
@@ -237,16 +304,27 @@ function quizFixture(t, replies) {
       get(name) { return this.values[name] ?? null; }
     },
     fetch: async (path, options) => {
-      requests.push(JSON.parse(options.body));
+      requests.push({ path, body: options.body ? JSON.parse(options.body) : null });
       const reply = replies.shift() || { ok: false, status: 503, payload: { message: "Unavailable" } };
       return { ok: reply.ok, status: reply.status, text: async () => JSON.stringify(reply.payload) };
     }
   });
   renderQuizPlayer(root, {
     id: "fixture", type: "Practice test", timeLimitMinutes: 1, isRemote: true,
-    questions: [{ id: "q1", prompt: "Choose one", choices: [{ id: "a", text: "A" }, { id: "b", text: "B" }] }]
+    questions: []
   }, {
-    runContext: { mode: "standard", runId: "run-fixture" },
+    runContext: {
+      mode: "standard", runId: "run-fixture", run: {
+        run_id: "run-fixture", material_id: "fixture", mode: "standard", status: "in_progress",
+        feedback_policy: { release: "after_submission", feedback_available: false },
+        questions: [{
+          id: "q1", prompt: "Choose one", kind: "multiple_choice", level: 1, concepts: [],
+          choices: [{ id: "a", text: "A" }, { id: "b", text: "B" }],
+          interaction: { response_type: "single_choice" }
+        }],
+        attempts: []
+      }
+    },
     onAttemptCompleted: (attempt) => attempts.push(attempt)
   });
   return {
@@ -260,7 +338,17 @@ function quizFixture(t, replies) {
 
 const failed = () => ({ ok: false, status: 503, payload: { message: "Unavailable" } });
 const scored = () => ({ ok: true, status: 200, payload: {
-  attempt_id: "run-fixture", score_percent: 0, correct_count: 0, question_results: []
+  attempt_id: "run-fixture", status: "submitted", feedback_status: "pending"
+} });
+const completedRun = () => ({ ok: true, status: 200, payload: {
+  run_id: "run-fixture", material_id: "fixture", mode: "standard", status: "completed",
+  feedback_policy: { release: "after_submission", feedback_available: false },
+  questions: [{
+    id: "q1", prompt: "Choose one", kind: "multiple_choice", level: 1, concepts: [],
+    choices: [{ id: "a", text: "A" }, { id: "b", text: "B" }],
+    interaction: { response_type: "single_choice" }
+  }],
+  attempts: []
 } });
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -280,7 +368,7 @@ test("scoring failure resumes the practice-test timer at its original deadline",
 });
 
 test("expired scoring failures lock answers and retry the same answer snapshot", async (t) => {
-  const f = quizFixture(t, [failed(), scored()]);
+  const f = quizFixture(t, [failed(), scored(), completedRun()]);
   f.advance(60_000);
   f.tick();
   await flush();
@@ -290,7 +378,7 @@ test("expired scoring failures lock answers and retry the same answer snapshot",
   f.form.values["question-0"] = "a";
   f.submit();
   await flush();
-  assert.deepEqual(f.requests.map((request) => request.answers), [{ q1: "b" }, { q1: "b" }]);
+  assert.deepEqual(f.requests.filter((request) => request.body?.answers).map((request) => request.body.answers), [{ q1: "b" }, { q1: "b" }], JSON.stringify(f.requests));
   assert.equal(f.attempts.length, 1);
   assert.equal(f.attempts[0].timeExpired, true);
 });

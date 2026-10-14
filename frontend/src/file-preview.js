@@ -36,8 +36,11 @@ function makeDialog(upload) {
   return dialog;
 }
 
-function setTextPreview(container, text) {
-  container.innerHTML = `<pre class="document-text">${escapeHtml(text)}</pre>`;
+function setTextPreview(container, text, citation = null) {
+  const sourceReference = citation
+    ? `<p class="field-hint" role="note">Source reference: ${escapeHtml(formatSourceCitation(citation))}</p>`
+    : "";
+  container.innerHTML = `${sourceReference}<pre class="document-text">${escapeHtml(text)}</pre>`;
 }
 
 export async function readPowerPoint(file) {
@@ -173,7 +176,7 @@ export async function openUploadPreview(upload, { citation = null, initialView =
     let controller = null;
     let downloading = false;
     dialog.addEventListener("close", () => controller?.abort(), { once: true });
-    setTextPreview(textPanel, upload.content || "The original extracted text is not available yet.");
+    setTextPreview(textPanel, upload.content || "The original extracted text is not available yet.", citation);
 
     let documentLoaded = false;
     function selectView(view) {
@@ -212,7 +215,7 @@ export async function openUploadPreview(upload, { citation = null, initialView =
             return;
           }
           upload.content = detail.extracted_text;
-          setTextPreview(textPanel, upload.content || "No readable source text is available.");
+          setTextPreview(textPanel, upload.content || "No readable source text is available.", citation);
           document = await createUploadDocumentApi(backendId, level, signal);
         }
         while (document.status === "generating") {

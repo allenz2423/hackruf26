@@ -3,6 +3,8 @@ import { renderQuizPlayer } from "./quiz-player.js";
 import { renderFlashcards } from "./flashcards.js";
 import { escapeHtml, toast } from "./ui.js";
 import { openMaterialViewer } from "./material-viewer.js";
+import { renderMasteryLadderPanel } from "./mastery-ladder.js";
+import { loadTutorLanguage, GENERATION_LANGUAGES } from "./tutor-language.js";
 import { classHasCapability, updateClass } from "./classes.js";
 import { getBackendClassId, getBackendUploadId, prepareStudySources, waitForStudyMaterial } from "./course-sync.js";
 import {
@@ -25,6 +27,58 @@ const TYPES = [
 const TYPE_ICONS = Object.fromEntries(TYPES.map((type) => [type.value, type.icon]));
 const MIN_STUDY_ITEM_COUNT = 4;
 const MAX_STUDY_ITEM_COUNT = 100;
+const generationOperations = new Map();
+
+function secureOperationId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  if (!globalThis.crypto?.getRandomValues) throw new Error("Secure request IDs are unavailable in this browser.");
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((value) => value.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+async function privateRequestFingerprint(value) {
+  const source = JSON.stringify(value);
+  if (!globalThis.crypto?.subtle?.digest || typeof TextEncoder === "undefined") return null;
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(source));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** Reuses one id for retries of the same quiz-generation request without storing its text. */
+export async function getStudyMaterialOperationId(classId, payload) {
+  const key = `jot-study-generation:${encodeURIComponent(String(classId))}`;
+  const canonical = JSON.stringify(payload);
+  const inMemory = generationOperations.get(key);
+  if (inMemory?.canonical === canonical) return inMemory.operationId;
+  const fingerprint = await privateRequestFingerprint(payload).catch(() => null);
+  if (fingerprint) {
+    try {
+      const saved = JSON.parse(globalThis.sessionStorage?.getItem(key) || "null");
+      if (saved?.fingerprint === fingerprint && typeof saved.operation_id === "string") {
+        generationOperations.set(key, { canonical, operationId: saved.operation_id });
+        return saved.operation_id;
+      }
+    } catch { /* Storage can be disabled; this visit still gets stable retries. */ }
+  }
+  const operationId = secureOperationId();
+  generationOperations.set(key, { canonical, operationId });
+  if (fingerprint) {
+    try { globalThis.sessionStorage?.setItem(key, JSON.stringify({ fingerprint, operation_id: operationId })); }
+    catch { /* Storage is optional; do not persist raw generation instructions. */ }
+  }
+  return operationId;
+}
+
+export function clearStudyMaterialOperationId(classId, operationId) {
+  const key = `jot-study-generation:${encodeURIComponent(String(classId))}`;
+  if (generationOperations.get(key)?.operationId === operationId) generationOperations.delete(key);
+  try {
+    const saved = JSON.parse(globalThis.sessionStorage?.getItem(key) || "null");
+    if (saved?.operation_id === operationId) globalThis.sessionStorage?.removeItem(key);
+  } catch { /* Storage is optional. */ }
+}
 
 export function defaultPracticeTestTimeLimit(count) {
   return Math.max(15, Math.ceil(count * 0.75));
@@ -49,31 +103,20 @@ function formatDate(iso) {
   return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function formatRemoteMaterial(detail, klassId, uiTypeFallback, uploads = [], backendClassId = null) {
+export function formatRemoteMaterial(detail, klassId, uiTypeFallback, uploads = [], backendClassId = null) {
   const uiType = detail.kind ? fromApiKind(detail.kind) : (uiTypeFallback || "Quiz");
   const uploadNames = new Map(uploads.map((upload) => [getBackendUploadId(upload), upload.name]));
   const withSources = (item) => ({ ...item, sources: (item.sources || []).map((source) =>
     typeof source === "object" && source !== null ? { ...source, name: uploadNames.get(source.upload_id) || source.name } : source) });
-  const sections = Array.isArray(detail.content?.sections) ? detail.content.sections.map(withSources) : [];
-  const cards = Array.isArray(detail.content?.cards) ? detail.content.cards.map(withSources) : [];
-  const rawQuestions = Array.isArray(detail.content?.questions) ? detail.content.questions : [];
-  const questions = rawQuestions.map((q, idx) => ({
-    id: q.id || `q-${idx + 1}`,
-    kind: q.kind || (Array.isArray(q.choices) && q.choices.length ? "multiple_choice" : "short_answer"),
-    prompt: q.prompt,
-    choices: Array.isArray(q.choices) ? q.choices : [],
-    sources: withSources(q).sources,
-    ...(q.answerIndex !== undefined ? { answerIndex: q.answerIndex } : {}),
-    ...(q.answer !== undefined ? { answer: q.answer } : {}),
-    explanation: q.explanation || ""
-  }));
+  const isAssessment = ["Quiz", "Practice test"].includes(uiType);
+  const sections = !isAssessment && Array.isArray(detail.content?.sections) ? detail.content.sections.map(withSources) : [];
+  const cards = !isAssessment && Array.isArray(detail.content?.cards) ? detail.content.cards.map(withSources) : [];
 
-  const guideContent = sections.length
+  const guideContent = !isAssessment && sections.length
     ? sections.map((s) => `## ${s.heading}\n\n${s.body}`).join("\n\n")
-    : (typeof detail.content === "string" ? detail.content : null);
+    : (!isAssessment && typeof detail.content === "string" ? detail.content : null);
 
   const count = detail.item_count
-    || questions.length
     || cards.length
     || sections.length
     || 0;
@@ -104,12 +147,17 @@ function formatRemoteMaterial(detail, klassId, uiTypeFallback, uploads = [], bac
     publicationState: detail.publication_state || (detail.resource_scope === "personal" || !detail.resource_scope ? null : "published"),
     releaseAt: detail.release_at || null,
     downloadUrls: detail.download_urls || {},
-    instructions: detail.content?.instructions || "",
+    instructions: typeof detail.content?.instructions === "string" ? detail.content.instructions : "",
     sections,
     content: guideContent,
     cards,
-    questions,
-    attempts: detail.latest_attempt ? [{ scorePercent: Math.round(detail.latest_attempt.score_percent) }] : []
+    // Question and answer material is delivered only by the immutable,
+    // per-run public projection. Never put assessment keys in the saved
+    // material object or the browser's shared class cache.
+    questions: [],
+    // Material summaries have no per-run feedback policy. Keep saved scores
+    // out of this cache and render them only from a release-approved run DTO.
+    attempts: []
   };
 }
 
@@ -324,6 +372,13 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
               <textarea id="generation-instructions" name="additional_instructions" rows="6" maxlength="2000" aria-describedby="generation-instructions-help" placeholder="Focus on chapters 3–5. Emphasize application questions rather than definitions."></textarea>
               <p class="field-hint" id="generation-instructions-help">Guide quiz or exam topics and style. Generated questions remain grounded in the selected course materials.</p>
             </div>
+            <div class="field-block" id="generation-language-block">
+              <label for="generation-language">Question language</label>
+              <select id="generation-language" name="generation_language">
+                ${GENERATION_LANGUAGES.map((language) => `<option value="${escapeHtml(language.id)}" ${language.id === loadTutorLanguage() ? "selected" : ""}>${escapeHtml(language.id === "auto" ? "Match source language" : language.label)}</option>`).join("")}
+              </select>
+              <p class="field-hint">Choose the language used for quiz and practice-test questions.</p>
+            </div>
           </div>
           <button id="generate-btn" class="btn btn-primary generate-submit" type="submit" ${hasUploads ? "" : "disabled"}>
             ${icon("sparkles", { size: 18 })} Generate study set
@@ -331,6 +386,7 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
           <p id="generation-status" class="field-hint" role="status" aria-live="polite"></p>
           ${hasUploads ? "" : `<p class="field-hint">Add course material in the Library tab first.</p>`}
         </form>
+        ${backendClassId ? `<div id="mastery-ladder-root"></div>` : ""}
         <div class="section-stack">
           <div>
             <h2>Saved materials</h2>
@@ -355,11 +411,14 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
     const sourcePicker = root.querySelector("#study-source-picker");
     const sourceCount = root.querySelector("#source-selection-count");
     const instructionsBlock = root.querySelector("#generation-instructions-block");
+    const languageBlock = root.querySelector("#generation-language-block");
     let generating = false;
     function updateTypeFields(uiType) {
+      const isAssessment = ["Quiz", "Practice test"].includes(uiType);
       root.querySelector("#generate-count-label").textContent = uiType === "Study guide"
         ? "Section count" : uiType === "Flashcards" ? "Card count" : "Question count";
-      instructionsBlock.hidden = !["Quiz", "Practice test"].includes(uiType);
+      instructionsBlock.hidden = !isAssessment;
+      languageBlock.hidden = !isAssessment;
     }
     updateTypeFields("Quiz");
     form.addEventListener("change", (event) => {
@@ -390,6 +449,9 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
       updateSourceSelection();
     });
     updateSourceSelection();
+
+    const ladderRoot = root.querySelector("#mastery-ladder-root");
+    if (ladderRoot) void renderMasteryLadderPanel({ root: ladderRoot, klass, currentUserId });
 
     function renderMaterials() {
       if (!klass.materials.length) {
@@ -431,7 +493,7 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
             <div class="material-badges">
               ${material.isSample ? `<span class="sample-badge">Sample material</span>` : `<span class="ai-label">${material.isRemote ? `AI-generated &middot; ${escapeHtml(material.status || "ready")}` : "Local draft"}</span>`}
               ${material.resourceScope === "personal" ? `<span class="permission-badge">Personal</span>` : material.publicationState ? `<span class="permission-badge" data-publication="${escapeHtml(material.publicationState)}">${material.publicationState === "scheduled" ? `Scheduled for ${escapeHtml(formatDate(material.releaseAt))}` : escapeHtml(material.publicationState)}</span>` : ""}
-              ${lastAttempt ? `<span class="row-meta">Last score: <strong>${lastAttempt.scorePercent}%</strong> &middot; ${(material.attempts || []).length} ${(material.attempts || []).length === 1 ? "attempt" : "attempts"}</span>` : ""}
+              ${lastAttempt ? `<span class="row-meta">${typeof lastAttempt.scorePercent === "number" ? `Last score: <strong>${lastAttempt.scorePercent}%</strong> &middot; ` : ""}${(material.attempts || []).length} ${(material.attempts || []).length === 1 ? "attempt" : "attempts"}</span>` : ""}
             </div>
             <footer>
               <span class="row-meta">${formatDate(material.createdAt)}${material.timeLimitMinutes ? ` &middot; ${material.timeLimitMinutes} min` : ""}</span>
@@ -472,10 +534,14 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
       const additionalInstructions = ["Quiz", "Practice test"].includes(uiType)
         ? String(data.get("additional_instructions") || "").trim()
         : "";
+      const isAssessment = ["Quiz", "Practice test"].includes(uiType);
+      const language = isAssessment ? String(data.get("generation_language") || "auto") : null;
       const destination = data.get("destination") === "class_contribution" && classHasCapability(klass, "create")
         ? "class_contribution" : "personal";
       const selectedUploadIds = data.getAll("source_upload");
       const controller = new AbortController();
+      let generationOperationId = null;
+      let generationClassId = null;
       const stopWaiting = () => controller.abort();
       window.addEventListener("hashchange", stopWaiting, { once: true });
       generating = true;
@@ -488,22 +554,35 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
           signal: controller.signal,
           onProgress: (message) => { generationStatus.textContent = message; }
         });
+        generationClassId = classId;
         controller.signal.throwIfAborted();
         generateBtn.innerHTML = `${icon("sparkles", { size: 18 })} Generating…`;
         generationStatus.textContent = uiType === "Study guide"
           ? "Generating your study guide and PDF from the selected materials…"
           : "Generating from your selected course materials…";
+        const options = {
+          count,
+          difficulty,
+          time_limit_minutes: uiType === "Practice test" ? defaultPracticeTestTimeLimit(count) : undefined
+        };
+        const scope = { kind: "uploads", upload_ids: uploadIds };
+        const operationPayload = {
+          kind: toApiKind(uiType), scope, options,
+          additional_instructions: additionalInstructions || null,
+          destination, language
+        };
+        generationOperationId = isAssessment
+          ? await getStudyMaterialOperationId(classId, operationPayload)
+          : null;
         const summary = await createStudyMaterialApi(classId, {
           kind: toApiKind(uiType),
-          scope: { kind: "uploads", upload_ids: uploadIds },
-          options: {
-            count,
-            difficulty,
-            time_limit_minutes: uiType === "Practice test" ? defaultPracticeTestTimeLimit(count) : undefined
-          },
+          scope,
+          options,
           additionalInstructions,
-          destination
+          destination,
+          ...(isAssessment ? { language, operationId: generationOperationId } : {})
         });
+        if (generationOperationId) clearStudyMaterialOperationId(classId, generationOperationId);
         // Persist the pending job so reloads and polling failures do not lose it.
         await onMaterialAdded(formatRemoteMaterial(summary, klass.id, uiType, klass.uploads, backendClassId));
         renderMaterials();
@@ -521,6 +600,9 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
         toast(`Generated ${uiType} ready to practice!`);
       } catch (error) {
         if (controller.signal.aborted) return;
+        if (generationOperationId && ["question_generation_failed", "question_generation_timeout"].includes(error.code)) {
+          clearStudyMaterialOperationId(generationClassId || backendClassId || klass.id, generationOperationId);
+        }
         generationStatus.textContent = error.message;
         toast(error.message, { tone: "error" });
       } finally {
@@ -589,6 +671,19 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
 
       if (material.type === "Flashcards") {
         renderFlashcards(root, material, {
+          onBack: renderStudyView,
+          onAttemptCompleted: (attempt) => {
+            material.attempts = [...(material.attempts || []), attempt];
+            onAttemptCompleted?.(material.id, attempt);
+          }
+        });
+        return;
+      }
+
+      if (material.isRemote && ["Quiz", "Practice test"].includes(material.type)) {
+        // Remote question content is intentionally not read from material
+        // detail. The run endpoint supplies a safe immutable snapshot.
+        renderQuizPlayer(root, { ...material, questions: [], classId: klass.id }, {
           onBack: renderStudyView,
           onAttemptCompleted: (attempt) => {
             material.attempts = [...(material.attempts || []), attempt];

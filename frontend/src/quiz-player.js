@@ -8,6 +8,7 @@ import {
 import { sourceCitationHtml, bindSourceCitations, sourceWarningsHtml } from "./source-citations.js";
 import { StudyTutorPanel } from "./study-tutor.js";
 import { LiveSessionController } from "./live-session.js";
+import { normalizePublicQuizOutcome, normalizePublicQuizRun, publicRunReview, quizOutcomeMarkup } from "./quiz-run.js";
 
 function formatTime(totalSeconds) {
   const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
@@ -20,17 +21,20 @@ function getSubmittedDisplay(question, submittedRaw) {
     return "No answer selected";
   }
   const kind = question.kind || (Array.isArray(question.choices) && question.choices.length ? "multiple_choice" : "short_answer");
+  const choices = Array.isArray(question.choices) ? question.choices : [];
+  const selectedChoice = choices.find((choice) => choice && typeof choice === "object"
+    && String(choice.id) === String(submittedRaw));
+  if (selectedChoice) return selectedChoice.text || selectedChoice.label || selectedChoice.id;
   if (kind === "true_false") {
     const lower = String(submittedRaw).trim().toLowerCase();
     if (lower === "true") return "True";
     if (lower === "false") return "False";
     return String(submittedRaw);
   }
-  if (kind === "short_answer") {
+  if (["short_answer", "free_response"].includes(kind)) {
     return String(submittedRaw);
   }
   // multiple_choice
-  const choices = Array.isArray(question.choices) ? question.choices : [];
   for (let i = 0; i < choices.length; i++) {
     const ch = choices[i];
     if (ch && typeof ch === "object") {
@@ -59,7 +63,7 @@ function getCorrectDisplay(question, correctAnswerVal) {
     }
     return "N/A";
   }
-  if (question.kind === "short_answer") {
+  if (["short_answer", "free_response"].includes(question.kind)) {
     return question.answer || (Array.isArray(question.accepted_answers) ? question.accepted_answers.join(", ") : "N/A");
   }
   const choices = Array.isArray(question.choices) ? question.choices : [];
@@ -75,8 +79,27 @@ function getCorrectDisplay(question, correctAnswerVal) {
   return "N/A";
 }
 
-function renderQuestionInput(question, index) {
+export function renderQuestionInput(question, index) {
   const kind = question.kind || (Array.isArray(question.choices) && question.choices.length ? "multiple_choice" : "short_answer");
+  const choices = Array.isArray(question.choices) ? question.choices : [];
+
+  if (choices.length) {
+    return `
+      <div class="practice-options">
+        ${choices.map((choice, choiceIndex) => {
+          const isObject = choice && typeof choice === "object";
+          const value = isObject ? String(choice.id) : String(choiceIndex);
+          const label = isObject ? choice.text : String(choice);
+          return `
+          <label class="practice-option">
+            <input type="radio" name="question-${index}" value="${escapeHtml(value)}" />
+            <span>${mathHtml(label)}</span>
+          </label>
+        `;
+        }).join("")}
+      </div>
+    `;
+  }
 
   if (kind === "true_false") {
     return `
@@ -89,6 +112,20 @@ function renderQuestionInput(question, index) {
           <input type="radio" name="question-${index}" value="false" />
           <span>False</span>
         </label>
+      </div>
+    `;
+  }
+
+  if (kind === "free_response") {
+    return `
+      <div class="practice-short-answer">
+        <textarea
+          class="practice-text-input"
+          data-answer-text
+          name="question-${index}"
+          placeholder="Write your answer here..."
+          rows="4"
+        ></textarea>
       </div>
     `;
   }
@@ -108,23 +145,18 @@ function renderQuestionInput(question, index) {
     `;
   }
 
-  // multiple_choice
-  const choices = Array.isArray(question.choices) ? question.choices : [];
-  return `
-    <div class="practice-options">
-      ${choices.map((choice, choiceIndex) => {
-        const isObj = choice && typeof choice === "object";
-        const val = isObj ? String(choice.id ?? choiceIndex) : String(choiceIndex);
-        const label = isObj ? (choice.text ?? choice.label ?? choice.value ?? "") : String(choice);
-        return `
-          <label class="practice-option">
-            <input type="radio" name="question-${index}" value="${escapeHtml(val)}" />
-            <span>${mathHtml(label)}</span>
-          </label>
-        `;
-      }).join("")}
-    </div>
-  `;
+  return `<p class="quiz-error" role="alert">This question has no available answer choices.</p>`;
+}
+
+function questionContextHtml(question) {
+  const labels = [];
+  if (Number.isInteger(question.level) && question.level >= 1 && question.level <= 4) {
+    labels.push(`Level ${question.level}`);
+  }
+  for (const concept of question.concepts || []) {
+    if (typeof concept?.label === "string" && concept.label.trim()) labels.push(concept.label.trim());
+  }
+  return labels.length ? `<span class="row-meta">${labels.map(escapeHtml).join(" · ")}</span>` : "";
 }
 
 function newOperationId() {
@@ -228,16 +260,13 @@ function renderRemoteQuizStart(root, material, options, { preferredMode = "stand
     try {
       let operationId = getStoredRunOperation(material.id, mode, forceNewRun);
       let run = await createQuizRunApi(material.id, operationId, mode);
-      // A completed standard session is not silently reopened as a new run.
-      // The mode picker starts a fresh run when a saved standard operation is old.
-      if (mode === "standard" && run.status === "completed") {
-        operationId = getStoredRunOperation(material.id, mode, true);
-        run = await createQuizRunApi(material.id, operationId, mode);
-      }
+      run = normalizePublicQuizRun(run, { materialId: material.id, mode });
       if (mode === "reasoning") {
-        renderReasoningQuizPlayer(root, material, options, run);
+        renderReasoningQuizPlayer(root, { ...material, questions: run.questions }, options, run);
       } else {
-        renderQuizPlayer(root, material, { ...options, runContext: { mode, runId: run.run_id } });
+        renderQuizPlayer(root, { ...material, questions: run.questions }, {
+          ...options, runContext: { mode, runId: run.run_id, run }
+        });
       }
     } catch (error) {
       errorNode.textContent = error.message || "The quiz could not start. Try again.";
@@ -249,7 +278,8 @@ function renderRemoteQuizStart(root, material, options, { preferredMode = "stand
 }
 
 function renderReasoningQuizPlayer(root, material, options, initialRun) {
-  let run = initialRun;
+  let run = normalizePublicQuizRun(initialRun, { materialId: material.id, mode: "reasoning" });
+  material = { ...material, questions: run.questions };
   let disposed = false;
   let reportedRunId = null;
   let pollTimer = null;
@@ -302,7 +332,10 @@ function renderReasoningQuizPlayer(root, material, options, initialRun) {
   };
 
   async function refresh() {
-    run = await getQuizRunApi(material.id, run.run_id);
+    run = normalizePublicQuizRun(await getQuizRunApi(material.id, run.run_id), {
+      materialId: material.id, mode: "reasoning"
+    });
+    material = { ...material, questions: run.questions };
     if (!disposed) {
       render();
       for (const questionId of voiceQueues.keys()) void flushVoiceQueue(questionId);
@@ -492,28 +525,29 @@ function renderReasoningQuizPlayer(root, material, options, initialRun) {
   function resultPayload() {
     const attempts = run.attempts || [];
     const answered = attempts.filter((item) => item.state === "completed");
-    const correctCount = answered.filter((item) => item.correct).length;
+    const feedbackAvailable = run.feedback_policy.feedback_available;
+    const graded = answered.filter((item) => typeof item.correct === "boolean");
+    const correctCount = feedbackAvailable && typeof run.correct_count === "number"
+      ? run.correct_count
+      : (feedbackAvailable && graded.length ? graded.filter((item) => item.correct).length : undefined);
     const questionAnswerMap = Object.fromEntries(attempts
       .filter((item) => item.state === "completed")
       .map((item) => [item.question_id, item.final_answer]));
+    const reviews = new Map(publicRunReview(run).map((item) => [String(item.question_id), item]));
     return {
       id: run.run_id,
       backendAttemptId: run.run_id,
       mode: "reasoning",
       answers: questionAnswerMap,
-      scorePercent: run.score_percent ?? 0,
+      ...(feedbackAvailable && typeof run.score_percent === "number" ? { scorePercent: run.score_percent } : {}),
+      feedbackAvailable,
       correctCount,
+      ...(run.outcome ? { outcome: run.outcome } : {}),
       questionResults: attempts.map((item) => ({
         question_id: item.question_id,
-        correct: item.state === "completed" && item.correct,
+        ...(reviews.get(String(item.question_id)) || {}),
         skipped: item.state === "skipped",
-        submitted_answer: item.final_answer,
-        correct_answer: item.correct_answer,
-        explanation: item.explanation,
-        reasoning_feedback: item.reasoning_feedback,
-        answer_feedback: item.answer_feedback,
-        feedback_status: item.feedback_status,
-        sources: material.questions.find((q) => String(q.id) === String(item.question_id))?.sources || []
+        submitted_answer: item.final_answer
       })),
       completedAt: run.completed_at || new Date().toISOString()
     };
@@ -523,34 +557,49 @@ function renderReasoningQuizPlayer(root, material, options, initialRun) {
     const result = resultPayload();
     const totalCount = material.questions.length;
     const attemptByQuestion = questionResults();
+    const feedbackAvailable = run.feedback_policy.feedback_available;
+    const xpAwardedMarkup = quizOutcomeMarkup(run.outcome);
+    const reviewByQuestion = new Map(publicRunReview(run).map((item) => [String(item.question_id), item]));
     root.innerHTML = `
       <section class="assessment-view">
         ${sourceWarningsHtml(material)}
         <button class="back-link assessment-back" type="button" data-back-to-study>&larr; Back to study materials</button>
         <header class="assessment-header">
           <div><p class="eyebrow">Reasoning Mode results</p><h2>${escapeHtml(material.title || material.type)}</h2></div>
-          <div class="assessment-score" role="status" aria-live="polite"><strong>${Math.round(run.score_percent || 0)}%</strong><span>${result.correctCount} of ${totalCount} correct</span></div>
+          <div class="assessment-score" role="status" aria-live="polite">
+            ${feedbackAvailable && typeof run.score_percent === "number"
+    ? `<strong>${Math.round(run.score_percent)}%</strong><span>${result.correctCount ?? "—"} of ${totalCount} correct</span>${xpAwardedMarkup}`
+    : `<strong>Submitted</strong><span>${feedbackAvailable ? "Feedback is available." : "Feedback is not available yet."}</span>${xpAwardedMarkup}`}
+          </div>
         </header>
         <div class="question-review-list">
           ${material.questions.map((question, index) => {
             const item = attemptByQuestion.get(String(question.id));
             const skipped = item?.state === "skipped";
-            const correct = item?.state === "completed" && item.correct;
+            const review = reviewByQuestion.get(String(question.id)) || {};
+            const outcomeCorrectness = review.outcome?.correctness ?? item?.outcome?.correctness;
+            const isGraded = feedbackAvailable && (typeof (review.correct ?? item?.correct) === "boolean"
+              || ["correct", "incorrect"].includes(outcomeCorrectness));
+            const correct = isGraded && (typeof (review.correct ?? item?.correct) === "boolean"
+              ? Boolean(review.correct ?? item?.correct) : outcomeCorrectness === "correct");
             const feedback = item?.feedback_status;
             const selected = skipped ? "Skipped" : getSubmittedDisplay(question, item?.final_answer);
-            return `<article class="question-review" data-result="${skipped ? "skipped" : correct ? "correct" : "incorrect"}">
-              <div class="review-heading"><strong>Question ${index + 1}</strong><span class="pill" data-tone="${skipped ? "neutral" : correct ? "good" : "bad"}"><strong>${skipped ? "Skipped" : correct ? "Correct" : "Review"}</strong></span></div>
+            const resultTone = skipped ? "neutral" : !isGraded ? "neutral" : correct ? "good" : "bad";
+            const resultLabel = skipped ? "Skipped" : !isGraded ? "Submitted" : correct ? "Correct" : "Review";
+            return `<article class="question-review" data-result="${skipped ? "skipped" : isGraded ? (correct ? "correct" : "incorrect") : "submitted"}">
+              <div class="review-heading"><strong>Question ${index + 1}</strong><span class="pill" data-tone="${resultTone}"><strong>${resultLabel}</strong></span></div>
               <p class="review-prompt">${mathHtml(question.prompt)}</p>
+              ${quizOutcomeMarkup(review.outcome, { question: true }) ? `<p>${quizOutcomeMarkup(review.outcome, { question: true })}</p>` : ""}
               ${!skipped ? `<p class="review-answer">Your answer: <strong>${mathHtml(selected || "No answer")}</strong></p>
-                <p class="review-answer">Answer key: <strong>${mathHtml(getCorrectDisplay(question, item?.correct_answer))}</strong></p>
-                ${item?.answer_feedback ? `<p class="review-explanation"><strong>Answer feedback:</strong> ${mathHtml(item.answer_feedback)}</p>` : ""}
-                ${feedback === "pending" ? `<p class="muted" role="status">Reasoning feedback is being prepared…</p>` : ""}
-                ${feedback === "failed" ? `<p class="quiz-error" role="status">Your answer and grade are saved. Reasoning feedback could not be generated.</p><button class="btn btn-secondary btn-small" type="button" data-retry-feedback="${escapeHtml(question.id)}">Retry reasoning feedback</button>` : ""}
-                ${item?.reasoning_feedback ? `<p class="review-explanation"><strong>Reasoning feedback:</strong> ${mathHtml(item.reasoning_feedback)}</p>` : ""}` : `<p class="muted">This question was skipped and is not counted as a submitted answer.</p>`}
+                ${feedbackAvailable && (review.correct_answer ?? item?.correct_answer) ? `<p class="review-answer">Answer key: <strong>${mathHtml(getCorrectDisplay(question, review.correct_answer ?? item?.correct_answer))}</strong></p>` : ""}
+                ${feedbackAvailable && (review.answer_feedback ?? item?.answer_feedback) ? `<p class="review-explanation"><strong>Answer feedback:</strong> ${mathHtml(review.answer_feedback ?? item?.answer_feedback)}</p>` : ""}
+                ${feedbackAvailable && feedback === "pending" ? `<p class="muted" role="status">Reasoning feedback is being prepared…</p>` : ""}
+                ${feedbackAvailable && feedback === "failed" ? `<p class="quiz-error" role="status">Your answer and grade are saved. Reasoning feedback could not be generated.</p><button class="btn btn-secondary btn-small" type="button" data-retry-feedback="${escapeHtml(question.id)}">Retry reasoning feedback</button>` : ""}
+                ${feedbackAvailable && (review.reasoning_feedback ?? item?.reasoning_feedback) ? `<p class="review-explanation"><strong>Reasoning feedback:</strong> ${mathHtml(review.reasoning_feedback ?? item?.reasoning_feedback)}</p>` : ""}` : `<p class="muted">This question was skipped and is not counted as a submitted answer.</p>`}
               <div class="reasoning-history"><strong>Submitted reasoning</strong><ol>${(item?.reasoning_turns || []).map((turn) => `<li>${mathHtml(turn.text)}</li>`).join("")}</ol></div>
-              ${question.sources?.length ? `<div class="source-chips">${question.sources.map(sourceCitationHtml).join("")}</div>` : ""}
+              ${feedbackAvailable && (review.sources || item?.sources)?.length ? `<div class="source-chips">${(review.sources || item.sources).map(sourceCitationHtml).join("")}</div>` : ""}
               <div class="review-actions">
-                <button class="btn btn-secondary btn-small" type="button" data-ask-tutor="${index}">Ask tutor about this</button>
+                ${feedbackAvailable ? `<button class="btn btn-secondary btn-small" type="button" data-ask-tutor="${index}">Ask tutor about this</button>` : ""}
                 <button class="btn btn-ghost btn-small" type="button" data-flag-item="${escapeHtml(question.id)}">Flag question</button>
               </div>
             </article>`;
@@ -649,7 +698,7 @@ function renderReasoningQuizPlayer(root, material, options, initialRun) {
             else if (accepted) status = "Ready to submit. You can still revise your answer or add more reasoning.";
             const answerHtml = renderQuestionInput(question, index);
             return `<article class="reasoning-question" data-reasoning-question data-question-id="${escapeHtml(qid)}" id="reasoning-question-${index}">
-              <fieldset class="practice-question"><legend><span class="practice-question-heading"><span class="question-number">${index + 1}</span><span class="practice-prompt">${mathHtml(question.prompt)}</span></span></legend>
+              <fieldset class="practice-question"><legend><span class="practice-question-heading"><span class="question-number">${index + 1}</span><span class="practice-prompt">${mathHtml(question.prompt)}</span></span>${questionContextHtml(question)}</legend>
                 <div class="reasoning-answer-area" ${terminal ? "aria-disabled=\"true\"" : ""}>${answerHtml}</div>
                 <div class="reasoning-section"><h3>Explain your thinking</h3>
                   ${transcriptHistory.length ? `<ol class="reasoning-history">${transcriptHistory.map((turn) => `<li><span>${turn.source === "voice" ? "Voice" : "You"}</span>${mathHtml(turn.text)}</li>`).join("")}</ol>` : ""}
@@ -832,6 +881,24 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
     renderRemoteQuizStart(root, material, { onBack, onAttemptCompleted });
     return;
   }
+  if (material.isRemote) {
+    try {
+      const safeRun = normalizePublicQuizRun(runContext.run, {
+        materialId: material.id, mode: runContext.mode
+      });
+      material = { ...material, questions: safeRun.questions };
+      runContext = { ...runContext, runId: safeRun.run_id, run: safeRun };
+    } catch (error) {
+      root.innerHTML = `
+        <section class="assessment-view" role="alert">
+          <h2>Quiz unavailable</h2>
+          <p class="quiz-error">${escapeHtml(error.message || "This quiz could not be securely loaded.")}</p>
+          <button class="btn btn-secondary" type="button" data-secure-quiz-back>Back to study materials</button>
+        </section>`;
+      root.querySelector("[data-secure-quiz-back]")?.addEventListener("click", () => onBack?.());
+      return;
+    }
+  }
   let timerId = null;
   let submitted = false;
   let expiredAnswers = null;
@@ -882,11 +949,15 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
 
   function renderResults(attempt) {
     const totalCount = material.questions.length;
-    const correctCount = typeof attempt.correctCount === "number"
+    const feedbackAvailable = material.isRemote ? attempt.feedbackAvailable === true : true;
+    const gradedResults = (attempt.questionResults || []).filter((result) => typeof result.correct === "boolean");
+    const correctCount = feedbackAvailable && typeof attempt.correctCount === "number"
       ? attempt.correctCount
-      : (attempt.questionResults
-          ? attempt.questionResults.filter((r) => r.correct).length
-          : attempt.results.filter((r) => r.isCorrect).length);
+      : (feedbackAvailable && gradedResults.length
+          ? gradedResults.filter((r) => r.correct).length
+          : (material.isRemote ? null : attempt.results.filter((r) => r.isCorrect).length));
+    const scoreAvailable = feedbackAvailable && typeof attempt.scorePercent === "number";
+    const xpAwardedMarkup = quizOutcomeMarkup(attempt.outcome);
 
     root.innerHTML = `
       <section class="assessment-view">
@@ -898,8 +969,9 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
             <h2>${escapeHtml(material.title || material.type)}</h2>
           </div>
           <div class="assessment-score" role="status" aria-live="polite">
-            <strong>${attempt.scorePercent}%</strong>
-            <span>${correctCount} of ${totalCount} correct</span>
+            ${scoreAvailable
+    ? `<strong>${attempt.scorePercent}%</strong><span>${correctCount ?? "—"} of ${totalCount} correct</span>${xpAwardedMarkup}`
+    : `<strong>${material.isRemote ? "Submitted" : "Results"}</strong><span>${material.isRemote ? (feedbackAvailable ? "Feedback is available." : "Feedback is not available yet.") : "Your answers have been scored."}</span>${xpAwardedMarkup}`}
           </div>
         </header>
         <div class="question-review-list">
@@ -911,57 +983,68 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
             let isCorrect = false;
             let submittedRaw = attempt.answers?.[qId] ?? "";
             let correctAnswerVal = "";
-            let explanation = question.explanation || "";
-            let sources = question.sources || [];
+            let explanation = material.isRemote ? "" : (question.explanation || "");
+            let sources = material.isRemote ? [] : (question.sources || []);
+            let isGraded = false;
 
             if (backendResult) {
-              isCorrect = Boolean(backendResult.correct);
               submittedRaw = backendResult.submitted_answer ?? submittedRaw;
-              correctAnswerVal = backendResult.correct_answer;
-              explanation = backendResult.explanation || explanation;
-              sources = backendResult.sources?.length ? backendResult.sources : sources;
+              if (feedbackAvailable && typeof backendResult.correct === "boolean") {
+                isCorrect = backendResult.correct;
+                isGraded = true;
+              } else if (feedbackAvailable && ["correct", "incorrect"].includes(backendResult.outcome?.correctness)) {
+                isCorrect = backendResult.outcome.correctness === "correct";
+                isGraded = true;
+              }
+              if (feedbackAvailable) {
+                correctAnswerVal = backendResult.correct_answer;
+                explanation = backendResult.explanation || explanation;
+                sources = backendResult.sources?.length ? backendResult.sources : sources;
+              }
             } else {
-              const localRes = attempt.results?.[index];
-              isCorrect = Boolean(localRes?.isCorrect);
-              correctAnswerVal = question.answer;
+              if (!material.isRemote) {
+                const localRes = attempt.results?.[index];
+                isCorrect = Boolean(localRes?.isCorrect);
+                isGraded = true;
+                correctAnswerVal = question.answer;
+              }
             }
 
             const selected = getSubmittedDisplay(question, submittedRaw);
             const correct = getCorrectDisplay(question, correctAnswerVal);
 
             return `
-              <article class="question-review" data-result="${isCorrect ? "correct" : "incorrect"}">
+              <article class="question-review" data-result="${!isGraded ? "submitted" : isCorrect ? "correct" : "incorrect"}">
                 <div class="review-heading">
                   <strong>Question ${index + 1}</strong>
-                  <span class="pill" data-tone="${isCorrect ? "good" : "bad"}">
-                    <strong>${isCorrect ? "Correct" : "Review"}</strong>
+                  <span class="pill" data-tone="${!isGraded ? "neutral" : isCorrect ? "good" : "bad"}">
+                    <strong>${!isGraded ? "Submitted" : isCorrect ? "Correct" : "Review"}</strong>
                   </span>
                 </div>
                 <p class="review-prompt">${mathHtml(question.prompt)}</p>
+                ${quizOutcomeMarkup(backendResult?.outcome, { question: true }) ? `<p>${quizOutcomeMarkup(backendResult.outcome, { question: true })}</p>` : ""}
                 <p class="review-answer">Your answer: <strong>${mathHtml(selected || "None")}</strong></p>
-                <p class="review-answer">Answer key: <strong>${mathHtml(correct || "N/A")}</strong></p>
+                ${feedbackAvailable && correctAnswerVal ? `<p class="review-answer">Answer key: <strong>${mathHtml(correct)}</strong></p>` : ""}
                 ${explanation ? `<p class="review-explanation">${mathHtml(explanation)}</p>` : ""}
-                ${sources && sources.length ? `
+                ${feedbackAvailable && sources && sources.length ? `
                   <div class="source-chips" style="margin-top: 0.5rem;">
                     ${sources.map(sourceCitationHtml).join("")}
                   </div>
                 ` : ""}
                 <div class="review-actions" style="margin-top: 0.75rem; display: flex; gap: 0.5rem; align-items: center;">
-                  ${!isCorrect ? `
+                  ${feedbackAvailable && isGraded && !isCorrect ? `
                     <button class="btn btn-secondary btn-small" type="button" data-ask-tutor="${index}">
                       Ask tutor about this
                     </button>
                   ` : ""}
-                  <button class="btn btn-ghost btn-small" type="button" data-flag-item="${escapeHtml(question.id || `q-${index + 1}`)}">
-                    Flag question
-                  </button>
+                  ${material.isRemote ? "" : `<button class="btn btn-ghost btn-small" type="button" data-flag-item="${escapeHtml(question.id || `q-${index + 1}`)}">Flag question</button>`}
                 </div>
               </article>
             `;
           }).join("")}
         </div>
         <div class="assessment-actions">
-          <button class="btn btn-secondary" type="button" data-retake>Try again</button>
+          <button class="btn btn-secondary" type="button" data-retake>${material.isRemote ? (material.type === "Practice test" ? "Retake practice test" : "Retake quiz") : "Try again"}</button>
           <button class="btn btn-primary" type="button" data-back-to-study>Back to study materials</button>
         </div>
       </section>
@@ -1046,11 +1129,14 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
 
     const formData = new FormData(form);
     const answersMap = {};
-    const localResults = material.questions.map((question, index) => {
+    const localResults = [];
+    material.questions.forEach((question, index) => {
       const questionKey = question.id || `q-${index + 1}`;
       const raw = expiredAnswers ? expiredAnswers[questionKey] : formData.get(`question-${index}`);
       const submittedVal = raw !== null ? String(raw).trim() : "";
       answersMap[questionKey] = submittedVal;
+
+      if (material.isRemote) return;
 
       const kind = question.kind || (Array.isArray(question.choices) && question.choices.length ? "multiple_choice" : "short_answer");
       let isCorrect = false;
@@ -1059,7 +1145,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
         if (kind === "true_false") {
           const expected = String(question.answer ?? "").toLowerCase();
           isCorrect = submittedVal.toLowerCase() === expected;
-        } else if (kind === "short_answer") {
+        } else if (["short_answer", "free_response"].includes(kind)) {
           const accepted = Array.isArray(question.accepted_answers) && question.accepted_answers.length
             ? question.accepted_answers
             : [question.answer ?? ""];
@@ -1075,42 +1161,66 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
         }
       }
 
-      return { questionId: questionKey, submittedVal, isCorrect };
+      localResults.push({ questionId: questionKey, submittedVal, isCorrect });
     });
 
-    let correctCount = localResults.filter((r) => r.isCorrect).length;
-    let scorePercent = Math.round((correctCount / Math.max(1, material.questions.length)) * 100);
+    let correctCount = material.isRemote ? undefined : localResults.filter((r) => r.isCorrect).length;
+    let scorePercent = material.isRemote ? undefined : Math.round((correctCount / Math.max(1, material.questions.length)) * 100);
     let questionResults = null;
     let backendAttemptId = null;
+    let feedbackAvailable = !material.isRemote;
+    let outcome = null;
     if (expired) expiredAnswers = { ...answersMap };
     const inputs = [...form.querySelectorAll("input, textarea, select")];
     inputs.forEach((input) => { input.disabled = true; });
 
-    // Remote answer keys stay on the server until the attempt is submitted.
+    // Remote scoring and feedback are server-owned. The browser submits only
+    // opaque run-question and per-run option IDs, then renders release-approved
+    // fields from the run projection.
     if (material.isRemote) {
       const submitBtn = form.querySelector("button[type=submit]");
       submitBtn.disabled = true;
       submitBtn.textContent = "Submitting…";
       try {
+        if (!runContext?.runId) throw new Error("This quiz run is no longer available. Reopen the quiz to try again.");
         const answerDigest = JSON.stringify(Object.entries(answersMap).sort(([left], [right]) => left.localeCompare(right)));
         if (submissionAnswerDigest !== answerDigest || !submissionOperationId) {
           submissionAnswerDigest = answerDigest;
-          submissionOperationId = runContext?.runId
-            ? getStoredSubmissionOperation(runContext.runId, answersMap)
-            : newOperationId();
+          submissionOperationId = getStoredSubmissionOperation(runContext.runId, answersMap);
         }
-        const attemptRes = await submitAttemptApi(material.id, answersMap, runContext?.runId
-          ? { runId: runContext.runId, operationId: submissionOperationId }
-          : {});
+        const attemptRes = await submitAttemptApi(material.id, answersMap, {
+          runId: runContext.runId,
+          operationId: submissionOperationId
+        });
         if (disposed) return;
-        if (typeof attemptRes.score_percent !== "number" || !Array.isArray(attemptRes.question_results)
-          || typeof attemptRes.attempt_id !== "string" || !attemptRes.attempt_id) {
-          throw new Error("The server did not return a quiz score. Try submitting again.");
+        if (!attemptRes || typeof attemptRes !== "object" || Array.isArray(attemptRes)) {
+          throw new Error("The server did not confirm that your answers were saved. Try submitting again.");
         }
-        scorePercent = Math.round(attemptRes.score_percent);
-        correctCount = attemptRes.correct_count;
-        questionResults = attemptRes.question_results;
-        backendAttemptId = attemptRes.attempt_id;
+        backendAttemptId = attemptRes.attempt_id || attemptRes.run_id || runContext.runId;
+        let completedRun = null;
+        try {
+          completedRun = normalizePublicQuizRun(await getQuizRunApi(material.id, runContext.runId), {
+            materialId: material.id, mode: "standard"
+          });
+        } catch {
+          // Submission is durable even if the follow-up review fetch fails.
+          // Keep the answer snapshot and show a no-leak submitted state.
+        }
+        if (completedRun) {
+          feedbackAvailable = completedRun.feedback_policy.feedback_available;
+          outcome = completedRun.outcome
+            || normalizePublicQuizOutcome(attemptRes.outcome, completedRun.feedback_policy.feedback_available, material.questions.length);
+          questionResults = publicRunReview(completedRun);
+          if (feedbackAvailable) {
+            scorePercent = typeof completedRun.score_percent === "number"
+              ? Math.round(completedRun.score_percent) : undefined;
+            correctCount = completedRun.correct_count;
+          }
+          backendAttemptId = completedRun.run_id;
+        } else {
+          feedbackAvailable = false;
+          outcome = normalizePublicQuizOutcome(attemptRes.outcome, false, material.questions.length);
+        }
       } catch (err) {
         if (disposed) return;
         submitted = false;
@@ -1136,8 +1246,10 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
       results: localResults,
       questionResults,
       backendAttemptId,
-      scorePercent,
-      correctCount,
+      ...(typeof scorePercent === "number" ? { scorePercent } : {}),
+      ...(typeof correctCount === "number" ? { correctCount } : {}),
+      ...(material.isRemote && outcome ? { outcome } : {}),
+      ...(material.isRemote ? { feedbackAvailable } : {}),
       completedAt: new Date().toISOString(),
       timeExpired: expired
     };
@@ -1169,6 +1281,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
                 <span class="question-number">${index + 1}</span>
                 <span class="practice-prompt">${mathHtml(question.prompt)}</span>
               </span>
+              ${questionContextHtml(question)}
             </legend>
             ${renderQuestionInput(question, index)}
           </fieldset>
@@ -1192,5 +1305,26 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
     submit(form);
   });
 
+  if (material.isRemote && runContext.run.status === "completed") {
+    const run = runContext.run;
+    const answers = Object.fromEntries((run.attempts || []).flatMap((item) => (
+      typeof item.question_id === "string"
+        ? [[item.question_id, item.final_answer ?? item.submitted_answer ?? ""]]
+        : []
+    )));
+    renderResults({
+      id: run.run_id,
+      backendAttemptId: run.run_id,
+      answers,
+      questionResults: publicRunReview(run),
+      feedbackAvailable: run.feedback_policy.feedback_available,
+      ...(run.outcome ? { outcome: run.outcome } : {}),
+      ...(typeof run.correct_count === "number" ? { correctCount: run.correct_count } : {}),
+      ...(typeof run.score_percent === "number" ? { scorePercent: Math.round(run.score_percent) } : {}),
+      completedAt: run.completed_at || null,
+      timeExpired: false
+    });
+    return;
+  }
   startTimer();
 }

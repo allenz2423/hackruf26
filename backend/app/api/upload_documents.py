@@ -14,7 +14,6 @@ from fastapi import APIRouter, BackgroundTasks, Request, Response
 from app.api.dependencies import database, enforce_sqlite_api_policy
 from app.api.errors import ApiError
 from app.api.schemas import DocumentDetailLevel, UploadDocumentContent, UploadDocumentRequest
-from app.services.database import SQLiteDatabase, json_value
 from app.services.class_access import (
     can_view_assessment_key,
     can_view_unreleased,
@@ -22,6 +21,7 @@ from app.services.class_access import (
     is_effectively_published,
     is_private_assessment,
 )
+from app.services.database import SQLiteDatabase, json_value
 from app.services.study_files import compiler_path, create_guide_files
 
 router = APIRouter(tags=["upload-documents"])

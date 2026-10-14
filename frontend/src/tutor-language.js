@@ -17,6 +17,13 @@ export const TUTOR_LANGUAGES = [
   { id: "ar", label: "العربية (Arabic)" }
 ];
 
+// Quiz and exam generation accepts BCP-47 tags beyond the live tutor's locale allow-list.
+// Keep Simplified Chinese explicit here without implying it is a supported live-tutor lock.
+export const GENERATION_LANGUAGES = [
+  ...TUTOR_LANGUAGES,
+  { id: "zh-Hans", label: "简体中文 (Chinese, Simplified)" }
+];
+
 const STORAGE_KEY = "jot-tutor-language";
 
 export function normalizeLanguage(id) {
