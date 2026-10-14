@@ -374,7 +374,7 @@ function renderReasoningQuizPlayer(root, material, options, initialRun) {
         evaluationsInFlight.add(questionId);
         try {
           const result = await submitReasoningApi(material.id, run.run_id, questionId, {
-            operationId: turn.id, text: turn.text, source: "voice"
+            operationId: turn.id, text: turn.text, source: "voice", expectedVersion: current?.version
           });
           pending.shift();
           storeVoiceQueue(questionId);
@@ -580,7 +580,8 @@ function renderReasoningQuizPlayer(root, material, options, initialRun) {
       try {
         let operationId = feedbackOperations.get(questionId);
         if (!operationId) { operationId = newOperationId(); feedbackOperations.set(questionId, operationId); }
-        await retryReasoningFeedbackApi(material.id, run.run_id, questionId, operationId);
+        const attempt = questionResults().get(String(questionId));
+        await retryReasoningFeedbackApi(material.id, run.run_id, questionId, operationId, attempt?.version);
         await refresh();
       } catch (error) {
         feedbackOperations.delete(questionId);
@@ -735,7 +736,10 @@ function renderReasoningQuizPlayer(root, material, options, initialRun) {
         reasoningOperations.set(qid, operation);
         evaluationsInFlight.add(qid);
         try {
-          const result = await submitReasoningApi(material.id, run.run_id, qid, { operationId: operation.id, text, source: "text" });
+          const attempt = questionResults().get(qid);
+          const result = await submitReasoningApi(material.id, run.run_id, qid, {
+            operationId: operation.id, text, source: "text", expectedVersion: attempt?.version
+          });
           evaluationsInFlight.delete(qid);
           reasoningOperations.delete(qid);
           clearStoredReasoningOperation(run.run_id, qid);
@@ -762,7 +766,8 @@ function renderReasoningQuizPlayer(root, material, options, initialRun) {
         retryOperations.set(qid, operationId);
         evaluationsInFlight.add(qid);
         try {
-          await retryReasoningApi(material.id, run.run_id, qid, operationId);
+          const attempt = questionResults().get(qid);
+          await retryReasoningApi(material.id, run.run_id, qid, operationId, attempt?.version);
           evaluationsInFlight.delete(qid);
           retryOperations.delete(qid);
           await refresh();
@@ -780,7 +785,8 @@ function renderReasoningQuizPlayer(root, material, options, initialRun) {
         const operationId = skipOperations.get(qid) || newOperationId();
         skipOperations.set(qid, operationId);
         try {
-          await skipQuizQuestionApi(material.id, run.run_id, qid, operationId);
+          const attempt = questionResults().get(qid);
+          await skipQuizQuestionApi(material.id, run.run_id, qid, operationId, attempt?.version);
           skipOperations.delete(qid);
           await refresh();
           root.querySelector(`#reasoning-question-${index + 1}`)?.scrollIntoView?.({ block: "start" });
@@ -801,7 +807,10 @@ function renderReasoningQuizPlayer(root, material, options, initialRun) {
         const button = card.querySelector("[data-final-answer-form] button[type=submit]");
         if (button) { button.disabled = true; button.textContent = "Submitting…"; }
         try {
-          await submitReasoningAnswerApi(material.id, run.run_id, qid, { operationId: operation.id, answer });
+          const attempt = questionResults().get(qid);
+          await submitReasoningAnswerApi(material.id, run.run_id, qid, {
+            operationId: operation.id, answer, expectedVersion: attempt?.version
+          });
           answerOperations.delete(qid);
           await refresh();
         } catch (error) {

@@ -166,8 +166,12 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.assertEqual(result["state"], "completed")
         self.assertFalse(result["correct"])
         self.assertEqual(result["submitted_through_turn"], 2)
-        self.assertEqual(result["feedback_status"], "available")
+        self.assertEqual(result["feedback_status"], "pending")
         self.assertEqual(len(result["reasoning_turns"]), 2)
+        refreshed = self.client.get(
+            f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
+        ).json()
+        self.assertEqual(refreshed["attempts"][0]["feedback_status"], "available")
         self.assertEqual(
             self.client.portal.call(
                 self.client.app.state.database.fetchval,
@@ -282,7 +286,11 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.assertEqual(submitted.status_code, 200, submitted.text)
         self.assertEqual(submitted.json()["state"], "completed")
         self.assertFalse(submitted.json()["correct"])
-        self.assertEqual(submitted.json()["feedback_status"], "failed")
+        self.assertEqual(submitted.json()["feedback_status"], "pending")
+        refreshed = self.client.get(
+            f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
+        ).json()
+        self.assertEqual(refreshed["attempts"][0]["feedback_status"], "failed")
 
         self.service.feedback_failure = False
         feedback_path = (
@@ -292,9 +300,13 @@ class ReasoningQuizApiTests(unittest.TestCase):
         retry_id = str(uuid4())
         retried = self.client.post(feedback_path, json={"operation_id": retry_id})
         self.assertEqual(retried.status_code, 200, retried.text)
-        self.assertEqual(retried.json()["feedback_status"], "available")
-        self.assertEqual(retried.json()["final_answer"], "b")
-        self.assertFalse(retried.json()["correct"])
+        self.assertEqual(retried.json()["feedback_status"], "pending")
+        refreshed_retry = self.client.get(
+            f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
+        ).json()
+        self.assertEqual(refreshed_retry["attempts"][0]["feedback_status"], "available")
+        self.assertEqual(refreshed_retry["attempts"][0]["final_answer"], "b")
+        self.assertFalse(refreshed_retry["attempts"][0]["correct"])
         self.assertEqual(
             self.client.portal.call(
                 self.client.app.state.database.fetchval,
@@ -351,6 +363,97 @@ class ReasoningQuizApiTests(unittest.TestCase):
         )
         hidden = other.get(f"/api/study-materials/{self.material_id}/runs/{run['run_id']}")
         self.assertEqual(hidden.status_code, 404)
+
+    def test_version_optimistic_concurrency_rejects_stale_mutation(self):
+        self.service.decisions = [
+            ReasoningDecision(status="sufficient", reason="Meaningful attempt", follow_up=None)
+        ]
+        run = self.create_run()
+        path = (
+            f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
+            f"/questions/{self.question['id']}/reasoning"
+        )
+        stale = self.client.post(
+            path,
+            json={
+                "operation_id": str(uuid4()),
+                "text": "The kernel handles hardware.",
+                "source": "text",
+                "expected_version": 99,
+            },
+        )
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.json()["code"], "version_conflict")
+
+        valid = self.client.post(
+            path,
+            json={
+                "operation_id": str(uuid4()),
+                "text": "The kernel handles hardware.",
+                "source": "text",
+                "expected_version": 0,
+            },
+        )
+        self.assertEqual(valid.status_code, 200, valid.text)
+        self.assertEqual(valid.json()["state"], "reasoning_accepted")
+        self.assertGreater(valid.json()["version"], 0)
+
+        answer_path = (
+            f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
+            f"/questions/{self.question['id']}/answer"
+        )
+        stale_answer = self.client.post(
+            answer_path,
+            json={
+                "operation_id": str(uuid4()),
+                "answer": "a",
+                "expected_version": 0,
+            },
+        )
+        self.assertEqual(stale_answer.status_code, 409)
+        self.assertEqual(stale_answer.json()["code"], "version_conflict")
+
+    def test_exact_median_and_p95_latency_tracking_and_metrics_endpoint(self):
+        self.service.decisions = [
+            ReasoningDecision(status="sufficient", reason="Attempt 1", follow_up=None),
+        ]
+        run = self.create_run()
+        self.submit_reasoning(run["run_id"], "First turn explanation.")
+
+        metrics = self.client.get("/api/quiz-reasoning/metrics")
+        self.assertEqual(metrics.status_code, 200)
+        items = metrics.json()["items"]
+        self.assertGreaterEqual(len(items), 1)
+        today_metrics = items[0]
+        self.assertIn("latency_median_ms", today_metrics)
+        self.assertIn("latency_p95_ms", today_metrics)
+        self.assertGreaterEqual(today_metrics["latency_median_ms"], 0)
+        self.assertGreaterEqual(today_metrics["latency_p95_ms"], 0)
+
+    def test_wait_for_feedback_flag_returns_available_synchronously(self):
+        self.service.decisions = [
+            ReasoningDecision(status="sufficient", reason="Good attempt", follow_up=None)
+        ]
+        run = self.create_run()
+        self.submit_reasoning(run["run_id"], "The kernel controls hardware directly.")
+        answer_path = (
+            f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
+            f"/questions/{self.question['id']}/answer"
+        )
+        sync_res = self.client.post(
+            answer_path,
+            json={
+                "operation_id": str(uuid4()),
+                "answer": "a",
+                "wait_for_feedback": True,
+            },
+        )
+        self.assertEqual(sync_res.status_code, 200)
+        self.assertEqual(sync_res.json()["state"], "completed")
+        self.assertEqual(sync_res.json()["feedback_status"], "available")
+        self.assertTrue(sync_res.json()["correct"])
+        self.assertIsNotNone(sync_res.json()["reasoning_feedback"])
+
 
     def test_fixture_set_is_manually_reviewable_and_not_a_runtime_rule_list(self):
         fixture_path = Path(__file__).parent / "fixtures" / "reasoning-sufficiency.json"

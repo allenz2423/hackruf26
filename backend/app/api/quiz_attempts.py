@@ -6,17 +6,19 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import time
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.dependencies import database, enforce_sqlite_api_policy
 from app.api.errors import ApiError
 from app.services.database import SQLiteConnection, SQLiteDatabase, json_value
+from app.services.quiz_reasoning import QuizReasoningService
 from app.services.study_prompts import (
     QUIZ_REASONING_EVALUATOR_VERSION,
     QUIZ_REASONING_FEEDBACK_VERSION,
@@ -38,11 +40,14 @@ class ReasoningSubmission(BaseModel):
     operation_id: UUID
     text: str = Field(min_length=1, max_length=12_000)
     source: Literal["text", "voice"] = "text"
+    expected_version: int | None = Field(default=None, ge=0)
 
 
 class OperationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     operation_id: UUID
+    expected_version: int | None = Field(default=None, ge=0)
+    wait_for_feedback: bool = Field(default=False)
 
 
 class FinalAnswerSubmission(OperationRequest):
@@ -53,6 +58,15 @@ class FinalAnswerSubmission(OperationRequest):
 def _digest(value: object) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _check_expected_version(expected: int | None, actual: int) -> None:
+    if expected is not None and actual != expected:
+        raise ApiError(
+            409,
+            "version_conflict",
+            f"This question attempt was modified (version {actual}).",
+        )
 
 
 async def _authorize(request: Request) -> tuple[UUID, SQLiteDatabase]:
@@ -143,6 +157,7 @@ async def _attempt_payload(
         "attempt_id": row["id"],
         "question_id": row["question_id"],
         "state": row["state"],
+        "version": row["version"],
         "reasoning_turns": turns,
         "accepted_through_turn": row["accepted_through_turn"],
         "submitted_through_turn": row["submitted_through_turn"],
@@ -281,6 +296,30 @@ async def _record_metric(
         int(retry),
         latency_ms,
     )
+    if latency_ms > 0:
+        await conn.execute(
+            "INSERT INTO quiz_reasoning_latency_samples (metric_date, latency_ms) VALUES (?1, ?2)",
+            day,
+            latency_ms,
+        )
+        sample_rows = await conn.fetch(
+            "SELECT latency_ms FROM quiz_reasoning_latency_samples "
+            "WHERE metric_date = ?1 ORDER BY latency_ms ASC",
+            day,
+        )
+        if sample_rows:
+            samples = [int(r["latency_ms"]) for r in sample_rows]
+            n = len(samples)
+            median_ms = samples[n // 2]
+            p95_idx = min(n - 1, max(0, int(math.ceil(0.95 * n)) - 1))
+            p95_ms = samples[p95_idx]
+            await conn.execute(
+                "UPDATE quiz_reasoning_metrics SET latency_median_ms = ?1, latency_p95_ms = ?2 "
+                "WHERE metric_date = ?3",
+                median_ms,
+                p95_ms,
+                day,
+            )
 
 
 async def _complete_run_if_ready(
@@ -635,6 +674,7 @@ async def submit_reasoning(
             attempt = await conn.fetchrow(
                 "SELECT * FROM quiz_question_attempts WHERE id = ?1", attempt["id"]
             )
+            _check_expected_version(payload.expected_version, int(attempt["version"]))
             existing = await conn.fetchrow(
                 "SELECT * FROM quiz_reasoning_turns WHERE attempt_id = ?1 AND operation_id = ?2",
                 attempt["id"],
@@ -804,6 +844,7 @@ async def retry_reasoning(
             current = await conn.fetchrow(
                 "SELECT * FROM quiz_question_attempts WHERE id = ?1", attempt["id"]
             )
+            _check_expected_version(payload.expected_version, int(current["version"]))
             if current["state"] == "skipped":
                 raise ApiError(409, "attempt_terminal", "This question was skipped.")
             if current["state"] == "evaluating_reasoning":
@@ -873,6 +914,7 @@ async def skip_question(
             current = await conn.fetchrow(
                 "SELECT * FROM quiz_question_attempts WHERE id = ?1", attempt["id"]
             )
+            _check_expected_version(payload.expected_version, int(current["version"]))
             if current["state"] == "skipped":
                 if current["skip_operation_id"] != operation_id:
                     # A distinct confirmation cannot change an already recorded skip.
@@ -944,6 +986,7 @@ async def submit_final_answer(
     question_id: str,
     payload: FinalAnswerSubmission,
     request: Request,
+    background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     owner_id, db = await _authorize(request)
     material = await _owned_material(db, material_id, owner_id)
@@ -972,6 +1015,7 @@ async def submit_final_answer(
             current = await conn.fetchrow(
                 "SELECT * FROM quiz_question_attempts WHERE id = ?1", attempt["id"]
             )
+            _check_expected_version(payload.expected_version, int(current["version"]))
             if current["answer_operation_id"] is not None:
                 if (
                     current["answer_operation_id"] != operation_id
@@ -1045,18 +1089,33 @@ async def submit_final_answer(
                 "authoritative_grade": "correct" if correct else "incorrect",
                 "reasoning_turns": turns,
             }
-    await _generate_feedback(request, db, attempt["id"], feedback_operation_id, final_context)
+    if payload.wait_for_feedback:
+        await _generate_feedback(
+            request.app.state.quiz_reasoning_service,
+            db,
+            attempt["id"],
+            feedback_operation_id,
+            final_context,
+        )
+    else:
+        background_tasks.add_task(
+            _generate_feedback,
+            request.app.state.quiz_reasoning_service,
+            db,
+            attempt["id"],
+            feedback_operation_id,
+            final_context,
+        )
     return await _attempt_payload(db, attempt["id"], question)
 
 
 async def _generate_feedback(
-    request: Request,
+    service: QuizReasoningService,
     db: SQLiteDatabase,
     attempt_id: str,
     operation_id: str,
     context: dict[str, Any],
 ) -> None:
-    service = request.app.state.quiz_reasoning_service
     try:
         feedback = await asyncio.wait_for(
             asyncio.to_thread(service.feedback, context), timeout=PROVIDER_DEADLINE_SECONDS
@@ -1108,7 +1167,12 @@ async def _generate_feedback(
     "/api/study-materials/{material_id}/runs/{run_id}/questions/{question_id}/feedback/retry"
 )
 async def retry_feedback(
-    material_id: UUID, run_id: UUID, question_id: str, payload: OperationRequest, request: Request
+    material_id: UUID,
+    run_id: UUID,
+    question_id: str,
+    payload: OperationRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     owner_id, db = await _authorize(request)
     material = await _owned_material(db, material_id, owner_id)
@@ -1148,6 +1212,7 @@ async def retry_feedback(
             current = await conn.fetchrow(
                 "SELECT * FROM quiz_question_attempts WHERE id = ?1", attempt["id"]
             )
+            _check_expected_version(payload.expected_version, int(current["version"]))
             if current["feedback_status"] != "failed":
                 raise ApiError(
                     409,
@@ -1165,14 +1230,35 @@ async def retry_feedback(
             )
             await conn.execute(
                 "UPDATE quiz_question_attempts SET feedback_status = 'pending', "
-                "feedback_operation_id = ?2, "
+                "feedback_operation_id = ?2, version = version + 1, "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
                 "WHERE id = ?1 AND feedback_status = 'failed'",
                 attempt["id"],
                 operation_id,
             )
-    await _generate_feedback(request, db, attempt["id"], operation_id, context)
+    if payload.wait_for_feedback:
+        await _generate_feedback(
+            request.app.state.quiz_reasoning_service, db, attempt["id"], operation_id, context
+        )
+    else:
+        background_tasks.add_task(
+            _generate_feedback,
+            request.app.state.quiz_reasoning_service,
+            db,
+            attempt["id"],
+            operation_id,
+            context,
+        )
     return await _attempt_payload(db, attempt["id"], question)
+
+
+@router.get("/api/quiz-reasoning/metrics")
+async def get_quiz_reasoning_metrics(request: Request) -> dict[str, Any]:
+    owner_id, db = await _authorize(request)
+    rows = await db.fetch(
+        "SELECT * FROM quiz_reasoning_metrics ORDER BY metric_date DESC LIMIT 30"
+    )
+    return {"items": rows}
 
 
 async def _feedback_context(

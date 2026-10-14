@@ -250,12 +250,23 @@ CREATE TABLE IF NOT EXISTS quiz_reasoning_metrics (
     evaluation_failure_count INTEGER NOT NULL DEFAULT 0,
     retry_count         INTEGER NOT NULL DEFAULT 0,
     latency_total_ms    INTEGER NOT NULL DEFAULT 0,
+    latency_median_ms   INTEGER NOT NULL DEFAULT 0,
+    latency_p95_ms      INTEGER NOT NULL DEFAULT 0,
     latency_le_1s       INTEGER NOT NULL DEFAULT 0,
     latency_le_3s       INTEGER NOT NULL DEFAULT 0,
     latency_le_10s      INTEGER NOT NULL DEFAULT 0,
     latency_le_30s      INTEGER NOT NULL DEFAULT 0,
     latency_gt_30s      INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS quiz_reasoning_latency_samples (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    metric_date TEXT NOT NULL,
+    latency_ms  INTEGER NOT NULL CHECK (latency_ms >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reasoning_latency_date
+    ON quiz_reasoning_latency_samples(metric_date);
 
 CREATE TABLE IF NOT EXISTS uploaded_assessments (
     id                      TEXT PRIMARY KEY,
