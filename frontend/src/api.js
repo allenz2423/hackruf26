@@ -385,41 +385,57 @@ function reasoningPath(materialId, runId, questionId) {
   return `/api/study-materials/${encodeURIComponent(materialId)}/runs/${encodeURIComponent(runId)}/questions/${encodeURIComponent(questionId)}`;
 }
 
-export async function submitReasoningApi(materialId, runId, questionId, { operationId, text, source = "text", expectedVersion = null }) {
-  const body = { operation_id: operationId, text, source };
-  if (expectedVersion !== null && expectedVersion !== undefined) body.expected_version = expectedVersion;
+function requiredExpectedVersion(expectedVersion) {
+  if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {
+    throw new TypeError("A current question attempt version is required.");
+  }
+  return expectedVersion;
+}
+
+export async function submitReasoningApi(
+  materialId,
+  runId,
+  questionId,
+  { operationId, text, source = "text", expectedVersion }
+) {
+  const body = {
+    operation_id: operationId,
+    text,
+    source,
+    expected_version: requiredExpectedVersion(expectedVersion)
+  };
   return await apiFetch(`${reasoningPath(materialId, runId, questionId)}/reasoning`, {
     method: "POST", body: JSON.stringify(body)
   });
 }
 
-export async function retryReasoningApi(materialId, runId, questionId, operationId, expectedVersion = null) {
-  const body = { operation_id: operationId };
-  if (expectedVersion !== null && expectedVersion !== undefined) body.expected_version = expectedVersion;
+export async function retryReasoningApi(materialId, runId, questionId, operationId, expectedVersion) {
+  const body = { operation_id: operationId, expected_version: requiredExpectedVersion(expectedVersion) };
   return await apiFetch(`${reasoningPath(materialId, runId, questionId)}/reasoning/retry`, {
     method: "POST", body: JSON.stringify(body)
   });
 }
 
-export async function skipQuizQuestionApi(materialId, runId, questionId, operationId, expectedVersion = null) {
-  const body = { operation_id: operationId };
-  if (expectedVersion !== null && expectedVersion !== undefined) body.expected_version = expectedVersion;
+export async function skipQuizQuestionApi(materialId, runId, questionId, operationId, expectedVersion) {
+  const body = { operation_id: operationId, expected_version: requiredExpectedVersion(expectedVersion) };
   return await apiFetch(`${reasoningPath(materialId, runId, questionId)}/skip`, {
     method: "POST", body: JSON.stringify(body)
   });
 }
 
-export async function submitReasoningAnswerApi(materialId, runId, questionId, { operationId, answer, expectedVersion = null }) {
-  const body = { operation_id: operationId, answer };
-  if (expectedVersion !== null && expectedVersion !== undefined) body.expected_version = expectedVersion;
+export async function submitReasoningAnswerApi(materialId, runId, questionId, { operationId, answer, expectedVersion }) {
+  const body = {
+    operation_id: operationId,
+    answer,
+    expected_version: requiredExpectedVersion(expectedVersion)
+  };
   return await apiFetch(`${reasoningPath(materialId, runId, questionId)}/answer`, {
     method: "POST", body: JSON.stringify(body)
   });
 }
 
-export async function retryReasoningFeedbackApi(materialId, runId, questionId, operationId, expectedVersion = null) {
-  const body = { operation_id: operationId };
-  if (expectedVersion !== null && expectedVersion !== undefined) body.expected_version = expectedVersion;
+export async function retryReasoningFeedbackApi(materialId, runId, questionId, operationId, expectedVersion) {
+  const body = { operation_id: operationId, expected_version: requiredExpectedVersion(expectedVersion) };
   return await apiFetch(`${reasoningPath(materialId, runId, questionId)}/feedback/retry`, {
     method: "POST", body: JSON.stringify(body)
   });

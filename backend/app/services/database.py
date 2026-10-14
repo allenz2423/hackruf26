@@ -139,7 +139,8 @@ async def recover_interrupted_jobs(database: SQLiteDatabase) -> None:
     async with database.acquire() as connection:
         async with connection.transaction():
             await connection.execute(
-                "UPDATE upload_documents SET status = 'failed', failure_code = 'generation_interrupted', "
+                "UPDATE upload_documents SET status = 'failed', "
+                "failure_code = 'generation_interrupted', "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE status = 'generating'"
             )
             await connection.execute(
@@ -149,7 +150,8 @@ async def recover_interrupted_jobs(database: SQLiteDatabase) -> None:
                 "WHERE processing_status = 'processing'"
             )
             await connection.execute(
-                "UPDATE course_notes SET status = 'failed', failure_code = 'processing_interrupted', "
+                "UPDATE course_notes SET status = 'failed', "
+                "failure_code = 'processing_interrupted', "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE status = 'processing'"
             )
             await connection.execute(
@@ -200,6 +202,10 @@ async def _add_missing_columns(connection: aiosqlite.Connection) -> None:
             "sources_outdated": "INTEGER NOT NULL DEFAULT 0",
             "sources_missing": "INTEGER NOT NULL DEFAULT 0",
             "context_truncated": "INTEGER NOT NULL DEFAULT 0",
+        },
+        "quiz_reasoning_metrics": {
+            "latency_median_ms": "REAL NOT NULL DEFAULT 0",
+            "latency_p95_ms": "REAL NOT NULL DEFAULT 0",
         },
     }.items():
         cursor = await connection.execute(f"PRAGMA table_info({table})")

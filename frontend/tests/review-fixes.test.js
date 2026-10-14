@@ -7,6 +7,7 @@ import { citedPdfUrl } from "../src/file-preview.js";
 import { quizTutorContext, readQuizTutorContext } from "../src/quiz-tutor-context.js";
 import { renderQuizPlayer } from "../src/quiz-player.js";
 import { sourceCitationHtml, sourceWarningsHtml } from "../src/source-citations.js";
+import { submitReasoningApi } from "../src/api.js";
 
 function globals(t, values) {
   for (const [key, value] of Object.entries(values)) {
@@ -15,6 +16,29 @@ function globals(t, values) {
     t.after(() => previous ? Object.defineProperty(globalThis, key, previous) : delete globalThis[key]);
   }
 }
+
+test("Reasoning Mode API mutations require and send the current attempt version", async (t) => {
+  const requests = [];
+  globals(t, {
+    fetch: async (path, options) => {
+      requests.push({ path, body: JSON.parse(options.body) });
+      return { ok: true, status: 200, text: async () => "{}" };
+    }
+  });
+
+  await assert.rejects(
+    submitReasoningApi("material", "run", "question", {
+      operationId: "operation", text: "A thought", expectedVersion: undefined
+    }),
+    /current question attempt version is required/
+  );
+  assert.equal(requests.length, 0);
+
+  await submitReasoningApi("material", "run", "question", {
+    operationId: "operation", text: "A thought", expectedVersion: 7
+  });
+  assert.equal(requests[0].body.expected_version, 7);
+});
 
 test("congested frame samples are dropped and the next current sample can send", (t) => {
   globals(t, { WebSocket: { OPEN: 1 } });

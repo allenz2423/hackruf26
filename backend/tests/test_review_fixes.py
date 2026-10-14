@@ -340,6 +340,8 @@ class SourceLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         "sources_outdated",
                         "sources_missing",
                         "context_truncated",
+                        "latency_median_ms",
+                        "latency_p95_ms",
                     )
                 )
             )
@@ -367,6 +369,9 @@ class SourceLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await upgraded.execute(
                     "SELECT sources_outdated, sources_missing, context_truncated FROM "
                     "study_materials"
+                )
+                await upgraded.execute(
+                    "SELECT latency_median_ms, latency_p95_ms FROM quiz_reasoning_metrics"
                 )
             finally:
                 await upgraded.close()

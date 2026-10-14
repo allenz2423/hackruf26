@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+from app.api.quiz_attempts import _record_metric
 from app.config import Settings
 from app.main import create_app
 from app.services.quiz_reasoning import ReasoningDecision, ReasoningFeedback
@@ -118,9 +119,37 @@ class ReasoningQuizApiTests(unittest.TestCase):
         return response.json()
 
     def submit_reasoning(self, run_id, text, *, operation_id=None):
+        attempt = self.current_attempt(run_id)
         return self.client.post(
             f"/api/study-materials/{self.material_id}/runs/{run_id}/questions/{self.question['id']}/reasoning",
-            json={"operation_id": operation_id or str(uuid4()), "text": text, "source": "text"},
+            json={
+                "operation_id": operation_id or str(uuid4()),
+                "text": text,
+                "source": "text",
+                "expected_version": attempt["version"],
+            },
+        )
+
+    def current_attempt(self, run_id):
+        response = self.client.get(f"/api/study-materials/{self.material_id}/runs/{run_id}")
+        self.assertEqual(response.status_code, 200, response.text)
+        return next(
+            attempt
+            for attempt in response.json()["attempts"]
+            if attempt["question_id"] == self.question["id"]
+        )
+
+    def submit_answer(self, run_id, answer, *, operation_id=None, **options):
+        attempt = self.current_attempt(run_id)
+        return self.client.post(
+            f"/api/study-materials/{self.material_id}/runs/{run_id}"
+            f"/questions/{self.question['id']}/answer",
+            json={
+                "operation_id": operation_id or str(uuid4()),
+                "answer": answer,
+                "expected_version": attempt["version"],
+                **options,
+            },
         )
 
     def test_reasoning_acceptance_is_independent_from_answer_correctness_and_snapshots_freeze(self):
@@ -132,7 +161,8 @@ class ReasoningQuizApiTests(unittest.TestCase):
         base += f"/questions/{self.question['id']}"
 
         locked = self.client.post(
-            f"{base}/answer", json={"operation_id": str(uuid4()), "answer": "b"}
+            f"{base}/answer",
+            json={"operation_id": str(uuid4()), "answer": "b", "expected_version": 0},
         )
         self.assertEqual(locked.status_code, 409)
         self.assertEqual(locked.json()["code"], "reasoning_required")
@@ -158,8 +188,14 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.assertEqual(revised.json()["accepted_through_turn"], accepted_through)
         self.assertEqual(len(revised.json()["reasoning_turns"]), 2)
 
+        answer_operation_id = str(uuid4())
         submitted = self.client.post(
-            f"{base}/answer", json={"operation_id": str(uuid4()), "answer": "b"}
+            f"{base}/answer",
+            json={
+                "operation_id": answer_operation_id,
+                "answer": "b",
+                "expected_version": revised.json()["version"],
+            },
         )
         self.assertEqual(submitted.status_code, 200, submitted.text)
         result = submitted.json()
@@ -168,6 +204,16 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.assertEqual(result["submitted_through_turn"], 2)
         self.assertEqual(result["feedback_status"], "pending")
         self.assertEqual(len(result["reasoning_turns"]), 2)
+        replayed_answer = self.client.post(
+            f"{base}/answer",
+            json={
+                "operation_id": answer_operation_id,
+                "answer": "b",
+                "expected_version": 0,
+            },
+        )
+        self.assertEqual(replayed_answer.status_code, 200, replayed_answer.text)
+        self.assertEqual(replayed_answer.json()["final_answer"], "b")
         refreshed = self.client.get(
             f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
         ).json()
@@ -185,7 +231,8 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.assertEqual(run["mode"], "reasoning")
 
         duplicate = self.client.post(
-            f"{base}/answer", json={"operation_id": str(uuid4()), "answer": "a"}
+            f"{base}/answer",
+            json={"operation_id": str(uuid4()), "answer": "a", "expected_version": 0},
         )
         self.assertEqual(duplicate.status_code, 409)
 
@@ -231,13 +278,23 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.assertEqual(len(attempt["reasoning_turns"]), 1)
 
         self.service.failure = False
+        retry_operation_id = str(uuid4())
         retry = self.client.post(
             f"/api/study-materials/{self.material_id}/runs/{run['run_id']}/questions/{self.question['id']}/reasoning/retry",
-            json={"operation_id": str(uuid4())},
+            json={
+                "operation_id": retry_operation_id,
+                "expected_version": self.current_attempt(run["run_id"])["version"],
+            },
         )
         self.assertEqual(retry.status_code, 200, retry.text)
         self.assertEqual(retry.json()["state"], "reasoning_accepted")
         self.assertEqual(len(retry.json()["reasoning_turns"]), 1)
+        retry_replay = self.client.post(
+            f"/api/study-materials/{self.material_id}/runs/{run['run_id']}/questions/{self.question['id']}/reasoning/retry",
+            json={"operation_id": retry_operation_id, "expected_version": 1},
+        )
+        self.assertEqual(retry_replay.status_code, 200, retry_replay.text)
+        self.assertEqual(retry_replay.json()["state"], "reasoning_accepted")
 
     def test_skip_wins_against_a_late_evaluator_result(self):
         started, release = threading.Event(), threading.Event()
@@ -256,7 +313,14 @@ class ReasoningQuizApiTests(unittest.TestCase):
             )
             self.assertEqual(conflict.status_code, 409)
             self.assertEqual(conflict.json()["code"], "evaluation_in_progress")
-            skipped = self.client.post(f"{base}/skip", json={"operation_id": str(uuid4())})
+            skip_operation_id = str(uuid4())
+            skipped = self.client.post(
+                f"{base}/skip",
+                json={
+                    "operation_id": skip_operation_id,
+                    "expected_version": self.current_attempt(run["run_id"])["version"],
+                },
+            )
             self.assertEqual(skipped.status_code, 200, skipped.text)
             self.assertEqual(skipped.json()["state"], "skipped")
             release.set()
@@ -265,6 +329,12 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.assertEqual(late.json()["state"], "skipped")
         self.assertEqual(len(late.json()["reasoning_turns"]), 1)
         self.assertNotIn("correct", late.json())
+        replay = self.client.post(
+            f"{base}/skip",
+            json={"operation_id": skip_operation_id, "expected_version": 1},
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["state"], "skipped")
 
     def test_feedback_failure_keeps_grade_and_retry_does_not_resubmit_or_regrade(self):
         self.service.decisions = [
@@ -275,14 +345,8 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.assertEqual(accepted.json()["state"], "reasoning_accepted")
 
         self.service.feedback_failure = True
-        answer_path = (
-            f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
-            f"/questions/{self.question['id']}/answer"
-        )
         operation_id = str(uuid4())
-        submitted = self.client.post(
-            answer_path, json={"operation_id": operation_id, "answer": "b"}
-        )
+        submitted = self.submit_answer(run["run_id"], "b", operation_id=operation_id)
         self.assertEqual(submitted.status_code, 200, submitted.text)
         self.assertEqual(submitted.json()["state"], "completed")
         self.assertFalse(submitted.json()["correct"])
@@ -298,7 +362,13 @@ class ReasoningQuizApiTests(unittest.TestCase):
             f"/questions/{self.question['id']}/feedback/retry"
         )
         retry_id = str(uuid4())
-        retried = self.client.post(feedback_path, json={"operation_id": retry_id})
+        retried = self.client.post(
+            feedback_path,
+            json={
+                "operation_id": retry_id,
+                "expected_version": self.current_attempt(run["run_id"])["version"],
+            },
+        )
         self.assertEqual(retried.status_code, 200, retried.text)
         self.assertEqual(retried.json()["feedback_status"], "pending")
         refreshed_retry = self.client.get(
@@ -315,7 +385,11 @@ class ReasoningQuizApiTests(unittest.TestCase):
             ),
             1,
         )
-        self.client.post(feedback_path, json={"operation_id": retry_id})
+        replay = self.client.post(
+            feedback_path,
+            json={"operation_id": retry_id, "expected_version": 0},
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
         self.assertEqual(len(self.service.feedback_contexts), 2)
 
     def test_standard_mode_keeps_legacy_grader_and_runs_are_independent(self):
@@ -373,10 +447,17 @@ class ReasoningQuizApiTests(unittest.TestCase):
             f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
             f"/questions/{self.question['id']}/reasoning"
         )
+        missing_version = self.client.post(
+            path,
+            json={"operation_id": str(uuid4()), "text": "The kernel handles hardware."},
+        )
+        self.assertEqual(missing_version.status_code, 400)
+
+        operation_id = str(uuid4())
         stale = self.client.post(
             path,
             json={
-                "operation_id": str(uuid4()),
+                "operation_id": operation_id,
                 "text": "The kernel handles hardware.",
                 "source": "text",
                 "expected_version": 99,
@@ -388,7 +469,7 @@ class ReasoningQuizApiTests(unittest.TestCase):
         valid = self.client.post(
             path,
             json={
-                "operation_id": str(uuid4()),
+                "operation_id": operation_id,
                 "text": "The kernel handles hardware.",
                 "source": "text",
                 "expected_version": 0,
@@ -398,10 +479,27 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.assertEqual(valid.json()["state"], "reasoning_accepted")
         self.assertGreater(valid.json()["version"], 0)
 
+        replay = self.client.post(
+            path,
+            json={
+                "operation_id": operation_id,
+                "text": "The kernel handles hardware.",
+                "source": "text",
+                "expected_version": 0,
+            },
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["state"], "reasoning_accepted")
+
         answer_path = (
             f"/api/study-materials/{self.material_id}/runs/{run['run_id']}"
             f"/questions/{self.question['id']}/answer"
         )
+        missing_answer_version = self.client.post(
+            answer_path,
+            json={"operation_id": str(uuid4()), "answer": "a"},
+        )
+        self.assertEqual(missing_answer_version.status_code, 400)
         stale_answer = self.client.post(
             answer_path,
             json={
@@ -414,11 +512,10 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.assertEqual(stale_answer.json()["code"], "version_conflict")
 
     def test_exact_median_and_p95_latency_tracking_and_metrics_endpoint(self):
-        self.service.decisions = [
-            ReasoningDecision(status="sufficient", reason="Attempt 1", follow_up=None),
-        ]
-        run = self.create_run()
-        self.submit_reasoning(run["run_id"], "First turn explanation.")
+        self.client.portal.call(
+            self._record_latency_samples,
+            [0, 20, 30, 40],
+        )
 
         metrics = self.client.get("/api/quiz-reasoning/metrics")
         self.assertEqual(metrics.status_code, 200)
@@ -427,8 +524,17 @@ class ReasoningQuizApiTests(unittest.TestCase):
         today_metrics = items[0]
         self.assertIn("latency_median_ms", today_metrics)
         self.assertIn("latency_p95_ms", today_metrics)
-        self.assertGreaterEqual(today_metrics["latency_median_ms"], 0)
-        self.assertGreaterEqual(today_metrics["latency_p95_ms"], 0)
+        self.assertEqual(today_metrics["latency_median_ms"], 25)
+        self.assertEqual(today_metrics["latency_p95_ms"], 40)
+
+    async def _record_latency_samples(self, samples):
+        database = self.client.app.state.database
+        async with database.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute("DELETE FROM quiz_reasoning_latency_samples")
+                await connection.execute("DELETE FROM quiz_reasoning_metrics")
+                for latency in samples:
+                    await _record_metric(connection, latency_ms=latency)
 
     def test_wait_for_feedback_flag_returns_available_synchronously(self):
         self.service.decisions = [
@@ -445,6 +551,7 @@ class ReasoningQuizApiTests(unittest.TestCase):
             json={
                 "operation_id": str(uuid4()),
                 "answer": "a",
+                "expected_version": self.current_attempt(run["run_id"])["version"],
                 "wait_for_feedback": True,
             },
         )

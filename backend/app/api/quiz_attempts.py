@@ -40,13 +40,13 @@ class ReasoningSubmission(BaseModel):
     operation_id: UUID
     text: str = Field(min_length=1, max_length=12_000)
     source: Literal["text", "voice"] = "text"
-    expected_version: int | None = Field(default=None, ge=0)
+    expected_version: int = Field(ge=0)
 
 
 class OperationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     operation_id: UUID
-    expected_version: int | None = Field(default=None, ge=0)
+    expected_version: int = Field(ge=0)
     wait_for_feedback: bool = Field(default=False)
 
 
@@ -60,8 +60,8 @@ def _digest(value: object) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _check_expected_version(expected: int | None, actual: int) -> None:
-    if expected is not None and actual != expected:
+def _check_expected_version(expected: int, actual: int) -> None:
+    if actual != expected:
         raise ApiError(
             409,
             "version_conflict",
@@ -296,30 +296,33 @@ async def _record_metric(
         int(retry),
         latency_ms,
     )
-    if latency_ms > 0:
+    await conn.execute(
+        "INSERT INTO quiz_reasoning_latency_samples (metric_date, latency_ms) VALUES (?1, ?2)",
+        day,
+        max(0, latency_ms),
+    )
+    sample_rows = await conn.fetch(
+        "SELECT latency_ms FROM quiz_reasoning_latency_samples "
+        "WHERE metric_date = ?1 ORDER BY latency_ms ASC",
+        day,
+    )
+    if sample_rows:
+        samples = [int(r["latency_ms"]) for r in sample_rows]
+        n = len(samples)
+        median_ms = (
+            (samples[n // 2 - 1] + samples[n // 2]) / 2
+            if n % 2 == 0
+            else samples[n // 2]
+        )
+        p95_idx = min(n - 1, max(0, int(math.ceil(0.95 * n)) - 1))
+        p95_ms = samples[p95_idx]
         await conn.execute(
-            "INSERT INTO quiz_reasoning_latency_samples (metric_date, latency_ms) VALUES (?1, ?2)",
-            day,
-            latency_ms,
-        )
-        sample_rows = await conn.fetch(
-            "SELECT latency_ms FROM quiz_reasoning_latency_samples "
-            "WHERE metric_date = ?1 ORDER BY latency_ms ASC",
+            "UPDATE quiz_reasoning_metrics SET latency_median_ms = ?1, latency_p95_ms = ?2 "
+            "WHERE metric_date = ?3",
+            median_ms,
+            p95_ms,
             day,
         )
-        if sample_rows:
-            samples = [int(r["latency_ms"]) for r in sample_rows]
-            n = len(samples)
-            median_ms = samples[n // 2]
-            p95_idx = min(n - 1, max(0, int(math.ceil(0.95 * n)) - 1))
-            p95_ms = samples[p95_idx]
-            await conn.execute(
-                "UPDATE quiz_reasoning_metrics SET latency_median_ms = ?1, latency_p95_ms = ?2 "
-                "WHERE metric_date = ?3",
-                median_ms,
-                p95_ms,
-                day,
-            )
 
 
 async def _complete_run_if_ready(
@@ -674,7 +677,6 @@ async def submit_reasoning(
             attempt = await conn.fetchrow(
                 "SELECT * FROM quiz_question_attempts WHERE id = ?1", attempt["id"]
             )
-            _check_expected_version(payload.expected_version, int(attempt["version"]))
             existing = await conn.fetchrow(
                 "SELECT * FROM quiz_reasoning_turns WHERE attempt_id = ?1 AND operation_id = ?2",
                 attempt["id"],
@@ -688,6 +690,7 @@ async def submit_reasoning(
                         "This reasoning request ID was already used with different content.",
                     )
                 return await _attempt_payload(conn, attempt["id"], question)
+            _check_expected_version(payload.expected_version, int(attempt["version"]))
             if attempt["state"] in {"submitted", "completed", "skipped"}:
                 raise ApiError(
                     409, "attempt_terminal", "This question attempt is already finished."
@@ -844,13 +847,13 @@ async def retry_reasoning(
             current = await conn.fetchrow(
                 "SELECT * FROM quiz_question_attempts WHERE id = ?1", attempt["id"]
             )
-            _check_expected_version(payload.expected_version, int(current["version"]))
             if current["state"] == "skipped":
                 raise ApiError(409, "attempt_terminal", "This question was skipped.")
             if current["state"] == "evaluating_reasoning":
                 raise ApiError(
                     409, "evaluation_in_progress", "A reasoning check is already running."
                 )
+            _check_expected_version(payload.expected_version, int(current["version"]))
             if current["state"] != "reasoning_failed":
                 raise ApiError(
                     409, "retry_not_available", "Retry is available after a failed reasoning check."
@@ -914,12 +917,12 @@ async def skip_question(
             current = await conn.fetchrow(
                 "SELECT * FROM quiz_question_attempts WHERE id = ?1", attempt["id"]
             )
-            _check_expected_version(payload.expected_version, int(current["version"]))
             if current["state"] == "skipped":
                 if current["skip_operation_id"] != operation_id:
                     # A distinct confirmation cannot change an already recorded skip.
                     return await _attempt_payload(conn, attempt["id"], question)
                 return await _attempt_payload(conn, attempt["id"], question)
+            _check_expected_version(payload.expected_version, int(current["version"]))
             if current["state"] in {"submitted", "completed"}:
                 raise ApiError(409, "attempt_terminal", "A submitted question cannot be skipped.")
             pending_operation = current["active_evaluation_operation_id"]
@@ -1015,7 +1018,6 @@ async def submit_final_answer(
             current = await conn.fetchrow(
                 "SELECT * FROM quiz_question_attempts WHERE id = ?1", attempt["id"]
             )
-            _check_expected_version(payload.expected_version, int(current["version"]))
             if current["answer_operation_id"] is not None:
                 if (
                     current["answer_operation_id"] != operation_id
@@ -1025,6 +1027,7 @@ async def submit_final_answer(
                         409, "answer_immutable", "This question already has a submitted answer."
                     )
                 return await _attempt_payload(conn, attempt["id"], question)
+            _check_expected_version(payload.expected_version, int(current["version"]))
             if current["state"] != "reasoning_accepted":
                 raise ApiError(
                     409,
