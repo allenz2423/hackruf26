@@ -78,12 +78,14 @@ test("failed guide viewer labels provisional content and offers no exports", () 
     };
     const viewer = openMaterialViewer(material);
     assert.equal(viewer.isOpen, true);
+    assert.match(viewer.dialog.className, /material-dialog-resizable/);
     assert.match(viewer.dialog.root.innerHTML, /Generation stopped before the guide was saved/);
     assert.match(viewer.dialog.root.innerHTML, /partial preview is not saved or export-checked/);
     assert.match(viewer.dialog.root.innerHTML, /Provisional section text/);
     assert.doesNotMatch(viewer.dialog.root.innerHTML, /data-download-guide/);
 
     const emptyViewer = openMaterialViewer({ ...material, previewContent: null });
+    assert.match(emptyViewer.dialog.className, /material-dialog-resizable/);
     assert.match(emptyViewer.dialog.root.innerHTML, /No preview was saved before generation stopped/);
   } finally {
     if (priorDocument === undefined) delete globalThis.document;

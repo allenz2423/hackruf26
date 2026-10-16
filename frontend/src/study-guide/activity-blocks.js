@@ -828,15 +828,20 @@ function mountPythonAlgorithm(card) {
   const host = card.querySelector("[data-python-activity-mount]");
   if (!block || !host) return;
   mountGuideLibrary(card, async () => {
-    const [{ mountPythonActivity }, state, view, pythonLanguage] = await Promise.all([
+    const [{ mountPythonActivity }, state, view, language, highlight, pythonLanguage] = await Promise.all([
       import("./libraries/python-activity.js"),
       import("@codemirror/state"),
       import("@codemirror/view"),
+      import("@codemirror/language"),
+      import("@lezer/highlight"),
       import("@codemirror/lang-python")
     ]);
     const codeMirrorLoader = async () => ({
       EditorState: state.EditorState,
       EditorView: view.EditorView,
+      HighlightStyle: language.HighlightStyle,
+      syntaxHighlighting: language.syntaxHighlighting,
+      tags: highlight.tags,
       python: pythonLanguage.python
     });
     return mountPythonActivity(host, block, { codeMirrorLoader });

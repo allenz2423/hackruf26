@@ -37,7 +37,10 @@ export function renderPythonActivity(block) {
   return `<section class="python-algorithm-activity" data-python-activity aria-label="${safeTitle}">
     <h3>${safeTitle}</h3>
     <p>${safeAlt}</p>
-    <div data-python-editor aria-label="Read-only Python example"></div>
+    <div class="python-code-window" role="group" aria-label="Python code example">
+      <div class="python-code-toolbar" aria-hidden="true"><span class="python-code-window-dots"><i></i><i></i><i></i></span><span class="python-code-filename">example.py</span><span class="python-code-language">Python</span><span class="python-code-readonly">Read only</span></div>
+      <div class="python-code-editor" data-python-editor aria-label="Read-only Python example"></div>
+    </div>
     <details><summary>Text version of the Python example</summary><pre><code>${safeCode}</code></pre></details>
     <p>Input: <code>${args}</code></p>
     <button type="button" data-python-run>Run this fixed example</button>
@@ -100,8 +103,27 @@ export function mountPythonActivity(container, block, {
   shell.setAttribute("aria-label", normalized.title);
   const heading = createText(doc.createElement("h3"), normalized.title);
   const description = createText(doc.createElement("p"), normalized.alt_text);
+  const codeWindow = doc.createElement("div");
+  codeWindow.className = "python-code-window";
+  codeWindow.setAttribute("role", "group");
+  codeWindow.setAttribute("aria-label", "Python code example");
+  const toolbar = doc.createElement("div");
+  toolbar.className = "python-code-toolbar";
+  toolbar.setAttribute("aria-hidden", "true");
+  const dots = doc.createElement("span");
+  dots.className = "python-code-window-dots";
+  for (let index = 0; index < 3; index += 1) dots.append(doc.createElement("i"));
+  const filename = createText(doc.createElement("span"), "example.py");
+  filename.className = "python-code-filename";
+  const language = createText(doc.createElement("span"), "Python");
+  language.className = "python-code-language";
+  const readOnly = createText(doc.createElement("span"), "Read only");
+  readOnly.className = "python-code-readonly";
+  toolbar.append(dots, filename, language, readOnly);
   const editorHost = doc.createElement("div");
+  editorHost.className = "python-code-editor";
   editorHost.setAttribute("aria-label", "Read-only Python example");
+  codeWindow.append(toolbar, editorHost);
   const textDetails = doc.createElement("details");
   const summary = createText(doc.createElement("summary"), "Text version of the Python example");
   const code = doc.createElement("pre");
@@ -124,7 +146,7 @@ export function mountPythonActivity(container, block, {
   const fallback = createText(doc.createElement("p"), "This interactive trace is unavailable. The Python example and input above remain available as text.");
   fallback.hidden = true;
 
-  shell.append(heading, description, editorHost, textDetails, input, runButton, cancelButton, status, output, fallback);
+  shell.append(heading, description, codeWindow, textDetails, input, runButton, cancelButton, status, output, fallback);
   container.replaceChildren(shell);
 
   let disposed = false;
@@ -143,12 +165,34 @@ export function mountPythonActivity(container, block, {
     try {
       const cm = await codeMirrorLoader();
       if (disposed || !cm?.EditorView || !cm?.EditorState || typeof cm?.python !== "function") return;
+      const editorTheme = cm.HighlightStyle?.define && cm.syntaxHighlighting && cm.tags
+        ? [
+          cm.syntaxHighlighting(cm.HighlightStyle.define([
+            { tag: cm.tags.keyword, color: "#ff7b72" },
+            { tag: cm.tags.definition(cm.tags.variableName), color: "#d2a8ff" },
+            { tag: cm.tags.function(cm.tags.variableName), color: "#d2a8ff" },
+            { tag: cm.tags.string, color: "#a5d6ff" },
+            { tag: cm.tags.number, color: "#79c0ff" },
+            { tag: cm.tags.bool, color: "#79c0ff" },
+            { tag: cm.tags.comment, color: "#8b949e", fontStyle: "italic" },
+            { tag: cm.tags.operator, color: "#ff7b72" },
+            { tag: cm.tags.typeName, color: "#ffa657" },
+            { tag: cm.tags.propertyName, color: "#e6edf3" }
+          ])),
+          cm.EditorView.theme({
+            "&": { color: "#e6edf3", backgroundColor: "#0d1117" },
+            ".cm-content": { caretColor: "transparent" },
+            ".cm-focused": { outline: "none" }
+          }, { dark: true })
+        ]
+        : [];
       editorView = new cm.EditorView({
         state: cm.EditorState.create({
           doc: getTrustedPythonProgram(normalized.parameters.algorithm),
           extensions: [
             ...(cm.basicSetup ? [cm.basicSetup] : []),
             cm.python(),
+            ...editorTheme,
             cm.EditorView.editable.of(false),
             cm.EditorView.contentAttributes.of({
               "aria-label": `${normalized.title} Python example, read only`,

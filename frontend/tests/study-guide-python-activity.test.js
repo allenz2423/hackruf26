@@ -41,6 +41,10 @@ test("Python code is selected from checked-in templates and render fallback is e
   const html = renderPythonActivity({ ...activity, title: "<script>alert(1)</script>" });
   assert.match(html, /&lt;script&gt;/);
   assert.doesNotMatch(html, /<script>/);
+  assert.match(html, /class="python-code-window" role="group"/);
+  assert.match(html, /class="python-code-toolbar"/);
+  assert.match(html, /example\.py/);
+  assert.match(html, /class="python-code-editor" data-python-editor/);
   assert.match(html, /Text version of the Python example/);
   assert.match(html, /Run this fixed example/);
 });

@@ -2997,6 +2997,29 @@ main {
   width: min(760px, calc(100vw - 32px));
 }
 
+.material-dialog-resizable {
+  display: flex;
+  width: min(900px, calc(100vw - 32px));
+  height: min(86dvh, 900px);
+  min-width: min(320px, calc(100vw - 24px));
+  min-height: min(300px, calc(100dvh - 24px));
+  max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - 16px);
+  flex-direction: column;
+  overflow: hidden;
+  resize: both;
+}
+
+.material-dialog-resizable .preview-header {
+  flex: 0 0 auto;
+}
+
+.material-dialog-resizable .material-session {
+  min-height: 0;
+  max-height: none;
+  flex: 1 1 auto;
+}
+
 .preview-header {
   display: flex;
   align-items: flex-start;
@@ -3044,6 +3067,7 @@ main {
   flex-direction: column;
   border: 0;
   border-radius: 0;
+  resize: none;
 }
 
 .material-dialog:fullscreen .material-session,
@@ -3052,6 +3076,16 @@ main {
   max-height: none;
   flex: 1 1 auto;
   padding: clamp(var(--space-4), 4vw, var(--space-8));
+}
+
+@media (max-width: 560px) {
+  .material-dialog-resizable {
+    width: calc(100vw - 20px);
+    height: calc(100dvh - 20px);
+    min-width: 0;
+    min-height: 0;
+    resize: none;
+  }
 }
 
 .preview-content,
@@ -3195,6 +3229,153 @@ main {
 
 .guide-block-paragraph p:last-child {
   margin-bottom: 0;
+}
+
+.python-algorithm-activity {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.python-algorithm-activity h3,
+.python-algorithm-activity p {
+  margin: 0;
+}
+
+.python-code-window {
+  overflow: hidden;
+  border: 1px solid #30363d;
+  border-radius: var(--radius-md);
+  background: #0d1117;
+  color: #e6edf3;
+  color-scheme: dark;
+  box-shadow: 0 8px 22px rgb(15 23 42 / 12%);
+}
+
+.python-code-toolbar {
+  display: flex;
+  min-height: 2.5rem;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.45rem 0.8rem;
+  border-bottom: 1px solid #30363d;
+  background: #161b22;
+  color: #9da7b3;
+  font: 500 0.75rem/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.python-code-window-dots {
+  display: inline-flex;
+  gap: 0.32rem;
+}
+
+.python-code-window-dots i {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: #484f58;
+}
+
+.python-code-window-dots i:first-child { background: #ff6b62; }
+.python-code-window-dots i:nth-child(2) { background: #f5c451; }
+.python-code-window-dots i:nth-child(3) { background: #42c77a; }
+
+.python-code-filename {
+  color: #e6edf3;
+}
+
+.python-code-language {
+  margin-left: auto;
+  padding: 0.2rem 0.45rem;
+  border: 1px solid #30363d;
+  border-radius: 999px;
+  color: #9da7b3;
+}
+
+.python-code-readonly {
+  color: #8b949e;
+}
+
+.python-code-editor {
+  min-height: 2.75rem;
+  overflow: auto;
+  background: #0d1117;
+  color: #e6edf3;
+  font: 0.875rem/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.python-code-editor .cm-editor {
+  min-height: 2.75rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.python-code-editor .cm-scroller {
+  overflow: auto;
+  font: inherit;
+}
+
+.python-code-editor .cm-content {
+  min-height: 2.75rem;
+  padding: 0.8rem 0;
+  counter-reset: code-line;
+  caret-color: transparent;
+}
+
+.python-code-editor .cm-line {
+  position: relative;
+  min-width: max-content;
+  padding: 0 1rem 0 4rem;
+  color: #e6edf3;
+  white-space: pre;
+}
+
+.python-code-editor .cm-line::before {
+  position: absolute;
+  left: 0;
+  width: 3rem;
+  border-right: 1px solid #30363d;
+  color: #6e7681;
+  content: counter(code-line);
+  counter-increment: code-line;
+  padding-right: 0.7rem;
+  text-align: right;
+  user-select: none;
+}
+
+.python-code-editor .cm-cursor,
+.python-code-editor .cm-dropCursor {
+  display: none !important;
+}
+
+.python-algorithm-activity details {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.python-algorithm-activity details summary {
+  padding: 0.65rem 0.8rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.python-algorithm-activity details pre {
+  overflow: auto;
+  margin: 0;
+  padding: 0.9rem 1rem;
+  border-top: 1px solid var(--line);
+  background: #0d1117;
+  color: #e6edf3;
+  font: 0.875rem/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.python-algorithm-activity > p code {
+  padding: 0.12rem 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  background: var(--surface-muted);
+  font: 0.9em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 .guide-formula-block,

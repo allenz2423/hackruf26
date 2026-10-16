@@ -7,9 +7,10 @@ import { downloadStudyFileApi } from "./api.js";
 import { normalizeGuideBlocks } from "./study-guide/normalize.js";
 import { mountStudyGuideBlocks, renderStudyGuideBlock } from "./study-guide/force-components.js";
 
-function addDialog(title) {
+function addDialog(title, { resizable = false } = {}) {
   const dialog = document.createElement("dialog");
-  dialog.className = "dialog material-dialog";
+  dialog.className = `dialog material-dialog${resizable ? " material-dialog-resizable" : ""}`;
+  if (resizable) dialog.setAttribute("title", "Drag the lower-right corner to resize this study guide");
   dialog.setAttribute("aria-labelledby", "material-dialog-title");
   dialog.innerHTML = `
     <header class="preview-header">
@@ -417,7 +418,7 @@ function renderQuestions(root, material, onReturn = null) {
 }
 
 export function openMaterialViewer(material, { onRetry = null } = {}) {
-  const dialog = addDialog(material.type || "Study material");
+  const dialog = addDialog(material.type || "Study material", { resizable: material.type === "Study guide" });
   const root = dialog.querySelector("#material-session");
   let currentMaterial = material;
 
