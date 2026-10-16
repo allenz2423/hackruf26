@@ -18,7 +18,7 @@ WORKDIR /app
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
-        ca-certificates util-linux libreoffice-impress poppler-utils fonts-liberation \
+        ca-certificates util-linux libreoffice-impress poppler-utils fonts-liberation librsvg2-bin \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/pyproject.toml backend/README.md /app/backend/
