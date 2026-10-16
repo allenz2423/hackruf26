@@ -110,6 +110,26 @@ test("malformed and oversized structured sections fall back to their body", () =
   }
 });
 
+test("study guide prose renders inline code and fenced code as escaped IDE-style blocks", () => {
+  const html = renderStudyGuideBlock({
+    type: "paragraph",
+    text: "Use `iter_seq(i)` to read values.\n\n```python\nfor value in values:\n    print(value)\n```\n\nTildes work too:\n~~~js\nconst value = 1;\n~~~"
+  });
+  assert.match(html, /<code class="guide-inline-code">iter_seq\(i\)<\/code>/);
+  assert.match(html, /class="guide-code-window" role="group" aria-label="python code example"/);
+  assert.match(html, /example\.python/);
+  assert.match(html, /class="guide-code-line-number" aria-hidden="true">2/);
+  assert.match(html, /class="guide-code-window" role="group" aria-label="js code example"/);
+  assert.match(html, /class="guide-code-line-text">const value = 1;/);
+});
+
+test("labeled Markdown math fences still render as math blocks", () => {
+  const html = renderStudyGuideBlock({ type: "paragraph", text: "```math\nx^2 + y^2 = 1\n```" });
+  assert.match(html, /class="guide-fenced-math"/);
+  assert.match(html, /class="tex-math is-display"/);
+  assert.doesNotMatch(html, /guide-code-window/);
+});
+
 test("all fixed visual templates normalize and render without generated markup", () => {
   const blocks = [
     { type: "paragraph", text: "A paragraph <img src=x onerror=alert(1)>" },

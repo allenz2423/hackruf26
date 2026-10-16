@@ -1,6 +1,7 @@
 import { escapeHtml } from "../ui.js";
 import { displayMathHtml, mathHtml, typesetMath } from "../math.js";
 import { mountAdditionalGuideBlocks, renderAdditionalGuideBlock } from "./activity-blocks.js";
+import { renderStudyGuideText } from "./text-renderer.js";
 
 let instanceCount = 0;
 
@@ -111,14 +112,14 @@ function forceCard(block) {
 
 export function renderStudyGuideBlock(block) {
   if (block.type === "paragraph") {
-    return `<div class="guide-block-paragraph">${block.text.split(/\n{2,}/).filter(Boolean).map((paragraph) => `<p>${mathHtml(paragraph.trim()).replace(/\n/g, "<br>")}</p>`).join("")}</div>`;
+    return `<div class="guide-block-paragraph">${renderStudyGuideText(block.text)}</div>`;
   }
   if (block.type === "formula") {
     const definitions = block.definitions.length ? `<dl class="guide-formula-definitions">${block.definitions.map((item) => `<div><dt>${mathHtml(item.symbol)}</dt><dd>${mathHtml(item.meaning)}${item.unit ? ` <span>(${mathHtml(item.unit)})</span>` : ""}</dd></div>`).join("")}</dl>` : "";
     return `<div class="guide-formula-block"><div class="guide-formula-expression">${displayMathHtml(block.expression)}</div>${definitions}</div>`;
   }
   if (block.type === "takeaway") {
-    return `<aside class="guide-takeaway"><strong>Key takeaway</strong><p>${mathHtml(block.text)}</p></aside>`;
+    return `<aside class="guide-takeaway"><strong>Key takeaway</strong>${renderStudyGuideText(block.text)}</aside>`;
   }
   if (block.type === "interactive_model" && block.template_id === "force_components_v1") {
     return forceCard(block);

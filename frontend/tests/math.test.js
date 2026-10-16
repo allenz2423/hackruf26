@@ -28,6 +28,15 @@ test("recognises the other delimiters", () => {
   );
 });
 
+test("Markdown backtick spans stay code instead of being parsed as math", () => {
+  const html = mathHtml("Call `iter_seq(i)` and ``set_at(i, `value`)``; ignore `<img src=x onerror=alert(1)>`.");
+  assert.match(html, /<code class="guide-inline-code">iter_seq\(i\)<\/code>/);
+  assert.match(html, /<code class="guide-inline-code">set_at\(i, `value`\)<\/code>/);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(html, /<img src=/);
+  assert.doesNotMatch(html, /class="tex-math/);
+});
+
 test("prices and stray dollar signs stay plain text", () => {
   for (const text of [
     "It costs $5 and $10 in total.",
@@ -115,7 +124,7 @@ test("detects bare TeX inline in prose without consuming the surrounding words",
   assert.equal(segments.map((segment) => segment.raw ?? segment.value).join(""), inline);
 });
 
-test("renders math emitted in code fences, inline code, HTML entities, and double-escaped TeX", () => {
+test("renders math fences while preserving inline code, HTML entities, and double-escaped TeX", () => {
   const samples = [
     "```latex\n\\sigma_{max}=3\n```",
     "Use `\\tau_{xy}` here.",
@@ -124,7 +133,8 @@ test("renders math emitted in code fences, inline code, HTML entities, and doubl
     "\\begin{alignat}{2}x&=1&y&=2\\end{alignat}",
   ];
   assert.deepEqual(kinds(samples[0]), ["D:\\sigma_{max}=3"]);
-  assert.deepEqual(kinds(samples[1]), ["T:Use ", "I:\\tau_{xy}", "T: here."]);
+  assert.deepEqual(kinds(samples[1]), ["T:Use ", "T:\\tau_{xy}", "T: here."]);
+  assert.equal(splitMath(samples[1])[1].type, "code");
   assert.deepEqual(kinds(samples[2]), ["I:\\sigma_{max} = 3"]);
   assert.deepEqual(kinds(samples[3]), ["I:\\nu"]);
 

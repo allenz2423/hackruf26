@@ -3241,7 +3241,8 @@ main {
   margin: 0;
 }
 
-.python-code-window {
+.python-code-window,
+.guide-code-window {
   overflow: hidden;
   border: 1px solid #30363d;
   border-radius: var(--radius-md);
@@ -3251,7 +3252,8 @@ main {
   box-shadow: 0 8px 22px rgb(15 23 42 / 12%);
 }
 
-.python-code-toolbar {
+.python-code-toolbar,
+.guide-code-toolbar {
   display: flex;
   min-height: 2.5rem;
   align-items: center;
@@ -3301,6 +3303,54 @@ main {
   background: #0d1117;
   color: #e6edf3;
   font: 0.875rem/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.guide-code-pre {
+  max-height: 32rem;
+  overflow: auto;
+  margin: 0;
+  padding: 0.75rem 0;
+  background: #0d1117;
+  color: #e6edf3;
+  font: 0.875rem/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  tab-size: 4;
+}
+
+.guide-code-pre code {
+  display: block;
+  min-width: max-content;
+}
+
+.guide-code-line {
+  display: flex;
+  min-height: 1.65em;
+}
+
+.guide-code-line-number {
+  position: sticky;
+  left: 0;
+  flex: 0 0 3.2rem;
+  padding: 0 0.7rem 0 0.3rem;
+  border-right: 1px solid #30363d;
+  background: #0d1117;
+  color: #6e7681;
+  text-align: right;
+  user-select: none;
+}
+
+.guide-code-line-text {
+  padding: 0 1rem;
+  white-space: pre;
+}
+
+.guide-inline-code {
+  padding: 0.08rem 0.3rem;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  background: color-mix(in srgb, var(--primary) 7%, var(--surface-muted));
+  color: var(--text);
+  font: 0.9em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
 }
 
 .python-code-editor .cm-editor {

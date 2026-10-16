@@ -250,6 +250,29 @@ function findMathFence(text, start) {
   return { end: start + match[0].length, raw: match[0], tex: match[2].trim() };
 }
 
+function findInlineCodeSpan(text, start) {
+  let delimiterEnd = start;
+  while (text[delimiterEnd] === "`") delimiterEnd += 1;
+  const delimiterLength = delimiterEnd - start;
+  if (!delimiterLength) return null;
+
+  let cursor = delimiterEnd;
+  while (cursor < text.length) {
+    const next = text.indexOf("`", cursor);
+    if (next === -1) return null;
+    let runEnd = next;
+    while (text[runEnd] === "`") runEnd += 1;
+    if (runEnd - next === delimiterLength) {
+      let value = text.slice(delimiterEnd, next);
+      if (value.includes("\n") || value.includes("\r")) return null;
+      if (/^ .* $/.test(value) && /[^ ]/.test(value)) value = value.slice(1, -1);
+      return { end: runEnd, value };
+    }
+    cursor = runEnd;
+  }
+  return null;
+}
+
 function stripMathDelimiters(value) {
   const trimmed = String(value ?? "").trim();
   const wrappers = [
@@ -481,14 +504,11 @@ export function splitMath(text) {
       plain += "$";
       index += 2;
     } else if (source[index] === "`") {
-      const end = source.indexOf("`", index + 1);
-      const candidate = end > index + 1 ? source.slice(index + 1, end) : "";
-      if (end !== -1 && !candidate.includes("\n") && looksLikeMathSource(candidate)
-        && pushMath(source.slice(index, end + 1), normalizeBareMath(stripMathDelimiters(candidate)), false)) {
-        index = end + 1;
-      } else if (end !== -1 && !candidate.includes("\n")) {
-        plain += source.slice(index, end + 1);
-        index = end + 1;
+      const codeSpan = findInlineCodeSpan(source, index);
+      if (codeSpan) {
+        flush();
+        segments.push({ type: "code", value: codeSpan.value });
+        index = codeSpan.end;
       } else {
         plain += source[index];
         index += 1;
@@ -590,6 +610,7 @@ export function mathHtml(text) {
   return splitMath(text)
     .map((segment) => {
       if (segment.type === "text") return escapeHtml(segment.value);
+      if (segment.type === "code") return `<code class="guide-inline-code">${escapeHtml(segment.value)}</code>`;
       return `<span class="tex-math${segment.display ? " is-display" : ""}" data-display="${segment.display ? "1" : "0"}" data-tex="${escapeHtml(segment.tex)}">${escapeHtml(segment.raw)}</span>`;
     })
     .join("");
