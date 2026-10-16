@@ -151,28 +151,35 @@ Organize the guide into ordered sections with descriptive headings, concise expl
 relevant key terms. Do not prefix headings with section numbers; the PDF adds section numbering.
 New guides use schema version 2 and ordered blocks, not a separately written
 section body. The section object has only these keys: id, heading, body, key_terms, sources, and
-blocks. Each block has only these keys: id, type, text, expression, definitions, template_id, title,
-parameters, alt_text, fallback_text, steps, and sources. Use null for unused optional scalar fields
+blocks. Each block has only these keys: id, type, text, expression, definitions, template_id, svg,
+title, parameters, alt_text, fallback_text, steps, and sources. Use null for unused optional scalar fields
 and empty arrays for unused list fields. Do not add placeholder or explanatory keys such as
 text_placeholder. Use paragraph blocks for prose, formula blocks for source-supported expressions,
-takeaway blocks for concise recaps, example_steps blocks for short ordered worked examples, and
-`labeled_diagram` or `interactive_model` blocks when a fixed activity fits the source.
+takeaway blocks for concise recaps, example_steps blocks for short ordered worked examples,
+`labeled_diagram` or `interactive_model` blocks when a fixed activity fits the source, and
+`svg_diagram` blocks for original subject-specific drawings when no fixed activity fits.
 A block may contain only the fields allowed for its type: paragraph and takeaway blocks use id,
 type, text, and sources; formula blocks use id, type, expression, definitions, and sources;
 example_steps blocks use id, type, title, steps, and sources; each step uses only title,
 explanation, and expression;
 labeled_diagram and interactive_model blocks use id, type, title, template_id, parameters, alt_text,
-fallback_text, and sources. Never add step-level sources or metadata such as steps_sources_note.
+fallback_text, and sources; `svg_diagram` blocks use id, type, title, svg, alt_text, fallback_text,
+and sources. Never add step-level sources or metadata such as steps_sources_note.
 A formula block's expression contains the math source only, without surrounding dollar signs or
 display delimiters. Each section must cite at least one supplied source and use only its upload_id
 and locator details that are actually present. Avoid repeating the same material across sections.
-Choose an activity only when it directly teaches a concept supported by the selected sources; if no
-activity fits, keep the section textual. Interactive and diagram blocks must use only fixed,
-app-owned templates and the exact schema-bounded parameters; the server supplies optional
-template-specific instructions when requested during the draft. Do not invent a template, parameter,
-chemical structure, or model behavior. Never emit HTML, SVG, CSS, JavaScript, URLs, a LaTeX
-document, package declarations, file commands, or custom macros; the backend and browser own
-rendering.
+Choose visuals only when they directly explain concepts supported by the selected sources. When a
+fixed tool fits, use it; otherwise draw an original, self-contained SVG in a `svg_diagram` block.
+The compact registry lists every available tool; template-specific instructions when requested
+during drafting are provided to the revision. Detailed instructions are optional: the output schema
+already allows every registered tool, including original SVG diagrams, without a prior request.
+For custom SVG, draw the actual labeled geometry or animation instead of asking the reader to
+imagine it. Include an SVG `title`, `desc`, readable labels, and `viewBox`, plus the required
+external `title`, `alt_text`, and `fallback_text` fields. Keep a meaningful still frame for print.
+The browser displays only sanitized, script-free SVG; never include scripts, JavaScript, event
+handlers, embedded HTML, CSS/style attributes, external resources, or URLs. Do not invent source
+facts or numerical values. Never emit a LaTeX document, package declarations, file commands, or
+custom macros; the backend owns document rendering.
 
 For mathematical notation, use standard inline LaTeX inside $...$ or display LaTeX inside $$...$$.
 Keep prose outside math delimiters, close every delimiter, and check that no sentence has been

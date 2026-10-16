@@ -4,6 +4,8 @@ import {
   animalCellFallback
 } from "./animal-cell-data.js";
 import { samplingDemoAltText, samplingDemoFallback } from "./sampling-demo.js";
+import { normalizePythonAlgorithmBlock } from "./libraries/python-activity-contract.js";
+import { sanitizeSvgMarkup, svgHasAnimation } from "./safe-svg.js";
 
 const MAX_BLOCK_TEXT = 10_000;
 
@@ -63,6 +65,18 @@ function normalizeBlock(block, section, sectionIndex, blockIndex) {
       || steps.reduce((total, step) => total + step.title.length + step.explanation.length + step.expression.length, 0) > 4_000) return null;
     return { id, type: "example_steps", title: block.title, steps, sources };
   }
+  if (block.type === "svg_diagram") {
+    if (!boundedText(block.title, 200) || !boundedText(block.alt_text, 500)
+      || !boundedText(block.fallback_text, 5_000)
+      || typeof block.svg !== "string" || block.svg.length > 60_000) return null;
+    const svgMarkup = sanitizeSvgMarkup(block.svg, { idPrefix: `normalized-${id}`, altText: block.alt_text });
+    if (!svgMarkup) return unavailableBlock(block, id, sources);
+    return {
+      id, type: "svg_diagram", title: block.title, svg_markup: svgMarkup,
+      alt_text: block.alt_text, fallback_text: block.fallback_text,
+      animated: svgHasAnimation(svgMarkup), sources
+    };
+  }
   if (block.type === "labeled_diagram") {
     const moleculeId = block.parameters?.molecule_id;
     if (block.template_id === "process_pathway_v1") {
@@ -98,6 +112,18 @@ function normalizeBlock(block, section, sectionIndex, blockIndex) {
         sources
       };
     }
+    if (block.template_id === "molecule_3d_v1") {
+      if (!["water", "carbon_dioxide", "methane", "ammonia"].includes(moleculeId)) {
+        return unavailableBlock(block, id, sources);
+      }
+      return {
+        id, type: "labeled_diagram", template_id: "molecule_3d_v1", molecule_id: moleculeId,
+        title: boundedText(block.title, 200) ? block.title : "Explore a 3D molecular model",
+        alt_text: boundedText(block.alt_text, 500) ? block.alt_text : "A rotatable idealized 3D molecular geometry.",
+        fallback_text: boundedText(block.fallback_text, 5_000) ? block.fallback_text : section.body,
+        sources
+      };
+    }
     if (block.template_id !== "molecule_2d_v1" || !["water", "carbon_dioxide", "methane", "ammonia"].includes(moleculeId)) {
       return unavailableBlock(block, id, sources);
     }
@@ -112,6 +138,8 @@ function normalizeBlock(block, section, sectionIndex, blockIndex) {
   if (block.type === "interactive_model") {
     const parameters = block.parameters;
     let normalizedParameters;
+    let pythonTitle = null;
+    let pythonAltText = null;
     if (block.template_id === "force_components_v1") {
       if (!finiteBetween(parameters?.force_n, 0, 1000) || !matchesStep(parameters.force_n, 1)
         || !finiteBetween(parameters?.angle_deg, 0, 90) || !matchesStep(parameters.angle_deg, 1)) return null;
@@ -164,6 +192,67 @@ function normalizeBlock(block, section, sectionIndex, blockIndex) {
       normalizedParameters = {
         method, sample_size: sampleSize, seed, random_assignment: randomAssignment
       };
+    } else if (block.template_id === "graph_traversal_v1") {
+      const graph = parameters;
+      if (!graph || typeof graph !== "object" || Array.isArray(graph)
+        || Object.keys(graph).some((key) => !["algorithm", "start_node", "nodes", "edges"].includes(key))) return null;
+      const nodes = graph.nodes;
+      const edges = graph.edges;
+      if (!Array.isArray(nodes) || nodes.length < 2 || nodes.length > 24
+        || !Array.isArray(edges) || edges.length < 1 || edges.length > 48) return null;
+      const nodeIds = new Set();
+      const normalizedNodes = nodes.map((node) => {
+        if (!node || typeof node !== "object" || Array.isArray(node)
+          || typeof node.id !== "string" || !/^[A-Za-z0-9_-]{1,40}$/u.test(node.id)
+          || nodeIds.has(node.id) || !boundedText(node.label, 80)
+          || (node.description !== undefined && node.description !== "" && !boundedText(node.description, 240))) return null;
+        nodeIds.add(node.id);
+        return { id: node.id, label: node.label.trim(), description: typeof node.description === "string" ? node.description.trim() : "" };
+      });
+      if (normalizedNodes.some((node) => node === null)
+        || !["bfs", "dfs"].includes(graph.algorithm)
+        || typeof graph.start_node !== "string" || !nodeIds.has(graph.start_node)) return null;
+      const edgeIds = new Set();
+      const normalizedEdges = edges.map((edge) => {
+        if (!edge || typeof edge !== "object" || Array.isArray(edge)
+          || typeof edge.source !== "string" || typeof edge.target !== "string"
+          || !nodeIds.has(edge.source) || !nodeIds.has(edge.target)) return null;
+        const pair = `${edge.source}\u0000${edge.target}`;
+        if (edgeIds.has(pair)) return null;
+        edgeIds.add(pair);
+        return { source: edge.source, target: edge.target };
+      });
+      if (normalizedEdges.some((edge) => edge === null)) return null;
+      normalizedParameters = {
+        algorithm: graph.algorithm,
+        start_node: graph.start_node,
+        nodes: normalizedNodes,
+        edges: normalizedEdges
+      };
+    } else if (block.template_id === "stress_cube_3d_v1") {
+      const matrix = parameters?.stress_mpa;
+      if (!Array.isArray(matrix) || matrix.length !== 3
+        || matrix.some((row) => !Array.isArray(row) || row.length !== 3
+          || row.some((value) => !finiteBetween(value, -1000, 1000)))) return null;
+      if (Math.abs(matrix[0][1] - matrix[1][0]) > 1e-8
+        || Math.abs(matrix[0][2] - matrix[2][0]) > 1e-8
+        || Math.abs(matrix[1][2] - matrix[2][1]) > 1e-8) return null;
+      normalizedParameters = { stress_mpa: matrix.map((row) => [...row]) };
+    } else if (block.template_id === "python_algorithm_trace_v1") {
+      try {
+        const normalized = normalizePythonAlgorithmBlock(block);
+        normalizedParameters = normalized.parameters;
+        pythonTitle = normalized.title;
+        pythonAltText = normalized.alt_text;
+      } catch {
+        return null;
+      }
+    } else if (block.template_id === "simcir_circuit_v1") {
+      const circuitId = parameters?.circuit_id;
+      if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)
+        || Object.keys(parameters).some((key) => key !== "circuit_id")
+        || !["and_gate", "or_gate", "half_adder"].includes(circuitId)) return null;
+      normalizedParameters = { circuit_id: circuitId };
     } else {
       return unavailableBlock(block, id, sources);
     }
@@ -171,9 +260,9 @@ function normalizeBlock(block, section, sectionIndex, blockIndex) {
       id,
       type: "interactive_model",
       template_id: block.template_id,
-      title: boundedText(block.title, 200) ? block.title : "Explore this model",
+      title: pythonTitle || (boundedText(block.title, 200) ? block.title : "Explore this model"),
       parameters: normalizedParameters,
-      alt_text: boundedText(block.alt_text, 500) ? block.alt_text : "An interactive educational model.",
+      alt_text: pythonAltText || (boundedText(block.alt_text, 500) ? block.alt_text : "An interactive educational model."),
       fallback_text: boundedText(block.fallback_text, 5_000) ? block.fallback_text : section.body,
       sources
     };

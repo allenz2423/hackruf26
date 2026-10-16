@@ -3885,6 +3885,49 @@ main {
   margin: var(--space-1) 0 0;
 }
 
+.authored-svg-model {
+  overflow: hidden;
+}
+
+.authored-svg-figure {
+  margin: 0.75rem 0 0;
+}
+
+.authored-svg-frame {
+  max-height: 680px;
+  overflow: auto;
+  border: 1px solid var(--line-strong, #d7deea);
+  border-radius: 0.75rem;
+  background: #fff;
+  padding: clamp(0.5rem, 2vw, 1rem);
+}
+
+.authored-svg-frame svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 180px;
+  max-height: 640px;
+  margin-inline: auto;
+}
+
+.authored-svg-figure figcaption {
+  margin-top: 0.5rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.authored-svg-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.authored-svg-model > .activity-intro {
+  margin: 0.75rem 0 0;
+}
+
 @media (max-width: 700px) {
   .activity-layout {
     grid-template-columns: minmax(0, 1fr);

@@ -23,11 +23,16 @@ from app.config import REPOSITORY_ROOT, Settings
 from app.services.guide_templates import (
     ANIMAL_CELL_LIMITATION,
     ANIMAL_CELL_ORGANELLES,
+    MOLECULE_3D_CATALOG,
     MOLECULES,
     animal_cell_map_alt_text,
     binary_search_trace,
+    _graph_traversal,
+    _stress_state,
     guide_block_alt_text,
     guide_block_fallback,
+    _python_algorithm_trace,
+    _simcir_truth_table,
     sampling_demo_result,
 )
 
@@ -1034,6 +1039,57 @@ def _animal_cell_picture(block: StudyGuideBlock) -> str:
     return "\n".join(pieces)
 
 
+def _stress_cube_picture(block: StudyGuideBlock) -> str:
+    """Draw a static axonometric cube, its shear cut, and distinct n/τ arrows."""
+    state = _stress_state(block.parameters.stress_mpa)
+
+    def project(point: list[float]) -> tuple[float, float]:
+        x, y, z = point
+        return 52 + 17 * (y - x), 44 + 8.5 * (x + y) - 17 * z
+
+    vertices = [[x, y, z] for x in (-1.0, 1.0) for y in (-1.0, 1.0) for z in (-1.0, 1.0)]
+    vertex_indices = {tuple(point): index for index, point in enumerate(vertices)}
+    edges: list[tuple[int, int]] = []
+    for index, point in enumerate(vertices):
+        for axis in range(3):
+            other = list(point)
+            other[axis] *= -1
+            other_index = vertex_indices[tuple(other)]
+            if other_index > index:
+                edges.append((index, other_index))
+
+    pieces = [r"\setlength{\unitlength}{1mm}", r"\begin{picture}(104,88)"]
+    pieces.extend(_picture_line(project(vertices[first]), project(vertices[second])) for first, second in edges)
+    plane = state["plane_vertices"]
+    if len(plane) >= 3:
+        pieces.append(r"\linethickness{0.6mm}")
+        pieces.extend(
+            _picture_line(project(plane[index]), project(plane[(index + 1) % len(plane)]))
+            for index in range(len(plane))
+        )
+        pieces.append(r"\linethickness{0.2mm}")
+    center = [sum(point[axis] for point in plane) / len(plane) for axis in range(3)] if plane else [0, 0, 0]
+    normal = state["normal"]
+    shear = state["shear"]
+    shear_length = math.sqrt(sum(value * value for value in shear))
+    shear_direction = [value / shear_length for value in shear] if shear_length > 1e-12 else [0, 0, 0]
+    second_direction = state["second_principal_direction"]
+    shear_start = [center[index] + 0.3 * second_direction[index] for index in range(3)]
+    normal_end = [center[index] + 1.15 * normal[index] for index in range(3)]
+    shear_end = [shear_start[index] + 1.05 * shear_direction[index] for index in range(3)]
+    pieces.extend(
+        [
+            _picture_arrow(project(center), project(normal_end)),
+            _picture_arrow(project(shear_start), project(shear_end)),
+            r"\put(76,75){$n$}",
+            r"\put(80,62){$\tau$}",
+            r"\put(9,6){x-y-z axes; tension positive}",
+            r"\end{picture}",
+        ]
+    )
+    return "\n".join(piece for piece in pieces if piece)
+
+
 def _render_guide_block(
     block: StudyGuideBlock, render_math: bool, strict_math: bool = False
 ) -> list[str]:
@@ -1195,6 +1251,138 @@ def _render_guide_block(
             ]
         )
         return lines
+    if block.type == "interactive_model" and block.template_id == "graph_traversal_v1":
+        parameters = block.parameters.model_dump(mode="json")
+        labels = {node["id"]: node["label"] for node in parameters["nodes"]}
+        traversal_ids, unreachable_ids = _graph_traversal(parameters)
+        lines = [
+            r"\paragraph{" + escape_latex(block.title or "Graph traversal") + "}",
+            r"\textbf{Algorithm:} " + parameters["algorithm"].upper()
+            + r". \textbf{Start node:} " + escape_latex(labels[parameters["start_node"]]) + ".",
+            r"\textbf{Traversal order}",
+            r"\begin{enumerate}",
+        ]
+        lines.extend(r"\item " + escape_latex(labels[node_id]) for node_id in traversal_ids)
+        lines.append(r"\end{enumerate}")
+        if unreachable_ids:
+            lines.extend([r"\textbf{Unreachable from start:} " + ", ".join(
+                escape_latex(labels[node_id]) for node_id in unreachable_ids
+            ) + "."])
+        lines.extend([r"\textbf{Directed edges}", r"\begin{itemize}"])
+        lines.extend(
+            r"\item " + escape_latex(labels[edge["source"]]) + r" $\rightarrow$ "
+            + escape_latex(labels[edge["target"]])
+            for edge in parameters["edges"]
+        )
+        lines.extend(
+            [
+                r"\end{itemize}",
+                inline(guide_block_fallback(block.model_dump(mode="json"))),
+                inline("Text alternative: " + guide_block_alt_text(block.model_dump(mode="json"))),
+            ]
+        )
+        return lines
+    if block.type == "interactive_model" and block.template_id == "stress_cube_3d_v1":
+        parameters = block.parameters
+        state = _stress_state(parameters.stress_mpa)
+        matrix_lines = [
+            r"\begin{center}\begin{tabular}{c|rrr}",
+            r"$\sigma$ (MPa) & x & y & z \\",
+        ]
+        for axis, row in zip("xyz", parameters.stress_mpa, strict=True):
+            matrix_lines.append(
+                axis + " & " + " & ".join(_picture_number(value) for value in row) + r" \\"
+            )
+        matrix_lines.append(r"\end{tabular}\end{center}")
+        sigma1, sigma2, sigma3 = state["principal_stresses"]
+        normal = ", ".join(_picture_number(value) for value in state["normal"])
+        shear = ", ".join(_picture_number(value) for value in state["shear"])
+        return [
+            r"\paragraph{" + escape_latex(block.title or "3D stress cube") + "}",
+            *matrix_lines,
+            r"\begin{center}" + _stress_cube_picture(block) + r"\end{center}",
+            inline(
+                f"Principal stresses: σ₁={_picture_number(sigma1)} MPa, "
+                f"σ₂={_picture_number(sigma2)} MPa, σ₃={_picture_number(sigma3)} MPa."
+            ),
+            inline(
+                f"The selected maximum-shear plane has n=({normal}), "
+                f"normal stress {_picture_number(state['normal_stress'])} MPa, and shear traction "
+                f"τ=({shear}) MPa with magnitude {_picture_number(state['shear_magnitude'])} MPa. "
+                "The principal construction is 45 degrees from the σ₁ and σ₃ directions; "
+                "the plane orientation is not unique if an extreme principal stress is repeated."
+            ),
+            inline(
+                "Tension is positive. The absolute maximum shear is half the difference "
+                "between the largest and smallest principal stresses."
+            ),
+            inline("Text alternative: " + guide_block_alt_text(block.model_dump(mode="json"))),
+        ]
+    if block.type == "interactive_model" and block.template_id == "python_algorithm_trace_v1":
+        parameters = block.parameters.model_dump(mode="json")
+        result = _python_algorithm_trace(parameters)
+        lines = [
+            r"\paragraph{" + escape_latex(block.title or "Python algorithm walkthrough") + "}",
+            r"\textbf{Fixed app-authored Python example:} "
+            + escape_latex(parameters["algorithm"].replace("_", " ")) + ".",
+            r"\textbf{Input values:} ["
+            + ", ".join(str(value) for value in parameters["values"]) + "].",
+        ]
+        if "target" in parameters:
+            lines.append(r"\textbf{Search target:} " + str(parameters["target"]) + ".")
+        lines.extend([r"\textbf{Trace}", r"\begin{enumerate}"])
+        lines.extend(r"\item " + escape_latex(step) for step in result["steps"])
+        lines.append(r"\end{enumerate}")
+        if "found_index" in result:
+            found = result["found_index"]
+            lines.append(
+                r"\textbf{Result:} "
+                + (f"target is at index {found}." if found is not None else "target is absent.")
+            )
+        else:
+            lines.append(
+                r"\textbf{Sorted values:} ["
+                + ", ".join(str(value) for value in result["sorted_values"]) + "]."
+            )
+        lines.extend(
+            [
+                inline("No model-supplied code is executed. " + guide_block_fallback(block.model_dump(mode="json"))),
+                inline("Text alternative: " + guide_block_alt_text(block.model_dump(mode="json"))),
+            ]
+        )
+        return lines
+    if block.type == "interactive_model" and block.template_id == "simcir_circuit_v1":
+        circuit_id = block.parameters.circuit_id
+        title, description = {
+            "and_gate": ("AND gate", "Output Y is 1 only when both inputs are 1."),
+            "or_gate": ("OR gate", "Output Y is 1 when at least one input is 1."),
+            "half_adder": ("Half adder", "XOR produces SUM; AND produces CARRY."),
+        }[circuit_id]
+        outputs = ("Y",) if circuit_id != "half_adder" else ("SUM", "CARRY")
+        columns = "l" * (2 + len(outputs))
+        headers = " & ".join(["A", "B", *outputs])
+        rows = _simcir_truth_table(circuit_id)
+        lines = [
+            r"\paragraph{" + escape_latex(block.title or title) + "}",
+            inline(description),
+            r"\begin{center}\begin{tabular}{" + columns + "}",
+            r"\textbf{" + headers.replace(" & ", r"} & \textbf{") + r"} \\\hline",
+        ]
+        lines.extend(
+            " & ".join(str(row[name]) for name in ("A", "B", *outputs)) + r" \\"
+            for row in rows
+        )
+        lines.extend(
+            [
+                r"\end{tabular}\end{center}",
+                escape_latex(
+                    "App-authored fixed circuit definition. "
+                    + guide_block_fallback(block.model_dump(mode="json"))
+                ),
+                inline("Text alternative: " + guide_block_alt_text(block.model_dump(mode="json"))),
+            ]
+        )
+        return lines
     if block.type == "labeled_diagram" and block.template_id == "process_pathway_v1":
         lines = [
             r"\paragraph{" + escape_latex(block.title or "Process pathway") + "}",
@@ -1220,6 +1408,24 @@ def _render_guide_block(
                 "Text alternative: " + guide_block_alt_text(block.model_dump(mode="json")),
             ),
         ]
+    if block.type == "labeled_diagram" and block.template_id == "molecule_3d_v1":
+        molecule = MOLECULE_3D_CATALOG[block.parameters.molecule_id]
+        structure = MOLECULES[block.parameters.molecule_id]
+        atoms = len(structure["atoms"])
+        bonds = len(structure["bonds"])
+        return [
+            r"\paragraph{" + escape_latex(block.title or molecule["name"]) + "}",
+            r"\textbf{Formula:} " + escape_latex(molecule["formula"]) + ".",
+            r"\textbf{Idealized geometry:} " + escape_latex(molecule["geometry"]) + ".",
+            r"\begin{itemize}",
+            r"\item " + escape_latex(molecule["description"]),
+            r"\item Connectivity: " + escape_latex(molecule["bond_description"]),
+            r"\item The fixed model contains " + str(atoms) + " atoms and " + str(bonds)
+            + " bonds. Its coordinates are idealized; this summary is not a measured structure.",
+            r"\end{itemize}",
+            inline(guide_block_fallback(block.model_dump(mode="json"))),
+            inline("Text alternative: " + guide_block_alt_text(block.model_dump(mode="json"))),
+        ]
     if block.type == "labeled_diagram" and block.template_id == "animal_cell_map_v1":
         lines = [
             r"\paragraph{" + escape_latex(block.title or "Animal-cell map") + "}",
@@ -1240,6 +1446,13 @@ def _render_guide_block(
             ]
         )
         return lines
+    if block.type == "svg_diagram":
+        return [
+            r"\paragraph{" + escape_latex(block.title or "Custom diagram") + "}",
+            r"\textit{The interactive SVG illustration is shown in the web guide.}",
+            body(block.fallback_text or block.alt_text or "Custom course diagram."),
+            inline("Text alternative: " + (block.alt_text or "Custom course diagram.")),
+        ]
     if block.type == "example_steps":
         lines = [
             r"\paragraph{" + escape_latex(block.title or "Worked example") + "}",

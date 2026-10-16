@@ -2,6 +2,9 @@ import { escapeHtml } from "../ui.js";
 import { displayMathHtml, mathHtml, typesetMath } from "../math.js";
 import { ANIMAL_CELL_LIMITATION, ANIMAL_CELL_ORGANELLES } from "./animal-cell-data.js";
 import { SAMPLING_DEMO_POPULATION, samplingDemoNumber, samplingDemoResult } from "./sampling-demo.js";
+import { sanitizeSvgMarkup } from "./safe-svg.js";
+
+let authoredSvgCount = 0;
 
 const MOLECULES = {
   water: {
@@ -358,18 +361,116 @@ function exampleStepsCard(block) {
     <p class="activity-result" data-example-status role="status" aria-live="polite">Step 1 of ${block.steps.length} is shown.</p><button class="btn btn-secondary" type="button" data-example-next${block.steps.length <= 1 ? " disabled" : ""}>Reveal next step</button></section>`;
 }
 
+function authoredSvgCard(block) {
+  const id = safeId("authored-svg");
+  const markup = sanitizeSvgMarkup(block.svg_markup, {
+    idPrefix: `guide-svg-${++authoredSvgCount}`,
+    altText: block.alt_text
+  });
+  if (!markup) {
+    return `<aside class="guide-activity-unavailable" role="note"><strong>${escapeHtml(block.title)}</strong><p>${mathHtml(block.fallback_text)}</p></aside>`;
+  }
+  const controls = block.animated
+    ? `<div class="authored-svg-controls" role="group" aria-label="Animation controls">
+        <button class="btn btn-secondary btn-small" type="button" data-svg-play>Play</button>
+        <button class="btn btn-secondary btn-small" type="button" data-svg-pause>Pause</button>
+        <button class="btn btn-secondary btn-small" type="button" data-svg-restart>Restart</button>
+      </div>`
+    : "";
+  return `<section class="study-interactive-model authored-svg-model" data-guide-activity="svg_diagram" data-activity-id="${id}" aria-labelledby="${id}-title">
+    <div class="activity-heading"><h4 id="${id}-title">${mathHtml(block.title)}</h4></div>
+    <figure class="authored-svg-figure"><div class="authored-svg-frame" data-authored-svg>${markup}</div><figcaption>${escapeHtml(block.alt_text)}</figcaption></figure>
+    ${controls}<p class="activity-intro">${mathHtml(block.fallback_text)}</p>
+  </section>`;
+}
+
 export function renderAdditionalGuideBlock(block) {
+  if (block.type === "svg_diagram") return authoredSvgCard(block);
   if (block.type === "example_steps") return exampleStepsCard(block);
   if (block.type === "labeled_diagram" && block.template_id === "animal_cell_map_v1") return animalCellMapCard(block);
   if (block.type === "labeled_diagram" && block.template_id === "process_pathway_v1") return processPathwayCard(block);
   if (block.type === "labeled_diagram" && block.template_id === "molecule_2d_v1" && MOLECULES[block.molecule_id]) return moleculeCard(block);
+  if (block.type === "labeled_diagram" && block.template_id === "molecule_3d_v1") return molecule3dCard(block);
   if (block.type !== "interactive_model") return null;
   if (block.template_id === "linear_graph_v1") return linearGraphCard(block);
   if (block.template_id === "first_order_response_v1") return responseCard(block);
   if (block.template_id === "resistor_divider_v1") return circuitCard(block);
   if (block.template_id === "binary_search_trace_v1") return binarySearchCard(block);
   if (block.template_id === "sampling_demo_v1") return samplingCard(block);
+  if (block.template_id === "graph_traversal_v1") return graphTraversalCard(block);
+  if (block.template_id === "stress_cube_3d_v1") return stressCube3dCard(block);
+  if (block.template_id === "python_algorithm_trace_v1") return pythonAlgorithmCard(block);
+  if (block.template_id === "simcir_circuit_v1") return simcirCircuitCard(block);
   return null;
+}
+
+function encodedActivityPayload(block) {
+  return escapeHtml(JSON.stringify(block));
+}
+
+function graphTraversalCard(block) {
+  const id = safeId("graph-traversal");
+  const nodeLabels = new Map(block.parameters.nodes.map((node) => [node.id, node.label]));
+  const relationships = block.parameters.edges.map(({ source, target }) =>
+    `<li>${escapeHtml(nodeLabels.get(source))} → ${escapeHtml(nodeLabels.get(target))}</li>`
+  ).join("");
+  return `<section class="study-interactive-model activity-model" data-guide-activity="graph_traversal_v1" data-activity-id="${id}" data-activity-payload="${encodedActivityPayload(block)}" aria-labelledby="${id}-title">
+    <h4 id="${id}-title">${escapeHtml(block.title)}</h4>
+    <p class="activity-intro">${escapeHtml(block.alt_text)}</p>
+    <div class="guide-graph-traversal-mount" data-graph-traversal-mount>
+      <details open><summary>Text version of this graph</summary><p>${escapeHtml(block.fallback_text)}</p><ul>${relationships}</ul></details>
+    </div>
+    ${modelText(block)}</section>`;
+}
+
+function stressCube3dCard(block) {
+  const id = safeId("stress-cube-3d");
+  return `<section class="study-interactive-model activity-model" data-guide-activity="stress_cube_3d_v1" data-activity-id="${id}" data-activity-payload="${encodedActivityPayload(block)}" aria-labelledby="${id}-title">
+    <h4 id="${id}-title">${escapeHtml(block.title)}</h4>
+    <p class="activity-intro">${escapeHtml(block.alt_text)}</p>
+    <div class="guide-stress-cube-mount" data-stress-cube-mount><p role="status">${escapeHtml(block.fallback_text)}</p></div>
+    ${modelText(block)}</section>`;
+}
+
+function molecule3dCard(block) {
+  const id = safeId("molecule-3d");
+  return `<section class="study-interactive-model activity-model" data-guide-activity="molecule_3d_v1" data-activity-id="${id}" data-activity-payload="${encodedActivityPayload(block)}" aria-labelledby="${id}-title">
+    <h4 id="${id}-title">${escapeHtml(block.title)}</h4>
+    <p class="activity-intro">${escapeHtml(block.alt_text)}</p>
+    <div class="guide-molecule-3d-mount" data-molecule-3d-mount><p role="status">${escapeHtml(block.fallback_text)}</p></div>
+    ${modelText(block)}</section>`;
+}
+
+function pythonAlgorithmCard(block) {
+  const id = safeId("python-algorithm");
+  const values = block.parameters.values.join(", ");
+  const target = Number.isInteger(block.parameters.target) ? `; target ${block.parameters.target}` : "";
+  return `<section class="study-interactive-model activity-model" data-guide-activity="python_algorithm_trace_v1" data-activity-id="${id}" data-activity-payload="${encodedActivityPayload(block)}" aria-labelledby="${id}-title">
+    <h4 id="${id}-title">${escapeHtml(block.title)}</h4>
+    <p class="activity-intro">${escapeHtml(block.alt_text)}</p>
+    <p>Example input: <code>[${escapeHtml(values)}]${escapeHtml(target)}</code></p>
+    <div class="guide-python-activity-mount" data-python-activity-mount>
+      <p role="status">${escapeHtml(block.fallback_text || "The fixed Python example can be reviewed as text if the interactive runtime is unavailable.")}</p>
+    </div>
+    ${modelText(block)}</section>`;
+}
+
+function simcirCircuitCard(block) {
+  const id = safeId("simcir-circuit");
+  return `<section class="study-interactive-model activity-model" data-guide-activity="simcir_circuit_v1" data-activity-id="${id}" data-activity-payload="${encodedActivityPayload(block)}" aria-labelledby="${id}-title">
+    <h4 id="${id}-title">${escapeHtml(block.title)}</h4>
+    <p class="activity-intro">${escapeHtml(block.alt_text)}</p>
+    <div class="guide-simcir-circuit-mount" data-simcir-circuit-mount><p role="status">${escapeHtml(block.fallback_text)}</p></div>
+    ${modelText(block)}</section>`;
+}
+
+function activityPayload(card) {
+  try {
+    const payload = JSON.parse(card.dataset.activityPayload || "null");
+    return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
+  } catch {
+    return null;
+  }
 }
 
 function clamped(value, min, max) {
@@ -675,6 +776,83 @@ function mountAnimalCellMap(card) {
   });
 }
 
+function mountGraphTraversal(card) {
+  const block = activityPayload(card);
+  const host = card.querySelector("[data-graph-traversal-mount]");
+  if (!block || !host) return;
+  mountGuideLibrary(card, async () => {
+    const [{ mountCytoscapeTraversal }, cytoscapeModule] = await Promise.all([
+      import("./libraries/cytoscape-traversal.js"),
+      import("cytoscape")
+    ]);
+    const cytoscape = cytoscapeModule.default || cytoscapeModule;
+    return mountCytoscapeTraversal(host, block, cytoscape);
+  });
+}
+
+function mountStressCube3d(card) {
+  const block = activityPayload(card);
+  const host = card.querySelector("[data-stress-cube-mount]");
+  if (!block || !host) return;
+  mountGuideLibrary(card, async () => {
+    const { mountStressCube3D } = await import("./libraries/stress-cube-3d.js");
+    let three = null;
+    try {
+      three = await import("three");
+    } catch {
+      // The app-authored SVG fallback remains usable without WebGL or the package chunk.
+    }
+    return mountStressCube3D(host, block.parameters, three);
+  });
+}
+
+function mountMolecule3d(card) {
+  const block = activityPayload(card);
+  const host = card.querySelector("[data-molecule-3d-mount]");
+  if (!block || !host) return;
+  mountGuideLibrary(card, async () => {
+    const { mountMolecule3D } = await import("./libraries/molecule-3d.js");
+    let threeMol = null;
+    try {
+      const module = await import("3dmol");
+      threeMol = module.default || module;
+    } catch {
+      // The viewer mounts its fixed SVG and text fallback when 3Dmol is unavailable.
+    }
+    return mountMolecule3D(host, block.molecule_id, threeMol);
+  });
+}
+
+function mountPythonAlgorithm(card) {
+  const block = activityPayload(card);
+  const host = card.querySelector("[data-python-activity-mount]");
+  if (!block || !host) return;
+  mountGuideLibrary(card, async () => {
+    const [{ mountPythonActivity }, state, view, pythonLanguage] = await Promise.all([
+      import("./libraries/python-activity.js"),
+      import("@codemirror/state"),
+      import("@codemirror/view"),
+      import("@codemirror/lang-python")
+    ]);
+    const codeMirrorLoader = async () => ({
+      EditorState: state.EditorState,
+      EditorView: view.EditorView,
+      python: pythonLanguage.python
+    });
+    return mountPythonActivity(host, block, { codeMirrorLoader });
+  });
+}
+
+function mountSimcirCircuit(card) {
+  const block = activityPayload(card);
+  const host = card.querySelector("[data-simcir-circuit-mount]");
+  if (!block || !host) return;
+  mountGuideLibrary(card, async () => {
+    const { mountSimcirCircuit: mountCircuit } = await import("./libraries/simcir-circuits.js");
+    return mountCircuit(host, block.parameters.circuit_id);
+  });
+}
+
 function mountExampleSteps(card) {
   const steps = [...card.querySelectorAll("[data-example-step]")];
   const next = card.querySelector("[data-example-next]");
@@ -700,6 +878,32 @@ export function mountAdditionalGuideBlocks(root) {
     else if (type === "animal_cell_map_v1") mountAnimalCellMap(card);
     else if (type === "sampling_demo_v1") mountSamplingDemo(card);
     else if (type === "process_pathway_v1") mountProcessPathway(card);
+    else if (type === "graph_traversal_v1") mountGraphTraversal(card);
+    else if (type === "stress_cube_3d_v1") mountStressCube3d(card);
+    else if (type === "molecule_3d_v1") mountMolecule3d(card);
+    else if (type === "python_algorithm_trace_v1") mountPythonAlgorithm(card);
+    else if (type === "simcir_circuit_v1") mountSimcirCircuit(card);
     else if (type === "example_steps") mountExampleSteps(card);
+    else if (type === "svg_diagram") mountAuthoredSvg(card);
   });
+}
+
+function mountAuthoredSvg(card) {
+  const svg = card.querySelector("[data-authored-svg] svg");
+  if (!svg || typeof svg.pauseAnimations !== "function") {
+    card.querySelector(".authored-svg-controls")?.remove();
+    return;
+  }
+  const controls = card.querySelector(".authored-svg-controls");
+  if (!controls) return;
+  const pause = () => svg.pauseAnimations();
+  const play = () => svg.unpauseAnimations();
+  const restart = () => {
+    svg.setCurrentTime(0);
+    svg.unpauseAnimations();
+  };
+  controls.querySelector("[data-svg-play]")?.addEventListener("click", play);
+  controls.querySelector("[data-svg-pause]")?.addEventListener("click", pause);
+  controls.querySelector("[data-svg-restart]")?.addEventListener("click", restart);
+  if (globalThis.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) pause();
 }

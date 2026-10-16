@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 from google.genai import types
@@ -483,6 +483,29 @@ class OpenAICompatibleClientTests(unittest.TestCase):
         self.assertEqual(request_count, 2)
         sleep.assert_called_once_with(60.0)
 
+    def test_sync_request_retries_gateway_error_with_backoff(self) -> None:
+        request_count = 0
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal request_count
+            request_count += 1
+            if request_count == 1:
+                return httpx.Response(502, json={"error": {"type": "bad_gateway"}})
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "ready"}, "finish_reason": "stop"}]},
+            )
+
+        client = configured_client(handler)
+        with patch("app.services.openai_compatible.time.sleep") as sleep:
+            result = client.models.generate_content(
+                model="ignored", contents="prompt", config=SimpleNamespace()
+            )
+
+        self.assertEqual(result.text, "ready")
+        self.assertEqual(request_count, 2)
+        sleep.assert_called_once_with(1.0)
+
     def test_empty_reasoning_response_preserves_token_limit_signal(self) -> None:
         def handler(_request: httpx.Request) -> httpx.Response:
             return httpx.Response(
@@ -728,3 +751,26 @@ class AsyncOpenAICompatibleClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.text, "ready")
         self.assertEqual(request_count, 2)
+
+    async def test_async_request_retries_gateway_error_with_backoff(self) -> None:
+        request_count = 0
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal request_count
+            request_count += 1
+            if request_count == 1:
+                return httpx.Response(502, json={"error": {"type": "bad_gateway"}})
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "ready"}, "finish_reason": "stop"}]},
+            )
+
+        client = configured_client(handler, asynchronous=True)
+        with patch("app.services.openai_compatible.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            result = await client.aio.models.generate_content(
+                model="ignored", contents="prompt", config=SimpleNamespace()
+            )
+
+        self.assertEqual(result.text, "ready")
+        self.assertEqual(request_count, 2)
+        sleep.assert_awaited_once_with(1.0)

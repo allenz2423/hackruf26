@@ -1,9 +1,4 @@
-"""Small discovery catalog and opt-in instructions for bounded guide activities.
-
-These are authoring capabilities, not executable model tools. The model may ask for
-specific usage instructions while drafting; the server supplies details only from this
-registry, and all generated activity data is still validated by the guide schema.
-"""
+"""Compact discovery and opt-in usage instructions for study-guide visual tools."""
 
 from __future__ import annotations
 
@@ -20,6 +15,12 @@ GuideToolId = Literal[
     "circuit_divider",
     "algorithm_trace",
     "sampling_basics",
+    "graph_traversal",
+    "stress_cube_3d",
+    "molecule_3d",
+    "python_algorithm",
+    "simcir_circuit",
+    "custom_svg",
 ]
 
 
@@ -32,6 +33,30 @@ class GuideTool:
 
 
 GUIDE_TOOLS: tuple[GuideTool, ...] = (
+    GuideTool(
+        id="custom_svg",
+        name="Custom SVG illustration and animation",
+        purpose="Draw an original labeled diagram, plot, schematic, spatial model, or animation for any subject.",
+        instructions=(
+            "This is a general drawing capability, not a fixed template. Use a `svg_diagram` "
+            "block with `title`, `alt_text`, `fallback_text`, and a complete standalone SVG "
+            "string in `svg`. Build the actual subject-specific visual yourself; do not leave "
+            "the diagram as a description for the reader to imagine. Use an SVG root with a "
+            "viewBox, and draw with paths, shapes, lines, text, groups, reusable local defs, "
+            "gradients, markers, clipping, masks, and bounded filters as useful. Include a "
+            "`title` and `desc` inside the SVG, label axes/parts/vectors clearly, and keep "
+            "critical labels readable at normal page width. You may use native SMIL `animate`, "
+            "`animateTransform`, `animateMotion`, or `set` for a conceptually meaningful "
+            "animation; use time-based starts and a clear static starting frame. The reader "
+            "adds play, pause, and restart controls, and print exports use the static frame. "
+            "SVG is declarative drawing data, not executable code: never include `script`, "
+            "event-handler attributes, `foreignObject`, `image`, links, `<style>`, a `style` "
+            "attribute, external resources, JavaScript, or URLs. Local `url(#id)` references "
+            "are allowed. Do not use Mermaid or another diagram DSL inside this field. Cite "
+            "the course source that supports the visual's claims; do not invent values or "
+            "scientific details."
+        ),
+    ),
     GuideTool(
         id="math_graph",
         name="JSXGraph function plot",
@@ -153,13 +178,82 @@ GUIDE_TOOLS: tuple[GuideTool, ...] = (
             "a production sampling method."
         ),
     ),
+    GuideTool(
+        id="graph_traversal",
+        name="Cytoscape graph traversal",
+        purpose="Explore BFS or DFS on a small, source-grounded directed graph.",
+        instructions=(
+            "Use one `interactive_model` block with template_id `graph_traversal_v1` and "
+            "parameters `{algorithm, start_node, nodes, edges}`. Algorithm is `bfs` or `dfs`; "
+            "each node is `{id,label,description?}`, with 2–24 nodes and 1–48 directed edges "
+            "`{source,target}`. IDs are unique 1–40 character letters, numbers, underscores, "
+            "or hyphens; edge endpoints and start_node must name declared nodes. Node labels are "
+            "1–80 characters and optional descriptions at most 240. Include only concepts and "
+            "connections supported by cited course material. Do not supply Cytoscape styles, "
+            "layout settings, selectors, or executable configuration."
+        ),
+    ),
+    GuideTool(
+        id="stress_cube_3d",
+        name="Three-dimensional stress cube",
+        purpose="Inspect principal stresses and the absolute maximum-shear plane for a symmetric tensor.",
+        instructions=(
+            "Use one `interactive_model` block with template_id `stress_cube_3d_v1` and "
+            "parameters `{stress_mpa:[[xx,xy,xz],[yx,yy,yz],[zx,zy,zz]]}`. Values are finite "
+            "numbers in MPa between -1000 and 1000 and the matrix must be symmetric; do not "
+            "average or otherwise repair asymmetric source values. Enter only a tensor stated "
+            "in the cited source or explicitly supplied by the user. State the tensile-positive "
+            "sign convention. The fixed activity computes principal stresses and uses "
+            "n=(e1+e3)/√2 for one absolute maximum-shear plane; when the extreme principal "
+            "stresses are equal, the selected orientation is not unique."
+        ),
+    ),
+    GuideTool(
+        id="molecule_3d",
+        name="Reviewed 3D molecule",
+        purpose="Rotate an app-authored idealized 3D geometry for four common small molecules.",
+        instructions=(
+            "Use one `labeled_diagram` block with template_id `molecule_3d_v1` and parameters "
+            "`{molecule_id}`. The only reviewed IDs are `water`, `carbon_dioxide`, `methane`, "
+            "and `ammonia`. Coordinates, atom labels, and bonds come from the fixed app catalog; "
+            "never provide SMILES, XYZ, PDB, URLs, arbitrary atom/bond arrays, or other molecule "
+            "IDs. Treat the geometry as an idealized teaching model, not a measured structure."
+        ),
+    ),
+    GuideTool(
+        id="python_algorithm",
+        name="Fixed Python algorithm walkthrough",
+        purpose="Run a reviewed search or insertion-sort example on bounded integer inputs.",
+        instructions=(
+            "Use one `interactive_model` block with template_id `python_algorithm_trace_v1` and "
+            "parameters `{algorithm, values, target}`. Algorithms are `linear_search`, "
+            "`binary_search`, and `insertion_sort`; values are 2–16 integers from -100 to 100. "
+            "Search algorithms require a target integer from -100 to 100; binary-search values "
+            "must be sorted. Insertion sort omits target. The page runs a fixed app-owned Python "
+            "program in an isolated worker. Never supply code, source, snippets, package names, "
+            "or execution commands; the model chooses only the reviewed algorithm and input data."
+        ),
+    ),
+    GuideTool(
+        id="simcir_circuit",
+        name="Simcir digital logic circuit",
+        purpose="Explore a fixed AND gate, OR gate, or half-adder circuit and its truth table.",
+        instructions=(
+            "Use one `interactive_model` block with template_id `simcir_circuit_v1` and "
+            "parameters `{circuit_id}`. The only circuit IDs are `and_gate`, `or_gate`, and "
+            "`half_adder`. The app owns all devices, gate topology, labels, and wires. Do not "
+            "provide Simcir JSON, component lists, wires, code, or arbitrary circuit settings. "
+            "Describe the Boolean behavior supported by the supplied source; this template is "
+            "a fixed digital-logic activity, not a general analog circuit editor."
+        ),
+    ),
 )
 
 _BY_ID = {tool.id: tool for tool in GUIDE_TOOLS}
 
 
 def guide_tool_catalog_prompt() -> str:
-    """Return the always-on, compact list of available guide authoring tools."""
+    """Return the short always-on catalog; full usage details stay opt-in to save context."""
     lines = [f"- {tool.id}: {tool.purpose}" for tool in GUIDE_TOOLS]
     return "Available activity tools (brief catalog):\n" + "\n".join(lines)
 

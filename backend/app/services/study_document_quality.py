@@ -125,7 +125,7 @@ def _measure_json(value: object) -> tuple[int, int]:
         if text_count > MAX_TEXT_CHARACTERS:
             raise _TextLimitExceeded
 
-    def walk(node: object, depth: int) -> None:
+    def walk(node: object, depth: int, count_text: bool = True) -> None:
         if depth > MAX_JSON_DEPTH:
             raise _NonJsonValue
         if node is None:
@@ -146,11 +146,14 @@ def _measure_json(value: object) -> tuple[int, int]:
         elif isinstance(node, str):
             if len(node) > MAX_SERIALIZED_BYTES:
                 raise _SizeLimitExceeded
-            if len(node) > MAX_TEXT_CHARACTERS:
+            if count_text and len(node) > MAX_TEXT_CHARACTERS:
                 raise _TextLimitExceeded
             try:
                 encoded = json.dumps(node, ensure_ascii=False, separators=(",", ":"))
-                add(len(encoded.encode("utf-8", errors="strict")), len(node))
+                add(
+                    len(encoded.encode("utf-8", errors="strict")),
+                    len(node) if count_text else 0,
+                )
             except (UnicodeEncodeError, ValueError) as exc:
                 raise _NonJsonValue from exc
         elif type(node) is list:
@@ -160,7 +163,7 @@ def _measure_json(value: object) -> tuple[int, int]:
             ancestors.add(marker)
             add(2 + max(0, len(node) - 1))
             for child in node:
-                walk(child, depth + 1)
+                walk(child, depth + 1, count_text)
             ancestors.remove(marker)
         elif type(node) is dict:
             marker = id(node)
@@ -176,7 +179,7 @@ def _measure_json(value: object) -> tuple[int, int]:
                     add(len(key_json.encode("utf-8", errors="strict")))
                 except (UnicodeEncodeError, ValueError) as exc:
                     raise _NonJsonValue from exc
-                walk(child, depth + 1)
+                walk(child, depth + 1, count_text and key != "svg")
             ancestors.remove(marker)
         else:
             raise _NonJsonValue
@@ -436,6 +439,8 @@ def review_study_guide_quality(content: object) -> StudyDocumentQualityReview:
             block_location = f"sections[{section_index - 1}].blocks[{block_index - 1}]"
             block_data = block.model_dump(mode="json", exclude_none=True)
             for field_path, text in _text_values(block_data):
+                if field_path == "svg":
+                    continue
                 location = f"{block_location}.{field_path}"
                 _check_math_text(
                     text,

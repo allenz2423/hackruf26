@@ -133,11 +133,33 @@ test("all fixed visual templates normalize and render without generated markup",
     ...["water", "carbon_dioxide", "methane", "ammonia"].map((molecule_id) => ({
       type: "labeled_diagram", template_id: "molecule_2d_v1", parameters: { molecule_id }
     })),
+    {
+      type: "labeled_diagram", template_id: "molecule_3d_v1", title: "Molecular geometry",
+      parameters: { molecule_id: "water" }, alt_text: "A bent water molecule in 3D."
+    },
+    {
+      type: "interactive_model", template_id: "graph_traversal_v1", title: "Signal path",
+      alt_text: "A directed graph of source-supported relationships.",
+      fallback_text: "A reaches B.",
+      parameters: {
+        algorithm: "bfs", start_node: "a",
+        nodes: [{ id: "a", label: "A", description: "Start." }, { id: "b", label: "B" }],
+        edges: [{ source: "a", target: "b" }]
+      }
+    },
+    {
+      type: "interactive_model", template_id: "stress_cube_3d_v1", title: "Maximum shear plane",
+      alt_text: "A symmetric stress tensor and its absolute maximum-shear plane.",
+      fallback_text: "Principal stresses and the plane at 45 degrees.",
+      parameters: { stress_mpa: [[30, -40, 20], [-40, -10, 80], [20, 80, 100]] }
+    },
     { type: "interactive_model", template_id: "force_components_v1", parameters: { force_n: 100, angle_deg: 30 } },
     { type: "interactive_model", template_id: "linear_graph_v1", parameters: { slope: -2, intercept: 3 } },
     { type: "interactive_model", template_id: "first_order_response_v1", parameters: { initial_value: 0, final_value: 10, time_constant_s: 2 } },
     { type: "interactive_model", template_id: "resistor_divider_v1", parameters: { voltage_v: 12, r1_ohm: 1000, r2_ohm: 2000 } },
     { type: "interactive_model", template_id: "binary_search_trace_v1", parameters: { values: [1, 4, 9, 16, 25], target: 16 } },
+    { type: "interactive_model", template_id: "python_algorithm_trace_v1", title: "Walk through binary search", parameters: { algorithm: "binary_search", values: [1, 3, 5, 7, 9], target: 7 } },
+    { type: "interactive_model", template_id: "simcir_circuit_v1", title: "Half adder logic", parameters: { circuit_id: "half_adder" } },
     { type: "interactive_model", template_id: "sampling_demo_v1", parameters: { method: "stratified", sample_size: 6, seed: 17, random_assignment: false } }
   ];
   const normalized = normalizeGuideBlocks({ ...section, blocks });
@@ -158,6 +180,38 @@ test("all fixed visual templates normalize and render without generated markup",
   assert.match(cellHtml, /Nucleus and nuclear envelope/);
   assert.match(cellHtml, /not to scale/);
   assert.doesNotMatch(cellHtml, /model-authored function|<script\b|<img\b/i);
+  assert.match(renderStudyGuideBlock(normalized.find((block) => block.template_id === "graph_traversal_v1")), /data-guide-activity="graph_traversal_v1"/);
+  assert.match(renderStudyGuideBlock(normalized.find((block) => block.template_id === "stress_cube_3d_v1")), /data-guide-activity="stress_cube_3d_v1"/);
+  assert.match(renderStudyGuideBlock(normalized.find((block) => block.template_id === "molecule_3d_v1")), /data-guide-activity="molecule_3d_v1"/);
+  assert.match(renderStudyGuideBlock(normalized.find((block) => block.template_id === "simcir_circuit_v1")), /data-guide-activity="simcir_circuit_v1"/);
+  assert.match(renderStudyGuideBlock(normalized.find((block) => block.template_id === "python_algorithm_trace_v1")), /data-guide-activity="python_algorithm_trace_v1"/);
+});
+
+test("new graph, stress, circuit, and molecule templates reject unsafe or malformed data", () => {
+  const invalid = [
+    { type: "interactive_model", template_id: "graph_traversal_v1", parameters: {
+      algorithm: "bfs", start_node: "a", nodes: [{ id: "a", label: "A" }, { id: "b", label: "B" }],
+      edges: [{ source: "a", target: "missing" }]
+    } },
+    { type: "interactive_model", template_id: "graph_traversal_v1", parameters: {
+      algorithm: "bfs", start_node: "a", nodes: [{ id: "a", label: "A" }, { id: "a", label: "Duplicate" }],
+      edges: [{ source: "a", target: "a" }]
+    } },
+    { type: "interactive_model", template_id: "stress_cube_3d_v1", parameters: {
+      stress_mpa: [[30, -40, 20], [-39, -10, 80], [20, 80, 100]]
+    } },
+    { type: "interactive_model", template_id: "stress_cube_3d_v1", parameters: {
+      stress_mpa: [[30, -40, 20], [-40, -10, 80], [20, 80, "100"]]
+    } },
+    { type: "labeled_diagram", template_id: "molecule_3d_v1", parameters: { molecule_id: "not-reviewed" } },
+    { type: "interactive_model", template_id: "simcir_circuit_v1", parameters: { circuit_id: "arbitrary_user_circuit" } },
+    { type: "interactive_model", template_id: "simcir_circuit_v1", parameters: { circuit_id: "half_adder", devices: [] } }
+  ];
+  for (const block of invalid) {
+    assert.deepEqual(normalizeGuideBlocks({ ...section, blocks: [block] }), [{
+      id: "section-1-fallback", type: "paragraph", text: section.body, sources: []
+    }]);
+  }
 });
 
 test("animal-cell map ignores model-supplied descriptions and escapes its plain-text title", () => {

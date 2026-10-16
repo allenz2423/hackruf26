@@ -53,7 +53,7 @@ class StudyGuideToolAccessTests(unittest.TestCase):
 
     def test_catalog_is_compact_and_matches_supported_registry(self) -> None:
         catalog = guide_tool_catalog_prompt()
-        self.assertEqual(len(GUIDE_TOOLS), 9)
+        self.assertEqual(len(GUIDE_TOOLS), 15)
         for tool in GUIDE_TOOLS:
             with self.subTest(tool=tool.id):
                 self.assertIn(f"- {tool.id}: {tool.purpose}", catalog)

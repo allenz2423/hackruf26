@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 import httpx
 
 MAX_PROVIDER_RESPONSE_BYTES = 64 * 1024 * 1024
-MAX_RATE_LIMIT_RETRIES = 3
+MAX_TRANSIENT_STATUS_RETRIES = 3
 PROVIDER_REQUEST_TIMEOUT_SECONDS = 300.0
 _SAFE_STATUS = re.compile(r"^[A-Z0-9_]{1,48}$")
 
@@ -559,7 +559,7 @@ class OpenAICompatibleClient:
                 follow_redirects=False,
                 transport=self._sync_transport,
             ) as client:
-                for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+                for attempt in range(MAX_TRANSIENT_STATUS_RETRIES + 1):
                     retry_after = None
                     with client.stream(
                         "POST",
@@ -573,13 +573,16 @@ class OpenAICompatibleClient:
                         payload = _read_json_limited(response)
                         if response.status_code < 400:
                             break
-                        if response.status_code == 429 and attempt < MAX_RATE_LIMIT_RETRIES:
+                        if (
+                            response.status_code in {429, 502}
+                            and attempt < MAX_TRANSIENT_STATUS_RETRIES
+                        ):
                             retry_after = _retry_after_seconds(response, attempt)
                         else:
                             fallback = (
                                 _fallback_request_body(body, payload)
                                 if response.status_code in {400, 404}
-                                and attempt < MAX_RATE_LIMIT_RETRIES
+                                and attempt < MAX_TRANSIENT_STATUS_RETRIES
                                 else None
                             )
                             if fallback is None:
@@ -609,7 +612,7 @@ class OpenAICompatibleClient:
                 follow_redirects=False,
                 transport=self._async_transport,
             ) as client:
-                for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+                for attempt in range(MAX_TRANSIENT_STATUS_RETRIES + 1):
                     retry_after = None
                     async with client.stream(
                         "POST",
@@ -623,13 +626,16 @@ class OpenAICompatibleClient:
                         payload = await _read_json_limited_async(response)
                         if response.status_code < 400:
                             break
-                        if response.status_code == 429 and attempt < MAX_RATE_LIMIT_RETRIES:
+                        if (
+                            response.status_code in {429, 502}
+                            and attempt < MAX_TRANSIENT_STATUS_RETRIES
+                        ):
                             retry_after = _retry_after_seconds(response, attempt)
                         else:
                             fallback = (
                                 _fallback_request_body(body, payload)
                                 if response.status_code in {400, 404}
-                                and attempt < MAX_RATE_LIMIT_RETRIES
+                                and attempt < MAX_TRANSIENT_STATUS_RETRIES
                                 else None
                             )
                             if fallback is None:

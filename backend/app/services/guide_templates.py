@@ -164,6 +164,40 @@ MOLECULES: dict[str, dict] = {
     },
 }
 
+# Fixed catalog mirrored by the browser's app-authored 3D molecule activity. These
+# descriptive records are not loaded from the model and do not contain geometry
+# payloads supplied by the generated guide.
+MOLECULE_3D_CATALOG: dict[str, dict[str, str]] = {
+    "water": {
+        "name": "Water",
+        "formula": "H₂O",
+        "geometry": "bent molecular geometry",
+        "description": "One oxygen atom is bonded to two hydrogen atoms in a bent arrangement.",
+        "bond_description": "Two O–H single bonds; the H–O–H arrangement is bent.",
+    },
+    "carbon_dioxide": {
+        "name": "Carbon dioxide",
+        "formula": "CO₂",
+        "geometry": "linear molecular geometry",
+        "description": "A central carbon atom forms a double bond with an oxygen atom at each end.",
+        "bond_description": "Two C=O double bonds arranged as O=C=O.",
+    },
+    "methane": {
+        "name": "Methane",
+        "formula": "CH₄",
+        "geometry": "tetrahedral molecular geometry",
+        "description": "A central carbon atom is bonded to four hydrogen atoms in a tetrahedral arrangement.",
+        "bond_description": "Four C–H single bonds arranged tetrahedrally.",
+    },
+    "ammonia": {
+        "name": "Ammonia",
+        "formula": "NH₃",
+        "geometry": "trigonal pyramidal molecular geometry",
+        "description": "A nitrogen atom is bonded to three hydrogen atoms in a trigonal pyramidal arrangement.",
+        "bond_description": "Three N–H single bonds in a trigonal pyramidal arrangement.",
+    },
+}
+
 # Fixed content is transcribed from the example Human Biology and Genetics course
 # source. It is deliberately not authored by the guide model. Coordinates are only
 # schematic placement anchors, not claims about organelle size, abundance, or location.
@@ -404,9 +438,225 @@ def _num(value: float, digits: int = 2) -> str:
     return f"{value:.{digits}f}".rstrip("0").rstrip(".") or "0"
 
 
+def _bounded_text(value: str, limit: int = 500) -> str:
+    """Keep deterministic text alternatives inside the browser activity contract."""
+    value = " ".join(value.split())
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rsplit(" ", 1)[0].rstrip(" ,;:") + "…"
+
+
+def _graph_traversal(parameters: dict) -> tuple[list[str], list[str]]:
+    nodes = parameters["nodes"]
+    adjacency = {node["id"]: [] for node in nodes}
+    for edge in parameters["edges"]:
+        adjacency[edge["source"]].append(edge["target"])
+    for neighbors in adjacency.values():
+        neighbors.sort()
+
+    visits: list[str] = []
+    seen = {parameters["start_node"]}
+    if parameters.get("algorithm", "bfs") == "dfs":
+        def visit(node_id: str) -> None:
+            visits.append(node_id)
+            for neighbor in adjacency[node_id]:
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    visit(neighbor)
+
+        visit(parameters["start_node"])
+    else:
+        queue = [parameters["start_node"]]
+        for node_id in queue:
+            visits.append(node_id)
+            for neighbor in adjacency[node_id]:
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    queue.append(neighbor)
+    unreachable = sorted(set(adjacency) - seen)
+    return visits, unreachable
+
+
+def _stress_state(stress_mpa: list[list[float]]) -> dict:
+    """Small deterministic Jacobi eigensolver for a validated symmetric 3x3 tensor."""
+    matrix = [[float(value) for value in row] for row in stress_mpa]
+    vectors = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    for _ in range(40):
+        p, q = 0, 1
+        if abs(matrix[0][2]) > abs(matrix[p][q]):
+            p, q = 0, 2
+        if abs(matrix[1][2]) > abs(matrix[p][q]):
+            p, q = 1, 2
+        off_diagonal = matrix[p][q]
+        if abs(off_diagonal) < 1e-13:
+            break
+        tau = (matrix[q][q] - matrix[p][p]) / (2 * off_diagonal)
+        tangent = (1 if tau >= 0 else -1) / (abs(tau) + math.sqrt(1 + tau * tau))
+        cosine = 1 / math.sqrt(1 + tangent * tangent)
+        sine = tangent * cosine
+        app, aqq = matrix[p][p], matrix[q][q]
+        matrix[p][p] = app - tangent * off_diagonal
+        matrix[q][q] = aqq + tangent * off_diagonal
+        matrix[p][q] = matrix[q][p] = 0.0
+        for index in range(3):
+            if index != p and index != q:
+                aip, aiq = matrix[index][p], matrix[index][q]
+                matrix[index][p] = matrix[p][index] = cosine * aip - sine * aiq
+                matrix[index][q] = matrix[q][index] = sine * aip + cosine * aiq
+            vip, viq = vectors[index][p], vectors[index][q]
+            vectors[index][p] = cosine * vip - sine * viq
+            vectors[index][q] = sine * vip + cosine * viq
+
+    eigenpairs = []
+    for index in range(3):
+        direction = [vectors[row][index] for row in range(3)]
+        norm = math.sqrt(sum(component * component for component in direction))
+        direction = [component / norm for component in direction]
+        largest_component = max(range(3), key=lambda component: abs(direction[component]))
+        if direction[largest_component] < 0:
+            direction = [-component for component in direction]
+        eigenpairs.append((matrix[index][index], direction))
+    eigenpairs.sort(key=lambda pair: pair[0], reverse=True)
+    values = [pair[0] for pair in eigenpairs]
+    e1, _e2, e3 = [pair[1] for pair in eigenpairs]
+    normal = [e1[index] + e3[index] for index in range(3)]
+    norm = math.sqrt(sum(component * component for component in normal))
+    normal = [component / norm for component in normal]
+    traction = [sum(stress_mpa[row][column] * normal[column] for column in range(3)) for row in range(3)]
+    normal_stress = sum(normal[index] * traction[index] for index in range(3))
+    shear = [traction[index] - normal_stress * normal[index] for index in range(3)]
+    shear_magnitude = math.sqrt(sum(component * component for component in shear))
+    eigenvalue_scale = max(1.0, *(abs(value) for value in values))
+    repeated_principal_tolerance = 1e-8 * eigenvalue_scale
+
+    def dot(left: list[float], right: list[float]) -> float:
+        return sum(left[index] * right[index] for index in range(3))
+
+    def subtract(left: list[float], right: list[float]) -> list[float]:
+        return [left[index] - right[index] for index in range(3)]
+
+    def cross(left: list[float], right: list[float]) -> list[float]:
+        return [
+            left[1] * right[2] - left[2] * right[1],
+            left[2] * right[0] - left[0] * right[2],
+            left[0] * right[1] - left[1] * right[0],
+        ]
+
+    vertices = [[x, y, z] for x in (-1.0, 1.0) for y in (-1.0, 1.0) for z in (-1.0, 1.0)]
+    intersections: list[list[float]] = []
+
+    def append_unique(point: list[float]) -> None:
+        if not any(math.dist(existing, point) < 1e-8 for existing in intersections):
+            intersections.append(point)
+
+    for first in range(len(vertices)):
+        for second in range(first + 1, len(vertices)):
+            a, b = vertices[first], vertices[second]
+            differing = [axis for axis in range(3) if a[axis] != b[axis]]
+            if len(differing) != 1:
+                continue
+            da, db = dot(normal, a), dot(normal, b)
+            if abs(da) < 1e-9 and abs(db) < 1e-9:
+                append_unique(a)
+                append_unique(b)
+            elif da * db <= 0:
+                fraction = da / (da - db)
+                if -1e-10 <= fraction <= 1 + 1e-10:
+                    append_unique([a[i] + fraction * (b[i] - a[i]) for i in range(3)])
+    if len(intersections) >= 3:
+        center = [sum(point[index] for point in intersections) / len(intersections) for index in range(3)]
+        reference = [1.0, 0.0, 0.0] if abs(normal[0]) < 0.8 else [0.0, 1.0, 0.0]
+        projection = dot(reference, normal)
+        u_raw = [reference[i] - projection * normal[i] for i in range(3)]
+        u_length = math.sqrt(dot(u_raw, u_raw))
+        u = [component / u_length for component in u_raw]
+        v = cross(normal, u)
+        intersections.sort(
+            key=lambda point: math.atan2(dot(subtract(point, center), v), dot(subtract(point, center), u))
+        )
+    return {
+        "principal_stresses": values,
+        "normal": normal,
+        "normal_stress": normal_stress,
+        "shear": shear,
+        "shear_magnitude": shear_magnitude,
+        "plane_vertices": intersections,
+        "second_principal_direction": eigenpairs[1][1],
+        "orientation_unique": (
+            abs(values[0] - values[1]) > repeated_principal_tolerance
+            and abs(values[1] - values[2]) > repeated_principal_tolerance
+        ),
+    }
+
+
+def _python_algorithm_trace(parameters: dict) -> dict:
+    algorithm = parameters["algorithm"]
+    values = list(parameters["values"])
+    steps: list[str] = []
+    result: dict = {"steps": steps}
+    if algorithm == "linear_search":
+        target = parameters["target"]
+        found_index = None
+        for index, value in enumerate(values):
+            steps.append(f"Check index {index}: {value}")
+            if value == target:
+                found_index = index
+                steps.append(f"Found {target} at index {index}.")
+                break
+        if found_index is None:
+            steps.append(f"{target} is not in the list.")
+        result["found_index"] = found_index
+    elif algorithm == "binary_search":
+        target = parameters["target"]
+        low, high, found_index = 0, len(values) - 1, None
+        while low <= high:
+            middle = (low + high) // 2
+            value = values[middle]
+            steps.append(f"low={low}, high={high}, middle={middle}: compare {value}")
+            if value == target:
+                found_index = middle
+                steps.append(f"Found {target} at index {middle}.")
+                break
+            if value < target:
+                low = middle + 1
+            else:
+                high = middle - 1
+        if found_index is None:
+            steps.append(f"{target} is not in the list.")
+        result["found_index"] = found_index
+    else:
+        steps.append(f"Start: {values}")
+        for index in range(1, len(values)):
+            current = values[index]
+            position = index
+            while position > 0 and values[position - 1] > current:
+                values[position] = values[position - 1]
+                position -= 1
+            values[position] = current
+            steps.append(f"Insert {current}: {values}")
+        result["sorted_values"] = values
+    return result
+
+
+def _simcir_truth_table(circuit_id: str) -> list[dict[str, int]]:
+    rows = []
+    for a in (0, 1):
+        for b in (0, 1):
+            if circuit_id == "and_gate":
+                outputs = {"Y": int(bool(a and b))}
+            elif circuit_id == "or_gate":
+                outputs = {"Y": int(bool(a or b))}
+            else:
+                outputs = {"SUM": int(a != b), "CARRY": int(bool(a and b))}
+            rows.append({"A": a, "B": b, **outputs})
+    return rows
+
+
 def guide_block_fallback(block: dict) -> str:
     """Build text available to clients that cannot render a particular template."""
     kind = block.get("type")
+    if kind == "svg_diagram":
+        return str(block.get("fallback_text") or block.get("alt_text") or "Custom SVG diagram.")
     if kind in {"paragraph", "takeaway"}:
         return str(block.get("text") or "")
     if kind == "formula":
@@ -528,6 +778,75 @@ def guide_block_fallback(block: dict) -> str:
                 f"{', '.join(groups['Treatment B'])} in Treatment B."
             )
         return text
+    if template_id == "graph_traversal_v1":
+        algorithm = parameters.get("algorithm", "bfs").upper()
+        labels = {node["id"]: node["label"] for node in parameters["nodes"]}
+        start = labels[parameters["start_node"]]
+        visited_ids, unreachable_ids = _graph_traversal(parameters)
+        shown = [labels[node_id] for node_id in visited_ids[:6]]
+        order = " → ".join(shown)
+        if len(visited_ids) > len(shown):
+            order += f" → … ({len(visited_ids) - len(shown)} more)"
+        text = (
+            f"{algorithm} on a directed graph starts at {start} and visits "
+            f"{len(visited_ids)} of {len(parameters['nodes'])} nodes in this order: {order}."
+        )
+        if unreachable_ids:
+            text += f" Unreachable nodes: {', '.join(labels[node_id] for node_id in unreachable_ids[:4])}"
+            if len(unreachable_ids) > 4:
+                text += f" and {len(unreachable_ids) - 4} more"
+            text += "."
+        return _bounded_text(text)
+    if template_id == "stress_cube_3d_v1":
+        state = _stress_state(parameters["stress_mpa"])
+        sigma1, sigma2, sigma3 = state["principal_stresses"]
+        normal = ", ".join(_num(component, 3) for component in state["normal"])
+        orientation = (
+            "the plane orientation is not unique because an extreme principal stress is repeated"
+            if not state["orientation_unique"]
+            else "the absolute maximum-shear plane is 45 degrees from the σ₁ and σ₃ directions"
+        )
+        return (
+            "For this symmetric stress tensor (MPa), the principal stresses are "
+            f"σ₁ = {_num(sigma1)}, σ₂ = {_num(sigma2)}, and σ₃ = {_num(sigma3)}. "
+            f"The absolute maximum shear stress is τmax = (σ₁ − σ₃)/2 = "
+            f"{_num(state['shear_magnitude'])} MPa. The selected plane normal is "
+            f"n = ({normal}); {orientation}. Tension is positive."
+        )
+    if template_id == "molecule_3d_v1":
+        molecule = MOLECULE_3D_CATALOG[parameters["molecule_id"]]
+        return (
+            f"{molecule['name']} ({molecule['formula']}): {molecule['geometry']}. "
+            f"{molecule['description']} Geometry is an app-authored idealized teaching model."
+        )
+    if template_id == "python_algorithm_trace_v1":
+        result = _python_algorithm_trace(parameters)
+        algorithm = parameters["algorithm"].replace("_", " ")
+        values = ", ".join(str(value) for value in parameters["values"])
+        if parameters["algorithm"] in {"linear_search", "binary_search"}:
+            found = result["found_index"]
+            outcome = f"found at index {found}" if found is not None else "not found"
+            return (
+                f"Fixed Python {algorithm} checks [{values}] for {parameters['target']}; "
+                f"the target is {outcome} after "
+                f"{sum(step.startswith('Check index') or ': compare ' in step for step in result['steps'])} comparisons."
+            )
+        sorted_values = ", ".join(str(value) for value in result["sorted_values"])
+        return f"Fixed Python insertion sort changes [{values}] into [{sorted_values}]."
+    if template_id == "simcir_circuit_v1":
+        circuit_id = parameters["circuit_id"]
+        title, description = {
+            "and_gate": ("AND gate", "The output is 1 only when both inputs are 1."),
+            "or_gate": ("OR gate", "The output is 1 when at least one input is 1."),
+            "half_adder": ("Half adder", "XOR gives the sum and AND gives the carry."),
+        }[circuit_id]
+        rows = _simcir_truth_table(circuit_id)
+        output_names = ("Y",) if circuit_id != "half_adder" else ("SUM", "CARRY")
+        table = "; ".join(
+            " ".join(f"{name}={row[name]}" for name in ("A", "B", *output_names))
+            for row in rows
+        )
+        return f"{title}: {description} Truth table (A, B, outputs): {table}."
     if template_id == "molecule_2d_v1":
         molecule = MOLECULES[parameters["molecule_id"]]
         return f"{molecule['name']} ({molecule['formula']}): {molecule['description']}"
@@ -538,7 +857,10 @@ def guide_block_fallback(block: dict) -> str:
 
 
 def guide_block_alt_text(block: dict) -> str:
+    if block.get("type") == "svg_diagram":
+        return str(block.get("alt_text") or block.get("fallback_text") or "Custom SVG diagram.")
     template_id = block.get("template_id")
+    parameters = block.get("parameters") or {}
     if template_id == "force_components_v1":
         return guide_block_fallback(block)
     if template_id == "linear_graph_v1":
@@ -566,4 +888,52 @@ def guide_block_alt_text(block: dict) -> str:
             "sample, its mean practice-problem count, and optional randomized treatment groups. "
             "The population and values are illustrative, not course source data."
         )
+    if template_id == "graph_traversal_v1":
+        parameters = block["parameters"]
+        labels = {node["id"]: node["label"] for node in parameters["nodes"]}
+        algorithm = parameters.get("algorithm", "bfs").upper()
+        visited_ids, unreachable_ids = _graph_traversal(parameters)
+        sequence = " → ".join(labels[node_id] for node_id in visited_ids[:5])
+        if len(visited_ids) > 5:
+            sequence += f" → … ({len(visited_ids) - 5} more)"
+        if len(unreachable_ids) == 1:
+            unreachable_text = " 1 node is unreachable from the start node."
+        elif unreachable_ids:
+            unreachable_text = f" {len(unreachable_ids)} nodes are unreachable from the start node."
+        else:
+            unreachable_text = ""
+        return _bounded_text(
+            f"A directed graph with {len(parameters['nodes'])} nodes and "
+            f"{len(parameters['edges'])} edges is traversed using {algorithm} from "
+            f"{labels[parameters['start_node']]}. Visit order: {sequence}.{unreachable_text}"
+        )
+    if template_id == "stress_cube_3d_v1":
+        state = _stress_state(parameters["stress_mpa"])
+        sigma1, _sigma2, sigma3 = state["principal_stresses"]
+        return (
+            "Three-dimensional stress cube for a symmetric MPa tensor. "
+            f"Principal stresses are {_num(sigma1)}, {_num(state['principal_stresses'][1])}, "
+            f"and {_num(sigma3)} MPa; the maximum shear is "
+            f"{_num(state['shear_magnitude'])} MPa. The plane normal and in-plane shear "
+            "traction are computed from t = σn."
+        )
+    if template_id == "molecule_3d_v1":
+        molecule = MOLECULE_3D_CATALOG[block["parameters"]["molecule_id"]]
+        return (
+            f"Rotatable 3D model of {molecule['name']} ({molecule['formula']}), "
+            f"showing {molecule['geometry']}."
+        )
+    if template_id == "python_algorithm_trace_v1":
+        algorithm = parameters["algorithm"].replace("_", " ")
+        return _bounded_text(
+            f"A fixed Python {algorithm} walkthrough uses {len(parameters['values'])} integers "
+            "from the supplied bounded example input. The application supplies all executable code."
+        )
+    if template_id == "simcir_circuit_v1":
+        title, description = {
+            "and_gate": ("AND gate", "Output Y is 1 only when both A and B are 1."),
+            "or_gate": ("OR gate", "Output Y is 1 when either A or B is 1."),
+            "half_adder": ("Half adder", "XOR produces SUM; AND produces CARRY."),
+        }[parameters["circuit_id"]]
+        return f"{title} digital logic circuit. {description}"
     return str(block.get("alt_text") or "Interactive educational diagram.")

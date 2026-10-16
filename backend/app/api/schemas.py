@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from datetime import UTC, datetime
 from datetime import date as calendar_date
 from typing import Annotated, Literal
@@ -11,6 +12,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from app.live_modes import TutorLanguage, TutorMode
+from app.services.safe_svg import sanitize_svg
 
 
 class LiveSessionRequest(BaseModel):
@@ -1100,6 +1102,123 @@ class SamplingDemoParameters(BaseModel):
         return self
 
 
+class GraphTraversalNode(BaseModel):
+    """A bounded, app-rendered node in a directed graph traversal activity."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+    id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,40}$")
+    label: str = Field(min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=240)
+
+    @field_validator("label", "description")
+    @classmethod
+    def text_has_no_control_characters(cls, value: str | None) -> str | None:
+        if value is not None and re.search(r"[\x00-\x1f\x7f-\x9f]", value):
+            raise ValueError("Graph labels and descriptions must contain printable text.")
+        return value
+
+
+class GraphTraversalEdge(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    source: str = Field(pattern=r"^[A-Za-z0-9_-]{1,40}$")
+    target: str = Field(pattern=r"^[A-Za-z0-9_-]{1,40}$")
+
+
+class GraphTraversalParameters(BaseModel):
+    """Select graph data for the fixed app-owned BFS/DFS explorer."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    algorithm: Literal["bfs", "dfs"] = "bfs"
+    start_node: str = Field(pattern=r"^[A-Za-z0-9_-]{1,40}$")
+    nodes: list[GraphTraversalNode] = Field(min_length=2, max_length=24)
+    edges: list[GraphTraversalEdge] = Field(min_length=1, max_length=48)
+
+    @model_validator(mode="after")
+    def graph_is_consistent(self) -> GraphTraversalParameters:
+        identifiers = [node.id for node in self.nodes]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("Graph node IDs must be unique.")
+        known = set(identifiers)
+        if self.start_node not in known:
+            raise ValueError("Graph start_node must reference a declared node.")
+        seen_edges: set[tuple[str, str]] = set()
+        for edge in self.edges:
+            if edge.source not in known or edge.target not in known:
+                raise ValueError("Every graph edge must connect declared nodes.")
+            pair = (edge.source, edge.target)
+            if pair in seen_edges:
+                raise ValueError("Graph edges must not duplicate a directed connection.")
+            seen_edges.add(pair)
+        return self
+
+
+class StressCube3DParameters(BaseModel):
+    """A finite, bounded, symmetric stress tensor in MPa."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    stress_mpa: list[list[float]] = Field(min_length=3, max_length=3)
+
+    @field_validator("stress_mpa", mode="before")
+    @classmethod
+    def matrix_has_numeric_entries(cls, value: object) -> object:
+        if not isinstance(value, list) or len(value) != 3:
+            raise ValueError("stress_mpa must be a 3 by 3 matrix.")
+        for row in value:
+            if not isinstance(row, list) or len(row) != 3:
+                raise ValueError("stress_mpa must be a 3 by 3 matrix.")
+            if any(isinstance(entry, bool) or not isinstance(entry, (int, float)) for entry in row):
+                raise ValueError("Stress tensor entries must be numbers.")
+        return value
+
+    @field_validator("stress_mpa")
+    @classmethod
+    def entries_are_finite_and_bounded(cls, value: list[list[float]]) -> list[list[float]]:
+        if any(not math.isfinite(entry) or not -1000 <= entry <= 1000 for row in value for entry in row):
+            raise ValueError("Stress tensor entries must be finite and between -1000 and 1000 MPa.")
+        return value
+
+    @model_validator(mode="after")
+    def tensor_is_symmetric(self) -> StressCube3DParameters:
+        for row in range(3):
+            for column in range(row + 1, 3):
+                if not math.isclose(
+                    self.stress_mpa[row][column],
+                    self.stress_mpa[column][row],
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                ):
+                    raise ValueError("Stress tensor must be symmetric; asymmetric values are rejected.")
+        return self
+
+
+class PythonAlgorithmParameters(BaseModel):
+    """Bounded integer input for a fixed app-owned Python algorithm example."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    algorithm: Literal["linear_search", "binary_search", "insertion_sort"]
+    values: list[Annotated[int, Field(strict=True, ge=-100, le=100)]] = Field(
+        min_length=2, max_length=16
+    )
+    target: Annotated[int, Field(strict=True, ge=-100, le=100)] | None = None
+
+    @model_validator(mode="after")
+    def input_matches_algorithm(self) -> PythonAlgorithmParameters:
+        if self.algorithm == "binary_search" and self.values != sorted(self.values):
+            raise ValueError("Binary search values must be in ascending order.")
+        if self.algorithm in {"linear_search", "binary_search"} and self.target is None:
+            raise ValueError("Search activities require an integer target.")
+        if self.algorithm == "insertion_sort" and self.target is not None:
+            raise ValueError("Insertion sort does not accept a search target.")
+        return self
+
+
+class SimcirCircuitParameters(BaseModel):
+    """Select one fixed app-authored digital-logic schematic."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    circuit_id: Literal["and_gate", "or_gate", "half_adder"]
+
+
 class GuideExampleStep(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     title: str = Field(min_length=1, max_length=160)
@@ -1108,13 +1227,14 @@ class GuideExampleStep(BaseModel):
 
 
 class StudyGuideBlock(BaseModel):
-    """Small, typed guide blocks. These are data, never executable markup or code."""
+    """Typed guide content, including sanitized vector markup but never executable code."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     id: str | None = Field(default=None, min_length=1, max_length=100)
     type: Literal[
-        "paragraph", "formula", "labeled_diagram", "interactive_model", "example_steps", "takeaway"
+        "paragraph", "formula", "labeled_diagram", "interactive_model", "svg_diagram",
+        "example_steps", "takeaway"
     ]
     text: str | None = Field(default=None, min_length=1, max_length=10_000)
     expression: str | None = Field(default=None, min_length=1, max_length=2_000)
@@ -1129,7 +1249,24 @@ class StudyGuideBlock(BaseModel):
         "process_pathway_v1",
         "animal_cell_map_v1",
         "sampling_demo_v1",
+        "graph_traversal_v1",
+        "stress_cube_3d_v1",
+        "molecule_3d_v1",
+        "python_algorithm_trace_v1",
+        "simcir_circuit_v1",
     ] | None = None
+    # A model-authored, self-contained SVG illustration. The server sanitizes the XML
+    # before it is persisted or returned; scripts, external assets, and event handlers
+    # are never part of this contract.
+    svg: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=60_000,
+        description=(
+            "Complete self-contained SVG drawing. The server sanitizes it to a bounded, "
+            "script-free subset with local references and declarative animation."
+        ),
+    )
     title: str | None = Field(default=None, min_length=1, max_length=200)
     parameters: (
         ForceComponentsParameters
@@ -1141,6 +1278,10 @@ class StudyGuideBlock(BaseModel):
         | ProcessPathwayParameters
         | AnimalCellMapParameters
         | SamplingDemoParameters
+        | GraphTraversalParameters
+        | StressCube3DParameters
+        | PythonAlgorithmParameters
+        | SimcirCircuitParameters
         | None
     ) = None
     alt_text: str | None = Field(default=None, max_length=500)
@@ -1148,10 +1289,17 @@ class StudyGuideBlock(BaseModel):
     steps: list[GuideExampleStep] = Field(default_factory=list, max_length=12)
     sources: list[SourceCitation] = Field(default_factory=list, max_length=20)
 
+    @field_validator("svg")
+    @classmethod
+    def sanitize_authored_svg(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return sanitize_svg(value)
+
     @model_validator(mode="after")
     def validate_block_payload(self) -> StudyGuideBlock:
         has_visual_fields = any(
-            (self.template_id, self.title, self.parameters, self.alt_text, self.fallback_text)
+            (self.template_id, self.svg, self.title, self.parameters, self.alt_text, self.fallback_text)
         )
         if self.type in {"paragraph", "takeaway"}:
             if (
@@ -1173,6 +1321,7 @@ class StudyGuideBlock(BaseModel):
                 or self.expression
                 or self.definitions
                 or self.template_id
+                or self.svg
                 or not self.title
                 or self.parameters
                 or self.alt_text
@@ -1187,11 +1336,30 @@ class StudyGuideBlock(BaseModel):
                 for step in self.steps
             ) > 4_000:
                 raise ValueError("Example-step text exceeds the fallback limit.")
+        elif self.type == "svg_diagram":
+            if (
+                self.text
+                or self.expression
+                or self.definitions
+                or self.template_id
+                or self.parameters
+                or self.steps
+                or not self.svg
+                or not self.title
+                or not self.alt_text
+                or not self.fallback_text
+            ):
+                raise ValueError(
+                    "Custom SVG diagrams require sanitized SVG, a title, an alternative, and fallback text."
+                )
         elif self.type == "labeled_diagram":
             diagram_parameters = {
                 "molecule_2d_v1": MoleculeDiagramParameters,
                 "process_pathway_v1": ProcessPathwayParameters,
                 "animal_cell_map_v1": AnimalCellMapParameters,
+                # Both molecule activities resolve the same fixed molecule-ID payload;
+                # the template selects its reviewed 2D or idealized 3D rendering.
+                "molecule_3d_v1": MoleculeDiagramParameters,
             }
             expected_type = diagram_parameters.get(self.template_id)
             if (
@@ -1199,6 +1367,7 @@ class StudyGuideBlock(BaseModel):
                 or self.expression
                 or self.definitions
                 or self.steps
+                or self.svg
                 or expected_type is None
                 or not isinstance(self.parameters, expected_type)
                 or not self.title
@@ -1212,6 +1381,10 @@ class StudyGuideBlock(BaseModel):
                 "resistor_divider_v1": ResistorDividerParameters,
                 "binary_search_trace_v1": BinarySearchParameters,
                 "sampling_demo_v1": SamplingDemoParameters,
+                "graph_traversal_v1": GraphTraversalParameters,
+                "stress_cube_3d_v1": StressCube3DParameters,
+                "python_algorithm_trace_v1": PythonAlgorithmParameters,
+                "simcir_circuit_v1": SimcirCircuitParameters,
             }
             expected_type = expected_parameters.get(self.template_id)
             if (
@@ -1222,6 +1395,7 @@ class StudyGuideBlock(BaseModel):
                 or self.expression
                 or self.definitions
                 or self.steps
+                or self.svg
             ):
                 raise ValueError(
                     "Interactive guide blocks must use a supported template and parameters."

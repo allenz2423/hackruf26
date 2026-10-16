@@ -1,0 +1,6 @@
+SimcirJS
+Upstream: https://github.com/kazuhikoarase/simcirjs
+Upstream revision: e633e0aee2e97eb5cfa590f1cd76c7f53ce4fb46 (master HEAD inspected 2026-10-16)
+Copyright (c) 2014 Kazuhiko Arase
+License: MIT; see LICENSE. Preserve this notice and the license text when distributing this software or substantial portions of it.
+Files included: simcir.js, simcir-basicset.js, simcir.css, simcir-basicset.css.
