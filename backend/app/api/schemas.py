@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from datetime import date as calendar_date
 from typing import Annotated, Literal
@@ -463,6 +464,14 @@ MaterialsScope = Annotated[
 StudyMaterialKind = Literal["quiz", "practice_exam", "study_guide", "flashcards"]
 StudyDifficulty = Literal["mixed", "easier", "harder"]
 StudyQuestionKind = Literal["multiple_choice", "true_false", "short_answer"]
+StudyGuideStyle = Literal[
+    "balanced",
+    "visual",
+    "text_dense",
+    "interactive",
+    "worked_examples",
+    "quick_reference",
+]
 
 
 class StudyOptions(BaseModel):
@@ -488,6 +497,10 @@ class StudyMaterialCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     operation_id: UUID | None = None
     kind: StudyMaterialKind
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    # guide_style remains for older clients; new clients can combine styles.
+    guide_style: StudyGuideStyle | None = None
+    guide_styles: list[StudyGuideStyle] | None = Field(default=None, min_length=1, max_length=6)
     scope: MaterialsScope = Field(default_factory=lambda: AllMaterialsScope(kind="all"))
     options: StudyOptions = Field(default_factory=StudyOptions)
     additional_instructions: str | None = Field(default=None, max_length=2000)
@@ -506,8 +519,34 @@ class StudyMaterialCreate(BaseModel):
             return value or None
         return value
 
+    @field_validator("title", mode="before")
+    @classmethod
+    def normalize_title(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return None
+            if any(ord(character) < 32 or ord(character) == 127 for character in value):
+                raise ValueError("Study-guide names cannot contain control characters.")
+        return value
+
+    @field_validator("guide_styles")
+    @classmethod
+    def require_unique_guide_styles(
+        cls, value: list[StudyGuideStyle] | None
+    ) -> list[StudyGuideStyle] | None:
+        if value is not None and len(value) != len(set(value)):
+            raise ValueError("Study guide styles must be unique.")
+        return value
+
     @model_validator(mode="after")
     def instructions_only_apply_to_assessments(self) -> StudyMaterialCreate:
+        if self.title and self.kind != "study_guide":
+            raise ValueError("A custom name is available only for study guides.")
+        if (self.guide_style is not None or self.guide_styles is not None) and self.kind != "study_guide":
+            raise ValueError("A guide style is available only for study guides.")
+        if self.guide_style is not None and self.guide_styles is not None:
+            raise ValueError("Use either guide_style or guide_styles, not both.")
         if self.additional_instructions and self.kind not in {"quiz", "practice_exam"}:
             raise ValueError(
                 "Additional instructions are available only for quizzes and practice exams."
@@ -546,6 +585,8 @@ class MaterialSummary(BaseModel):
 
 class MaterialDetail(MaterialSummary):
     content: dict | None = None
+    preview_content: dict | None = None
+    preview_revision: int = Field(default=0, ge=0)
     download_urls: dict[str, str] = Field(default_factory=dict)
 
 
@@ -865,10 +906,360 @@ class GuideSectionContent(BaseModel):
     sources: list[SourceCitation] = Field(default_factory=list, max_length=20)
 
 
+class FormulaVariableContent(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    symbol: str = Field(min_length=1, max_length=32)
+    meaning: str = Field(min_length=1, max_length=300)
+    unit: str | None = Field(default=None, max_length=32)
+
+
+def _matches_control_step(value: float, decimal_places: int) -> bool:
+    return math.isclose(value, round(value, decimal_places), rel_tol=0, abs_tol=1e-8)
+
+
+class ForceComponentsParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    force_n: float = Field(ge=0, le=1000)
+    angle_deg: float = Field(ge=0, le=90)
+
+    @field_validator("force_n", "angle_deg", mode="before")
+    @classmethod
+    def numeric_values_only(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("Force-component parameters must be numbers.")
+        return value
+
+    @model_validator(mode="after")
+    def values_are_finite(self) -> ForceComponentsParameters:
+        if not math.isfinite(self.force_n) or not math.isfinite(self.angle_deg):
+            raise ValueError("Force-component parameters must be finite.")
+        if not _matches_control_step(
+            self.force_n, 1
+        ) or not _matches_control_step(self.angle_deg, 1):
+            raise ValueError("Force-component values must match the displayed 0.1 increments.")
+        return self
+
+
+class LinearGraphParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    slope: float = Field(ge=-10, le=10)
+    intercept: float = Field(ge=-10, le=10)
+
+    @field_validator("slope", "intercept", mode="before")
+    @classmethod
+    def numeric_values_only(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("Graph parameters must be numbers.")
+        return value
+
+    @model_validator(mode="after")
+    def values_are_finite(self) -> LinearGraphParameters:
+        if not math.isfinite(self.slope) or not math.isfinite(self.intercept):
+            raise ValueError("Graph parameters must be finite.")
+        if not _matches_control_step(self.slope, 1) or not _matches_control_step(self.intercept, 1):
+            raise ValueError("Graph values must match the displayed 0.1 increments.")
+        return self
+
+
+class ResistorDividerParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    voltage_v: float = Field(ge=0, le=24)
+    r1_ohm: float = Field(ge=1, le=1_000_000)
+    r2_ohm: float = Field(ge=1, le=1_000_000)
+
+    @field_validator("voltage_v", "r1_ohm", "r2_ohm", mode="before")
+    @classmethod
+    def numeric_values_only(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("Circuit parameters must be numbers.")
+        return value
+
+    @model_validator(mode="after")
+    def values_are_finite(self) -> ResistorDividerParameters:
+        if not all(math.isfinite(value) for value in (self.voltage_v, self.r1_ohm, self.r2_ohm)):
+            raise ValueError("Circuit parameters must be finite.")
+        if (
+            not _matches_control_step(self.voltage_v, 1)
+            or not self.r1_ohm.is_integer()
+            or not self.r2_ohm.is_integer()
+        ):
+            raise ValueError(
+                "Circuit values must match the displayed voltage and resistance increments."
+            )
+        return self
+
+
+class FirstOrderResponseParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    initial_value: float = Field(ge=-1000, le=1000)
+    final_value: float = Field(ge=-1000, le=1000)
+    time_constant_s: float = Field(ge=0.01, le=3600)
+
+    @field_validator("initial_value", "final_value", "time_constant_s", mode="before")
+    @classmethod
+    def numeric_values_only(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("Response parameters must be numbers.")
+        return value
+
+    @model_validator(mode="after")
+    def values_are_finite(self) -> FirstOrderResponseParameters:
+        if not all(math.isfinite(value) for value in (
+            self.initial_value, self.final_value, self.time_constant_s
+        )):
+            raise ValueError("Response parameters must be finite.")
+        if (
+            not self.initial_value.is_integer() or not self.final_value.is_integer()
+            or not _matches_control_step(self.time_constant_s, 2)
+        ):
+            raise ValueError("Response values must match the displayed increments.")
+        return self
+
+
+class BinarySearchParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    values: list[Annotated[int, Field(strict=True, ge=-10_000, le=10_000)]] = Field(
+        min_length=2, max_length=20
+    )
+    target: Annotated[int, Field(strict=True, ge=-10_000, le=10_000)]
+
+    @model_validator(mode="after")
+    def input_is_sorted_and_unique(self) -> BinarySearchParameters:
+        if self.values != sorted(set(self.values)):
+            raise ValueError("Binary search values must be sorted and unique.")
+        return self
+
+
+class MoleculeDiagramParameters(BaseModel):
+    """A reference to one app-owned, reviewed 2D structure; no generated topology."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    molecule_id: Literal["water", "carbon_dioxide", "methane", "ammonia"]
+
+
+class ProcessPathwayStage(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,40}$")
+    title: str = Field(min_length=1, max_length=100)
+    explanation: str = Field(min_length=1, max_length=600)
+
+
+class ProcessPathwayParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    stages: list[ProcessPathwayStage] = Field(min_length=2, max_length=12)
+
+    @model_validator(mode="after")
+    def stage_ids_are_unique(self) -> ProcessPathwayParameters:
+        identifiers = [stage.id for stage in self.stages]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("Process pathway stage IDs must be unique.")
+        if sum(len(stage.title) + len(stage.explanation) for stage in self.stages) > 4_000:
+            raise ValueError("Process pathway text exceeds the fallback limit.")
+        return self
+
+
+CellOrganelleId = Literal[
+    "cytoplasm",
+    "cytoskeleton",
+    "endoplasmic_reticulum",
+    "golgi_apparatus",
+    "lysosomes_peroxisomes",
+    "mitochondria",
+    "nucleus",
+    "plasma_membrane",
+    "ribosomes",
+]
+
+
+class AnimalCellMapParameters(BaseModel):
+    """Select source-supported features for the fixed animal-cell map."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    focus_ids: list[CellOrganelleId] = Field(min_length=1, max_length=9)
+
+    @model_validator(mode="after")
+    def focus_ids_are_unique(self) -> AnimalCellMapParameters:
+        if len(self.focus_ids) != len(set(self.focus_ids)):
+            raise ValueError("Animal-cell map features must be unique.")
+        return self
+
+
+class SamplingDemoParameters(BaseModel):
+    """Select a fixed app-authored population and sampling illustration."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    method: Literal["simple_random", "stratified", "front_row_convenience"]
+    sample_size: Annotated[int, Field(strict=True, ge=4, le=12)]
+    seed: Annotated[int, Field(strict=True, ge=1, le=9999)]
+    random_assignment: bool = Field(default=False, strict=True)
+
+    @model_validator(mode="after")
+    def sample_size_is_supported(self) -> SamplingDemoParameters:
+        if self.sample_size % 2:
+            raise ValueError("Sample size must use an even increment so strata and groups can split evenly.")
+        return self
+
+
+class GuideExampleStep(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    title: str = Field(min_length=1, max_length=160)
+    explanation: str = Field(min_length=1, max_length=2_000)
+    expression: str | None = Field(default=None, max_length=500)
+
+
+class StudyGuideBlock(BaseModel):
+    """Small, typed guide blocks. These are data, never executable markup or code."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    id: str | None = Field(default=None, min_length=1, max_length=100)
+    type: Literal[
+        "paragraph", "formula", "labeled_diagram", "interactive_model", "example_steps", "takeaway"
+    ]
+    text: str | None = Field(default=None, min_length=1, max_length=10_000)
+    expression: str | None = Field(default=None, min_length=1, max_length=2_000)
+    definitions: list[FormulaVariableContent] = Field(default_factory=list, max_length=20)
+    template_id: Literal[
+        "force_components_v1",
+        "linear_graph_v1",
+        "first_order_response_v1",
+        "resistor_divider_v1",
+        "binary_search_trace_v1",
+        "molecule_2d_v1",
+        "process_pathway_v1",
+        "animal_cell_map_v1",
+        "sampling_demo_v1",
+    ] | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    parameters: (
+        ForceComponentsParameters
+        | LinearGraphParameters
+        | FirstOrderResponseParameters
+        | ResistorDividerParameters
+        | BinarySearchParameters
+        | MoleculeDiagramParameters
+        | ProcessPathwayParameters
+        | AnimalCellMapParameters
+        | SamplingDemoParameters
+        | None
+    ) = None
+    alt_text: str | None = Field(default=None, max_length=500)
+    fallback_text: str | None = Field(default=None, max_length=5_000)
+    steps: list[GuideExampleStep] = Field(default_factory=list, max_length=12)
+    sources: list[SourceCitation] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def validate_block_payload(self) -> StudyGuideBlock:
+        has_visual_fields = any(
+            (self.template_id, self.title, self.parameters, self.alt_text, self.fallback_text)
+        )
+        if self.type in {"paragraph", "takeaway"}:
+            if (
+                not self.text
+                or self.expression
+                or has_visual_fields
+                or self.definitions
+                or self.steps
+            ):
+                raise ValueError("Text guide blocks may contain only text and citations.")
+        elif self.type == "formula":
+            if self.text or not self.expression or has_visual_fields or self.steps:
+                raise ValueError(
+                    "Formula guide blocks must contain only a formula and definitions."
+                )
+        elif self.type == "example_steps":
+            if (
+                self.text
+                or self.expression
+                or self.definitions
+                or self.template_id
+                or not self.title
+                or self.parameters
+                or self.alt_text
+                or self.fallback_text
+                or len(self.steps) < 2
+            ):
+                raise ValueError(
+                    "Example-step blocks require a title and at least two ordered steps."
+                )
+            if sum(
+                len(step.title) + len(step.explanation) + len(step.expression or "")
+                for step in self.steps
+            ) > 4_000:
+                raise ValueError("Example-step text exceeds the fallback limit.")
+        elif self.type == "labeled_diagram":
+            diagram_parameters = {
+                "molecule_2d_v1": MoleculeDiagramParameters,
+                "process_pathway_v1": ProcessPathwayParameters,
+                "animal_cell_map_v1": AnimalCellMapParameters,
+            }
+            expected_type = diagram_parameters.get(self.template_id)
+            if (
+                self.text
+                or self.expression
+                or self.definitions
+                or self.steps
+                or expected_type is None
+                or not isinstance(self.parameters, expected_type)
+                or not self.title
+            ):
+                raise ValueError("Labeled diagrams must reference a supported app-owned template.")
+        elif self.type == "interactive_model":
+            expected_parameters = {
+                "force_components_v1": ForceComponentsParameters,
+                "linear_graph_v1": LinearGraphParameters,
+                "first_order_response_v1": FirstOrderResponseParameters,
+                "resistor_divider_v1": ResistorDividerParameters,
+                "binary_search_trace_v1": BinarySearchParameters,
+                "sampling_demo_v1": SamplingDemoParameters,
+            }
+            expected_type = expected_parameters.get(self.template_id)
+            if (
+                expected_type is None
+                or not isinstance(self.parameters, expected_type)
+                or not self.title
+                or self.text
+                or self.expression
+                or self.definitions
+                or self.steps
+            ):
+                raise ValueError(
+                    "Interactive guide blocks must use a supported template and parameters."
+                )
+        return self
+
+
+class StudyGuideSectionV2(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str | None = Field(default=None, min_length=1, max_length=100)
+    heading: str = Field(min_length=1, max_length=300)
+    # A backend-derived fallback. Generated responses may omit it; generation fills it
+    # from the ordered blocks so the browser and export cannot drift apart.
+    body: str | None = Field(default=None, max_length=20_000)
+    key_terms: list[str] = Field(default_factory=list, max_length=50)
+    sources: list[SourceCitation] = Field(default_factory=list, max_length=20)
+    blocks: list[StudyGuideBlock] = Field(min_length=1, max_length=24)
+
+
 class StudyGuideContent(BaseModel):
     model_config = ConfigDict(extra="forbid")
     format: Literal["study_guide"]
-    sections: list[GuideSectionContent] = Field(min_length=1, max_length=100)
+    schema_version: Literal[1, 2] = 1
+    sections: list[GuideSectionContent | StudyGuideSectionV2] = Field(
+        min_length=1, max_length=100
+    )
+
+    @model_validator(mode="after")
+    def version_matches_sections(self) -> StudyGuideContent:
+        has_v2_sections = any(isinstance(section, StudyGuideSectionV2) for section in self.sections)
+        if self.schema_version == 2 and not all(
+            isinstance(section, StudyGuideSectionV2) for section in self.sections
+        ):
+            raise ValueError("Version 2 study guides require block-based sections.")
+        if self.schema_version == 1 and has_v2_sections:
+            raise ValueError("Version 1 study guides cannot contain version 2 sections.")
+        return self
 
 
 DocumentDetailLevel = Literal["concise", "balanced", "detailed"]

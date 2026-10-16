@@ -237,8 +237,8 @@ class SourceLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def saved_material(self):
         await self.db.execute(
-            "INSERT INTO study_materials (id, class_id, kind, title, status, content) "
-            "VALUES (?1, ?2, 'study_guide', 'Saved guide', 'ready', ?3)",
+            "INSERT INTO study_materials (id, class_id, kind, title, status, content, "
+            "quality_review_version) VALUES (?1, ?2, 'study_guide', 'Saved guide', 'ready', ?3, 2)",
             self.material_id,
             self.class_id,
             json.dumps({"sections": []}),

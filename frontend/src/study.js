@@ -13,6 +13,7 @@ import {
   getUploadsApi,
   createStudyMaterialApi,
   getStudyMaterialDetailApi,
+  retryStudyMaterialApi,
   deleteStudyMaterialApi,
   updateResourcePublicationApi
 } from "./api.js";
@@ -103,18 +104,44 @@ function formatDate(iso) {
   return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function canRetryStudyGuide(material, klass, currentUserId) {
+  if (!material?.isRemote || material.type !== "Study guide") return false;
+  const isAuthor = material.createdBy && String(material.createdBy) === String(currentUserId);
+  return material.resourceScope === "personal"
+    ? Boolean(isAuthor)
+    : Boolean(klass?.isOwner || (isAuthor && klass && classHasCapability(klass, "create")));
+}
+
 export function formatRemoteMaterial(detail, klassId, uiTypeFallback, uploads = [], backendClassId = null) {
   const uiType = detail.kind ? fromApiKind(detail.kind) : (uiTypeFallback || "Quiz");
   const uploadNames = new Map(uploads.map((upload) => [getBackendUploadId(upload), upload.name]));
-  const withSources = (item) => ({ ...item, sources: (item.sources || []).map((source) =>
-    typeof source === "object" && source !== null ? { ...source, name: uploadNames.get(source.upload_id) || source.name } : source) });
+  const withSources = (item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    const result = {
+      ...item,
+      sources: (Array.isArray(item.sources) ? item.sources : []).map((source) =>
+        typeof source === "object" && source !== null
+          ? { ...source, name: uploadNames.get(source.upload_id) || source.name }
+          : source)
+    };
+    if (Array.isArray(item.blocks)) result.blocks = item.blocks.map(withSources);
+    return result;
+  };
   const isAssessment = ["Quiz", "Practice test"].includes(uiType);
   const sections = !isAssessment && Array.isArray(detail.content?.sections) ? detail.content.sections.map(withSources) : [];
   const cards = !isAssessment && Array.isArray(detail.content?.cards) ? detail.content.cards.map(withSources) : [];
+  const previewSections = uiType === "Study guide" && Array.isArray(detail.preview_content?.sections)
+    ? detail.preview_content.sections.map(withSources)
+    : [];
+  const previewContent = previewSections.length
+    ? { ...detail.preview_content, sections: previewSections }
+    : null;
 
-  const guideContent = !isAssessment && sections.length
-    ? sections.map((s) => `## ${s.heading}\n\n${s.body}`).join("\n\n")
-    : (!isAssessment && typeof detail.content === "string" ? detail.content : null);
+  const guideContent = uiType === "Study guide" && sections.length
+    ? { ...(detail.content && typeof detail.content === "object" ? detail.content : {}), sections }
+    : (!isAssessment && sections.length
+      ? sections.map((s) => `## ${s.heading}\n\n${s.body}`).join("\n\n")
+      : (!isAssessment && typeof detail.content === "string" ? detail.content : null));
 
   const count = detail.item_count
     || cards.length
@@ -150,6 +177,8 @@ export function formatRemoteMaterial(detail, klassId, uiTypeFallback, uploads = 
     instructions: typeof detail.content?.instructions === "string" ? detail.content.instructions : "",
     sections,
     content: guideContent,
+    previewContent,
+    previewRevision: Number.isInteger(detail.preview_revision) ? detail.preview_revision : 0,
     cards,
     // Question and answer material is delivered only by the immutable,
     // per-run public projection. Never put assessment keys in the saved
@@ -159,6 +188,47 @@ export function formatRemoteMaterial(detail, klassId, uiTypeFallback, uploads = 
     // out of this cache and render them only from a release-approved run DTO.
     attempts: []
   };
+}
+
+export function openRemoteStudyGuideViewer(
+  material,
+  { klassId, uploads = [], backendClassId = null, canRetry = false } = {}
+) {
+  let viewer;
+  const onRetry = async (failedMaterial, updateViewer) => {
+    const summary = await retryStudyMaterialApi(failedMaterial.id);
+    const pending = formatRemoteMaterial(
+      summary, klassId, "Study guide", uploads, backendClassId
+    );
+    updateViewer({
+      ...pending,
+      previewContent: failedMaterial.previewContent,
+      previewRevision: failedMaterial.previewRevision
+    });
+
+    const controller = new AbortController();
+    const stopOnNavigation = () => controller.abort();
+    const stopOnClose = () => controller.abort();
+    window.addEventListener("hashchange", stopOnNavigation, { once: true });
+    viewer.dialog.addEventListener("close", stopOnClose, { once: true });
+    try {
+      const detail = await waitForStudyMaterial(summary.id, {
+        signal: controller.signal,
+        timeoutMs: Number.POSITIVE_INFINITY,
+        onStatus: (nextDetail) => updateViewer(formatRemoteMaterial(
+          nextDetail, klassId, "Study guide", uploads, backendClassId
+        ))
+      });
+      const result = formatRemoteMaterial(detail, klassId, "Study guide", uploads, backendClassId);
+      updateViewer(result);
+      return result;
+    } finally {
+      window.removeEventListener("hashchange", stopOnNavigation);
+      viewer.dialog.removeEventListener("close", stopOnClose);
+    }
+  };
+  viewer = openMaterialViewer(material, canRetry ? { onRetry } : {});
+  return viewer;
 }
 
 function scoreableQuestions(material) {
@@ -347,6 +417,23 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
                 </label>`).join("")}</div>` : ""}
               <p id="source-selection-count" class="field-hint" role="status" aria-live="polite"></p>
             </fieldset>
+            <div class="field-block" id="study-guide-title-block" hidden>
+              <label for="study-guide-title">Study guide name (optional)</label>
+              <input id="study-guide-title" name="study_guide_title" type="text" maxlength="160" autocomplete="off" placeholder="Leave blank and AI will suggest a name" aria-describedby="study-guide-title-help" />
+              <p class="field-hint" id="study-guide-title-help">Choose a name for your guide, or leave it blank for an AI-suggested title.</p>
+            </div>
+            <fieldset class="field-block study-guide-style-picker" id="study-guide-style-block" hidden aria-describedby="study-guide-style-help">
+              <legend>Study guide styles</legend>
+              <p class="field-hint" id="study-guide-style-help">Choose one or more styles to blend. Balanced is selected by default and can be combined with the other styles. Diagrams and interactive activities are included only when supported by your sources and the available templates.</p>
+              <div class="study-guide-style-list">
+                <label class="study-guide-style-option"><input type="checkbox" name="guide_styles" value="balanced" checked /><span><strong>Balanced</strong><small>A clear mix of explanations, definitions, formulas, and examples.</small></span></label>
+                <label class="study-guide-style-option"><input type="checkbox" name="guide_styles" value="visual" /><span><strong>Visual overview</strong><small>Emphasize relationships, processes, and supported diagrams.</small></span></label>
+                <label class="study-guide-style-option"><input type="checkbox" name="guide_styles" value="text_dense" /><span><strong>Text-dense explanations</strong><small>Use fuller explanations and explicit connections.</small></span></label>
+                <label class="study-guide-style-option"><input type="checkbox" name="guide_styles" value="interactive" /><span><strong>Interactive learning</strong><small>Add supported activities where they help explain a concept.</small></span></label>
+                <label class="study-guide-style-option"><input type="checkbox" name="guide_styles" value="worked_examples" /><span><strong>Worked examples</strong><small>Emphasize source-supported procedures and reasoning.</small></span></label>
+                <label class="study-guide-style-option"><input type="checkbox" name="guide_styles" value="quick_reference" /><span><strong>Quick reference</strong><small>Prioritize concise definitions, formulas, and decision rules.</small></span></label>
+              </div>
+            </fieldset>
             <fieldset class="field-block study-destination-picker">
               <legend>Save this study set</legend>
               <label class="destination-option"><input type="radio" name="destination" value="personal" checked /><span><strong>Keep it personal</strong><small>Only you can see this quiz or study set.</small></span></label>
@@ -412,9 +499,14 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
     const sourceCount = root.querySelector("#source-selection-count");
     const instructionsBlock = root.querySelector("#generation-instructions-block");
     const languageBlock = root.querySelector("#generation-language-block");
+    const guideTitleBlock = root.querySelector("#study-guide-title-block");
+    const guideStyleBlock = root.querySelector("#study-guide-style-block");
     let generating = false;
+    const liveGuidePreviews = new Map();
     function updateTypeFields(uiType) {
       const isAssessment = ["Quiz", "Practice test"].includes(uiType);
+      guideTitleBlock.hidden = uiType !== "Study guide";
+      guideStyleBlock.hidden = uiType !== "Study guide";
       root.querySelector("#generate-count-label").textContent = uiType === "Study guide"
         ? "Section count" : uiType === "Flashcards" ? "Card count" : "Question count";
       instructionsBlock.hidden = !isAssessment;
@@ -422,8 +514,17 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
     }
     updateTypeFields("Quiz");
     form.addEventListener("change", (event) => {
-      if (event.target.name !== "type") return;
-      updateTypeFields(event.target.value);
+      if (event.target.name === "type") {
+        updateTypeFields(event.target.value);
+        return;
+      }
+      if (
+        event.target.name === "guide_styles"
+        && !event.target.checked
+        && !form.querySelector('input[name="guide_styles"]:checked')
+      ) {
+        event.target.checked = true;
+      }
     });
 
     function updateSourceSelection() {
@@ -438,6 +539,75 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
       for (const kind of ["notes", "syllabus"]) {
         sourcePicker.querySelector(`[data-source-filter="${kind}"]`).disabled = !klass.uploads.some((upload) => String(upload.kind).toLowerCase() === kind);
       }
+    }
+
+    function watchLiveGuidePreview(material, controller, viewer) {
+      const materialId = String(material.id);
+      const closeOnNavigation = () => {
+        controller.abort();
+        viewer.close();
+      };
+      window.addEventListener("hashchange", closeOnNavigation, { once: true });
+      const stopOnClose = () => controller.abort();
+      viewer.dialog.addEventListener("close", stopOnClose, { once: true });
+
+      const session = { viewer, promise: null };
+      session.promise = waitForStudyMaterial(material.id, {
+        signal: controller.signal,
+        timeoutMs: Number.POSITIVE_INFINITY,
+        onStatus: (detail) => {
+          viewer.update(formatRemoteMaterial(
+            detail, klass.id, "Study guide", klass.uploads, backendClassId
+          ));
+        }
+      }).then((detail) => {
+        const updated = formatRemoteMaterial(
+          detail, klass.id, "Study guide", klass.uploads, backendClassId
+        );
+        viewer.update(updated);
+        return updated;
+      }).finally(() => {
+        window.removeEventListener("hashchange", closeOnNavigation);
+        viewer.dialog.removeEventListener("close", stopOnClose);
+        if (liveGuidePreviews.get(materialId) === session) {
+          liveGuidePreviews.delete(materialId);
+        }
+      });
+      liveGuidePreviews.set(materialId, session);
+      return session;
+    }
+
+    function startLiveGuidePreview(material, controller) {
+      const existing = liveGuidePreviews.get(String(material.id));
+      if (existing?.viewer.isOpen) {
+        existing.viewer.update(material);
+        return existing;
+      }
+
+      let viewer;
+      viewer = openMaterialViewer(material, canRetryStudyGuide(material, klass, currentUserId) ? {
+        onRetry: async (failedMaterial, updateViewer) => {
+          const summary = await retryStudyMaterialApi(failedMaterial.id);
+          const pending = formatRemoteMaterial(
+            summary, klass.id, "Study guide", klass.uploads, backendClassId
+          );
+          const pendingViewer = {
+            ...pending,
+            previewContent: failedMaterial.previewContent,
+            previewRevision: failedMaterial.previewRevision
+          };
+          await onMaterialAdded(pending);
+          renderMaterials();
+          updateViewer(pendingViewer);
+          const retryController = new AbortController();
+          const retrySession = watchLiveGuidePreview(pendingViewer, retryController, viewer);
+          const result = await retrySession.promise;
+          await onMaterialAdded(result);
+          renderMaterials();
+          return result;
+        }
+      } : {});
+      return watchLiveGuidePreview(material, controller, viewer);
     }
 
     sourcePicker.addEventListener("change", updateSourceSelection);
@@ -476,6 +646,10 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
         const isAuthor = material.createdBy && String(material.createdBy) === String(currentUserId);
         const canDelete = (material.resourceScope === "personal" && isAuthor)
           || klass.isOwner || (isAuthor && classHasCapability(klass, "delete"));
+        const canRetry = material.isRemote
+          && material.type === "Study guide"
+          && material.status === "failed"
+          && canRetryStudyGuide(material, klass, currentUserId);
         const canPublish = klass.isOwner || classHasCapability(klass, "manage_permissions")
           || (isAuthor && classHasCapability(klass, "create"));
         const prompts = material.items?.map((item) => item.prompt).filter(Boolean)
@@ -501,6 +675,7 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
                 <button class="btn ${canPlay ? "btn-primary" : "btn-secondary"} material-open" type="button" data-open-material="${escapeHtml(material.id)}">
                   ${isFlashcards ? "Study cards" : isAssessment ? "Start" : "Open"}
                 </button>
+                ${canRetry ? `<button class="btn btn-secondary" type="button" data-retry-material="${escapeHtml(material.id)}">Retry</button>` : ""}
                 ${material.isRemote && canDelete ? `<button class="btn btn-ghost btn-icon" type="button" data-delete-material="${escapeHtml(material.id)}" aria-label="Delete material">${icon("trash", { size: 16 })}</button>` : ""}
               </div>
             </footer>
@@ -534,6 +709,12 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
       const additionalInstructions = ["Quiz", "Practice test"].includes(uiType)
         ? String(data.get("additional_instructions") || "").trim()
         : "";
+      const studyGuideTitle = uiType === "Study guide"
+        ? String(data.get("study_guide_title") || "").trim()
+        : "";
+      const studyGuideStyles = uiType === "Study guide"
+        ? data.getAll("guide_styles")
+        : null;
       const isAssessment = ["Quiz", "Practice test"].includes(uiType);
       const language = isAssessment ? String(data.get("generation_language") || "auto") : null;
       const destination = data.get("destination") === "class_contribution" && classHasCapability(klass, "create")
@@ -579,6 +760,8 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
           scope,
           options,
           additionalInstructions,
+          title: studyGuideTitle,
+          guideStyles: studyGuideStyles,
           destination,
           ...(isAssessment ? { language, operationId: generationOperationId } : {})
         });
@@ -586,7 +769,15 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
         // Persist the pending job so reloads and polling failures do not lose it.
         await onMaterialAdded(formatRemoteMaterial(summary, klass.id, uiType, klass.uploads, backendClassId));
         renderMaterials();
-        const detail = await waitForStudyMaterial(summary.id, { signal: controller.signal });
+        const previewSession = uiType === "Study guide"
+          ? startLiveGuidePreview(
+            formatRemoteMaterial(summary, klass.id, uiType, klass.uploads, backendClassId),
+            controller
+          )
+          : null;
+        const detail = previewSession
+          ? await previewSession.promise
+          : await waitForStudyMaterial(summary.id, { signal: controller.signal });
         await onMaterialAdded(formatRemoteMaterial(detail, klass.id, uiType, klass.uploads, backendClassId));
         renderMaterials();
         if (detail.status === "failed") {
@@ -619,6 +810,37 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
     });
 
     list.addEventListener("click", async (event) => {
+      const retryId = event.target.closest("[data-retry-material]")?.dataset.retryMaterial;
+      if (retryId) {
+        const material = klass.materials.find((item) => item.id === retryId);
+        const button = event.target.closest("[data-retry-material]");
+        if (!material || !button) return;
+        button.disabled = true;
+        button.textContent = "Retrying…";
+        try {
+          const summary = await retryStudyMaterialApi(retryId);
+          const pending = formatRemoteMaterial(
+            summary, klass.id, "Study guide", klass.uploads, backendClassId
+          );
+          await onMaterialAdded(pending);
+          renderMaterials();
+          const previewMaterial = {
+            ...pending,
+            previewContent: material.previewContent,
+            previewRevision: material.previewRevision
+          };
+          const session = startLiveGuidePreview(previewMaterial, new AbortController());
+          session.promise.catch((error) => {
+            if (error?.name !== "AbortError") toast(error.message, { tone: "error" });
+          });
+        } catch (error) {
+          button.disabled = false;
+          button.textContent = "Retry";
+          toast(error.message || "Could not retry this study guide.", { tone: "error" });
+        }
+        return;
+      }
+
       const deleteId = event.target.closest("[data-delete-material]")?.dataset.deleteMaterial;
       if (deleteId) {
         const material = klass.materials.find((item) => item.id === deleteId);
@@ -648,7 +870,30 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
       if (material.isRemote && (material.status !== "ready" || (!material.questions?.length && !material.cards?.length && !material.content))) {
         try {
           const detail = await getStudyMaterialDetailApi(materialId);
-          Object.assign(material, formatRemoteMaterial(detail, klass.id, material.type, klass.uploads, backendClassId));
+          const refreshed = formatRemoteMaterial(
+            detail, klass.id, material.type, klass.uploads, backendClassId
+          );
+          if (refreshed.status === "generating" && refreshed.type === "Study guide") {
+            const previewController = new AbortController();
+            const session = startLiveGuidePreview(refreshed, previewController);
+            session.promise.catch((error) => {
+              if (!previewController.signal.aborted) {
+                toast(error.message, { tone: "error" });
+              }
+            });
+            return;
+          }
+          if (refreshed.status === "failed" && refreshed.type === "Study guide") {
+            const previewController = new AbortController();
+            const session = startLiveGuidePreview(refreshed, previewController);
+            session.promise.catch((error) => {
+              if (!previewController.signal.aborted) {
+                toast(error.message, { tone: "error" });
+              }
+            });
+            return;
+          }
+          Object.assign(material, refreshed);
           await updateClass(klass.id, {
             materials: klass.materials.filter((item) => item.resourceScope !== "personal")
           });

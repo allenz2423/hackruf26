@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import re
 import threading
+import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -14,6 +16,8 @@ from urllib.parse import urlsplit
 import httpx
 
 MAX_PROVIDER_RESPONSE_BYTES = 64 * 1024 * 1024
+MAX_RATE_LIMIT_RETRIES = 3
+PROVIDER_REQUEST_TIMEOUT_SECONDS = 300.0
 _SAFE_STATUS = re.compile(r"^[A-Z0-9_]{1,48}$")
 
 
@@ -114,6 +118,14 @@ def _is_token_limit_finish_reason(value: str | None) -> bool:
     }
 
 
+def _retry_after_seconds(response: httpx.Response, attempt: int) -> float:
+    """Return a bounded retry delay, honoring the provider's Retry-After header."""
+    value = response.headers.get("retry-after", "").strip()
+    if re.fullmatch(r"\d{1,6}(?:\.\d{1,3})?", value):
+        return min(float(value), 120.0)
+    return min(float(2**attempt), 30.0)
+
+
 def _declared_response_too_large(response: httpx.Response) -> bool:
     value = response.headers.get("content-length", "")
     if not value.isdigit():
@@ -211,6 +223,40 @@ def _fallback_request_body(
     """Retry only when the server explicitly identifies a compatibility parameter."""
     error = error_payload.get("error")
     parameter = error.get("param") if isinstance(error, dict) else None
+    response_format = body.get("response_format")
+    if (
+        parameter in {None, "response_format", "response_format.json_schema"}
+        and isinstance(response_format, dict)
+        and response_format.get("type") == "json_schema"
+    ):
+        schema_config = response_format.get("json_schema")
+        schema = schema_config.get("schema") if isinstance(schema_config, dict) else None
+        if not isinstance(schema, dict):
+            return None
+        fallback = dict(body)
+        fallback["response_format"] = {"type": "json_object"}
+        provider_preferences = fallback.get("provider")
+        if isinstance(provider_preferences, dict):
+            provider_preferences = dict(provider_preferences)
+            provider_preferences.pop("require_parameters", None)
+            if provider_preferences:
+                fallback["provider"] = provider_preferences
+            else:
+                fallback.pop("provider", None)
+        messages = [dict(message) for message in body.get("messages", [])]
+        schema_instruction = (
+            "Return a JSON object that conforms to this trusted output schema. "
+            "Do not add keys that the schema does not allow.\n"
+            + json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+        )
+        if messages and messages[0].get("role") == "system":
+            messages[0]["content"] = (
+                str(messages[0].get("content") or "") + "\n\n" + schema_instruction
+            )
+        else:
+            messages.insert(0, {"role": "system", "content": schema_instruction})
+        fallback["messages"] = messages
+        return fallback
     if parameter == "max_completion_tokens" and parameter in body:
         fallback = dict(body)
         fallback["max_tokens"] = fallback.pop("max_completion_tokens")
@@ -220,6 +266,68 @@ def _fallback_request_body(
         fallback.pop("temperature")
         return fallback
     return None
+
+
+def _openrouter_schema(node: dict[str, Any]) -> dict[str, Any]:
+    """Convert the compact Gemini-style schema to standard JSON Schema null unions."""
+    normalized: dict[str, Any] = {}
+    for key, value in node.items():
+        if key == "nullable":
+            continue
+        if key == "properties" and isinstance(value, dict):
+            normalized[key] = {
+                name: _openrouter_schema(child)
+                for name, child in value.items()
+                if isinstance(child, dict)
+            }
+        elif key == "items" and isinstance(value, dict):
+            normalized[key] = _openrouter_schema(value)
+        elif key == "anyOf" and isinstance(value, list):
+            normalized[key] = [
+                _openrouter_schema(child) if isinstance(child, dict) else child for child in value
+            ]
+        elif key == "additionalProperties" and isinstance(value, dict):
+            normalized[key] = _openrouter_schema(value)
+        else:
+            normalized[key] = value
+
+    if node.get("type") == "object":
+        normalized["additionalProperties"] = False
+        properties = normalized.get("properties")
+        if isinstance(properties, dict):
+            required = normalized.get("required")
+            required_names = list(required) if isinstance(required, list) else []
+            for name in properties:
+                if name not in required_names:
+                    required_names.append(name)
+            normalized["required"] = required_names
+    if node.get("nullable") is True:
+        value_type = normalized.get("type")
+        if not isinstance(value_type, str):
+            enum_values = normalized.get("enum")
+            if isinstance(enum_values, list) and enum_values:
+                value_types = {
+                    "string"
+                    if isinstance(value, str)
+                    else "boolean"
+                    if isinstance(value, bool)
+                    else "integer"
+                    if isinstance(value, int)
+                    else "number"
+                    if isinstance(value, float)
+                    else None
+                    for value in enum_values
+                }
+                value_types.discard(None)
+                if len(value_types) == 1:
+                    value_type = value_types.pop()
+        if isinstance(value_type, str):
+            normalized["type"] = [value_type, "null"]
+            if isinstance(normalized.get("enum"), list) and None not in normalized["enum"]:
+                normalized["enum"] = [*normalized["enum"], None]
+        else:
+            normalized = {"anyOf": [normalized, {"type": "null"}]}
+    return normalized
 
 
 def _extract_text(payload: dict[str, Any]) -> tuple[str, str | None]:
@@ -237,8 +345,17 @@ def _extract_text(payload: dict[str, Any]) -> tuple[str, str | None]:
     if isinstance(content, str):
         return content, finish_reason
     if isinstance(content, list):
-        text_parts = [item.get("text") for item in content if isinstance(item, dict)]
-        if text_parts and all(isinstance(item, str) for item in text_parts):
+        # OpenRouter can expose separate reasoning blocks alongside visible
+        # text. Only visible text belongs in the JSON document parsed by the
+        # content service.
+        text_parts = [
+            item["text"]
+            for item in content
+            if isinstance(item, dict)
+            and item.get("type") in {None, "text", "output_text"}
+            and isinstance(item.get("text"), str)
+        ]
+        if text_parts:
             return "".join(text_parts), finish_reason
     # Reasoning models can spend the entire completion budget on internal
     # reasoning and return no visible content with finish_reason="length".
@@ -354,15 +471,76 @@ class OpenAICompatibleClient:
     def _provider_request_body(
         provider: ProviderConfig, contents: object, config: object
     ) -> dict[str, Any]:
-        body = OpenAICompatibleClient._request_body(provider.model, contents, config)
         hostname = urlsplit(provider.base_url).hostname
+        response_schema = getattr(config, "response_json_schema", None)
+        use_native_json_schema = (
+            hostname is not None
+            and (hostname == "openrouter.ai" or hostname.endswith(".openrouter.ai"))
+            and provider.model == "anthropic/claude-haiku-5.5"
+            and getattr(config, "response_mime_type", None) == "application/json"
+            and isinstance(response_schema, dict)
+        )
+        body = OpenAICompatibleClient._request_body(provider.model, contents, config)
+        if use_native_json_schema:
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "screen_tutor_output",
+                    "strict": True,
+                    "schema": _openrouter_schema(response_schema),
+                },
+            }
+            body["provider"] = {"only": ["azure"], "require_parameters": True}
+            # Haiku 5.5 uses adaptive reasoning by default. These calls need
+            # only the final schema-conforming payload, so avoid spending the
+            # output budget on a reasoning trace.
+            body["reasoning"] = {"enabled": False}
+            # Haiku 5.5's Azure route accepts structured outputs but does not
+            # accept temperature alongside a required-parameter route.
+            body.pop("temperature", None)
+            # The API receives the schema directly. Avoid repeating it in the system
+            # prompt, which is especially wasteful across batched study-guide calls.
+            instruction = getattr(config, "system_instruction", None)
+            messages = list(body.get("messages") or [])
+            if messages and messages[0].get("role") == "system":
+                messages[0] = dict(messages[0])
+                messages[0]["content"] = instruction or ""
+                if not messages[0]["content"]:
+                    messages.pop(0)
+            body["messages"] = messages
         if (
             hostname is not None
             and (hostname == "openrouter.ai" or hostname.endswith(".openrouter.ai"))
             and provider.model == "deepseek/deepseek-v4.1-flash"
         ):
-            # Keep this model's reasoning enabled at the requested high level.
-            body["reasoning_effort"] = "high"
+            instruction = getattr(config, "system_instruction", None)
+            is_study_guide_edit = isinstance(instruction, str) and (
+                "You are applying small, source-grounded corrections to an existing "
+                "study guide." in instruction
+            )
+            is_study_guide_review = (
+                isinstance(instruction, str)
+                and "You are an independent course-material verifier." in instruction
+            )
+            is_study_guide_adjudication = (
+                isinstance(instruction, str)
+                and "You are adjudicating reported unsupported-claim findings." in instruction
+            )
+            is_study_guide_author = (
+                isinstance(instruction, str)
+                and "You are Screen Tutor's course study-guide author." in instruction
+            )
+            # Bound reasoning separately for study-guide drafting, reviews, and edits.
+            if is_study_guide_edit or is_study_guide_adjudication:
+                body["reasoning_effort"] = "none"
+            elif is_study_guide_review:
+                # The verifier needs bounded reasoning to distinguish source support
+                # from mere uncertainty, while the small response schema caps its cost.
+                body["reasoning_effort"] = "minimal"
+            elif is_study_guide_author:
+                body["reasoning_effort"] = "minimal"
+            else:
+                body["reasoning_effort"] = "high"
         return body
 
     def _current_config(self) -> ProviderConfig:
@@ -377,11 +555,12 @@ class OpenAICompatibleClient:
         body = self._provider_request_body(provider, contents, config)
         try:
             with httpx.Client(
-                timeout=None,
+                timeout=PROVIDER_REQUEST_TIMEOUT_SECONDS,
                 follow_redirects=False,
                 transport=self._sync_transport,
             ) as client:
-                for attempt in range(3):
+                for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+                    retry_after = None
                     with client.stream(
                         "POST",
                         self._endpoint(provider.base_url),
@@ -394,14 +573,22 @@ class OpenAICompatibleClient:
                         payload = _read_json_limited(response)
                         if response.status_code < 400:
                             break
-                        fallback = (
-                            _fallback_request_body(body, payload)
-                            if response.status_code == 400 and attempt < 2
-                            else None
-                        )
-                        if fallback is None:
-                            raise _provider_error(response.status_code, payload)
-                        body = fallback
+                        if response.status_code == 429 and attempt < MAX_RATE_LIMIT_RETRIES:
+                            retry_after = _retry_after_seconds(response, attempt)
+                        else:
+                            fallback = (
+                                _fallback_request_body(body, payload)
+                                if response.status_code in {400, 404}
+                                and attempt < MAX_RATE_LIMIT_RETRIES
+                                else None
+                            )
+                            if fallback is None:
+                                raise _provider_error(response.status_code, payload)
+                            body = fallback
+                    if retry_after is not None:
+                        time.sleep(retry_after)
+        except httpx.TimeoutException:
+            raise OpenAICompatibleError(504, "PROVIDER_TIMEOUT") from None
         except httpx.HTTPError:
             raise OpenAICompatibleError(502, "PROVIDER_CONNECTION_FAILED") from None
         text, finish_reason = _extract_text(payload)
@@ -418,11 +605,12 @@ class OpenAICompatibleClient:
         body = self._provider_request_body(provider, contents, config)
         try:
             async with httpx.AsyncClient(
-                timeout=None,
+                timeout=PROVIDER_REQUEST_TIMEOUT_SECONDS,
                 follow_redirects=False,
                 transport=self._async_transport,
             ) as client:
-                for attempt in range(3):
+                for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+                    retry_after = None
                     async with client.stream(
                         "POST",
                         self._endpoint(provider.base_url),
@@ -435,14 +623,22 @@ class OpenAICompatibleClient:
                         payload = await _read_json_limited_async(response)
                         if response.status_code < 400:
                             break
-                        fallback = (
-                            _fallback_request_body(body, payload)
-                            if response.status_code == 400 and attempt < 2
-                            else None
-                        )
-                        if fallback is None:
-                            raise _provider_error(response.status_code, payload)
-                        body = fallback
+                        if response.status_code == 429 and attempt < MAX_RATE_LIMIT_RETRIES:
+                            retry_after = _retry_after_seconds(response, attempt)
+                        else:
+                            fallback = (
+                                _fallback_request_body(body, payload)
+                                if response.status_code in {400, 404}
+                                and attempt < MAX_RATE_LIMIT_RETRIES
+                                else None
+                            )
+                            if fallback is None:
+                                raise _provider_error(response.status_code, payload)
+                            body = fallback
+                    if retry_after is not None:
+                        await asyncio.sleep(retry_after)
+        except httpx.TimeoutException:
+            raise OpenAICompatibleError(504, "PROVIDER_TIMEOUT") from None
         except httpx.HTTPError:
             raise OpenAICompatibleError(502, "PROVIDER_CONNECTION_FAILED") from None
         text, finish_reason = _extract_text(payload)
@@ -467,7 +663,12 @@ def _provider_error(status_code: int, payload: dict[str, Any]) -> OpenAICompatib
     error = payload.get("error")
     status = None
     if isinstance(error, dict):
-        status = error.get("code") or error.get("type")
+        status = error.get("type") or error.get("status")
+        metadata = error.get("metadata")
+        if not isinstance(status, str) and isinstance(metadata, dict):
+            status = metadata.get("provider_error_code")
+        if not isinstance(status, str) and isinstance(error.get("code"), str):
+            status = error.get("code")
     return OpenAICompatibleError(status_code, _safe_provider_status(status))
 
 

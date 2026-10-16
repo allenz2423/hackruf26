@@ -145,7 +145,7 @@ export function uploadDocumentSectionsHtml(sections, uploadName) {
       .map((source) => escapeHtml(formatSourceCitation({ ...source, name: uploadName })))
       .join("; ");
     const keyTerms = Array.isArray(section.key_terms) && section.key_terms.length
-      ? `<p><strong>Key terms:</strong> ${section.key_terms.map(escapeHtml).join(", ")}</p>`
+      ? `<p><strong>Key terms:</strong> ${section.key_terms.map((term) => mathHtml(term)).join(", ")}</p>`
       : "";
     return `
       <section class="guide-section">

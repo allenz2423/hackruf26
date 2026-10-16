@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import logging
 import re
@@ -17,6 +18,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse
+from pypdf import PdfReader
 
 from app.api.dependencies import (
     database,
@@ -39,6 +41,7 @@ from app.api.schemas import (
     ResourcePublicationUpdate,
     StudyMaterialCreate,
     StudyMaterialFlagCreate,
+    StudyGuideContent,
     SyllabusOutline,
     SyllabusOutlineUpdate,
     UploadDetail,
@@ -87,10 +90,12 @@ from app.services.source_index import (
     search_authorized_sources,
 )
 from app.services.storage import LocalPrivateStorage, UploadTooLarge
+from app.services.study_document_quality import MAX_SERIALIZED_BYTES, review_study_guide_quality
 from app.services.study_files import StudyFileFailure, compiler_path, create_guide_files
 
 logger = logging.getLogger("screen_tutor.class_library")
 router = APIRouter(tags=["class-library"])
+STUDY_GUIDE_QUALITY_VERSION = 3
 
 
 def _provider_error_metadata(exc: Exception) -> tuple[int | None, str | None]:
@@ -112,7 +117,7 @@ def _study_generation_failure_code(exc: Exception) -> str:
         code = exc.code
     elif isinstance(exc, ContentGenerationFailure):
         code = exc.code
-    elif isinstance(exc, TimeoutError):
+    elif isinstance(exc, TimeoutError) or getattr(exc, "status", None) == "PROVIDER_TIMEOUT":
         code = "provider_timeout"
     else:
         code = "generation_failed"
@@ -345,6 +350,17 @@ def _public_material_content(
                         if isinstance(source, dict)
                         and str(source.get("upload_id")) in visible_source_ids
                     ]
+                if kind == "study_guide" and isinstance(item, dict):
+                    blocks = item.get("blocks", [])
+                    if isinstance(blocks, list):
+                        for block in blocks:
+                            if isinstance(block, dict) and isinstance(block.get("sources"), list):
+                                block["sources"] = [
+                                    source
+                                    for source in block["sources"]
+                                    if isinstance(source, dict)
+                                    and str(source.get("upload_id")) in visible_source_ids
+                                ]
     return result
 
 
@@ -403,6 +419,252 @@ async def _visible_material_source_ids(
                 continue
             visible.add(str(row["note_id"]))
     return visible
+
+
+def _guide_content_fatal_quality_code(content: object) -> str | None:
+    review = review_study_guide_quality(content)
+    fatal_codes = {
+        "non_json_content": "quality_guide_not_json",
+        "non_finite_number": "quality_guide_non_finite_number",
+        "invalid_content": "quality_guide_schema_invalid",
+    }
+    return next(
+        (fatal_codes[issue.code] for issue in review.issues if issue.code in fatal_codes), None
+    )
+
+
+def _validate_guide_pdf(files: dict[str, bytes], content: dict) -> None:
+    pdf = files.get("pdf")
+    latex = files.get("latex")
+    if not pdf or not pdf.startswith(b"%PDF-") or not latex:
+        raise StudyFileFailure("Study-guide export is incomplete.")
+    try:
+        latex_text = latex.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise StudyFileFailure("Study-guide LaTeX export is unreadable.") from exc
+    if any(
+        marker not in latex_text
+        for marker in (r"\documentclass", r"\begin{document}", r"\end{document}")
+    ):
+        raise StudyFileFailure("Study-guide LaTeX export is incomplete.")
+    try:
+        document = PdfReader(io.BytesIO(pdf), strict=True)
+        if not document.pages or len(document.pages) > 500:
+            raise StudyFileFailure("Study-guide PDF has an invalid page count.")
+        extracted = "\n".join(page.extract_text() or "" for page in document.pages)
+        if not extracted.strip():
+            raise StudyFileFailure("Study-guide PDF has no readable text.")
+    except StudyFileFailure:
+        raise
+    except Exception as exc:
+        raise StudyFileFailure("Study-guide PDF is unreadable.") from exc
+    if content.get("format") != "study_guide" or content.get("schema_version") not in {1, 2}:
+        raise StudyFileFailure("Study-guide export has an unsupported content version.")
+    normalized_pdf_text = "".join(
+        character.casefold() for character in extracted if character.isalnum()
+    )
+    for section in content.get("sections", []):
+        heading = str(section.get("heading") or "")
+        normalized_heading = "".join(
+            character.casefold() for character in heading if character.isalnum()
+        )
+        if normalized_heading and normalized_heading not in normalized_pdf_text:
+            raise StudyFileFailure("Study-guide PDF is missing a section heading.")
+
+
+def _validate_and_export_study_guide(
+    *,
+    service: GeminiContentService | None,
+    settings: Settings,
+    title: str,
+    class_name: str,
+    material_id: UUID,
+    content: object,
+    sources: list[dict],
+) -> tuple[dict, dict[str, bytes]]:
+    """Validate the authored structure and export it without a reviewer-model pass."""
+    try:
+        parsed = StudyGuideContent.model_validate(content)
+        normalized = parsed.model_dump(mode="json", exclude_none=True)
+    except Exception as exc:
+        raise ContentGenerationFailure(
+            "The study guide does not match the supported structured format.",
+            code="invalid_model_response",
+            diagnostic_code="quality_guide_schema_invalid",
+        ) from exc
+
+    if parsed.schema_version == 2 and service is not None:
+        normalizer = getattr(service, "normalize_study_guide", None)
+        if callable(normalizer):
+            # This operation assigns IDs, inherits citations, and derives fallback text;
+            # it does not make a provider request or change authored claims.
+            normalized = normalizer(normalized, sources)
+
+    deterministic = review_study_guide_quality(normalized)
+    size_issues = [
+        issue
+        for issue in deterministic.issues
+        if issue.code in {"serialized_size_exceeded", "text_size_exceeded"}
+    ]
+    if size_issues:
+        raise ContentGenerationFailure(
+            "The study guide is larger than the supported document limits.",
+            code="study_guide_quality_failed",
+            diagnostic_code="guide_size_limits",
+            validation_issues=[
+                {"location": issue.location or "guide", "type": issue.code}
+                for issue in size_issues[:8]
+            ],
+        )
+
+    fatal_code = _guide_content_fatal_quality_code(normalized)
+    if fatal_code:
+        raise ContentGenerationFailure(
+            "The study guide could not be checked in its structured format.",
+            code="invalid_model_response",
+            diagnostic_code=fatal_code,
+        )
+
+    try:
+        files = create_guide_files(
+            settings,
+            # The renderer typesets safe expressions and leaves malformed or unsupported
+            # notation readable as escaped text. A math typo must not discard the guide.
+            strict_math=False,
+            title=title,
+            class_name=class_name,
+            material_id=material_id,
+            content=normalized,
+            sources=sources,
+        )
+        _validate_guide_pdf(files, normalized)
+    except StudyFileFailure as exc:
+        raise ContentGenerationFailure(
+            "The study guide could not be exported as a readable document.",
+            code="study_guide_quality_failed",
+            diagnostic_code="study_guide_export_failed",
+        ) from exc
+    return normalized, files
+
+
+async def _ensure_study_guide_quality(
+    application: Any,
+    database: SQLiteDatabase,
+    material_id: UUID,
+    user_id: UUID,
+    material: dict[str, Any],
+    access: dict[str, Any] | None,
+    *,
+    row: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Deterministically revalidate and re-export guides created by older pipelines."""
+    if (
+        material.get("kind") != "study_guide"
+        or material.get("status") != "ready"
+        or int(material.get("quality_review_version") or 0) >= STUDY_GUIDE_QUALITY_VERSION
+    ):
+        return row or material
+
+    service: GeminiContentService | None = getattr(
+        application.state, "gemini_content_service", None
+    )
+    settings: Settings | None = getattr(application.state, "settings", None)
+    if settings is None:
+        raise ApiError(
+            503,
+            "study_guide_quality_unavailable",
+            "This study guide cannot be exported yet. Try again shortly.",
+        )
+
+    try:
+        source_ids = await _visible_material_source_ids(
+            database, material_id, user_id, material, access
+        )
+        source_rows = await database.fetch(
+            "SELECT COALESCE(n.id,s.source_note_id,s.note_id) AS id,"
+            "COALESCE(n.title,s.source_title) AS title,COALESCE(n.kind,s.source_kind) AS kind "
+            "FROM study_material_sources s "
+            "LEFT JOIN course_notes n ON n.id=COALESCE(s.source_note_id,s.note_id) "
+            "WHERE s.material_id=?1 ORDER BY s.position",
+            material_id,
+        )
+        sources = [
+            source
+            for source in source_rows
+            if source.get("id") is not None and str(source["id"]) in source_ids
+        ]
+        class_name = await database.fetchval(
+            "SELECT name FROM course_classes WHERE id=COALESCE(?1,?2)",
+            material.get("class_id"),
+            material.get("origin_class_id"),
+        )
+        old_content = material.get("content")
+        content = json_value(old_content, {})
+        normalized, files = await asyncio.to_thread(
+            _validate_and_export_study_guide,
+            service=service,
+            settings=settings,
+            title=str(material.get("title") or "Study guide"),
+            class_name=str(class_name or "Personal study materials"),
+            material_id=material_id,
+            content=content,
+            sources=sources,
+        )
+        async with database.acquire() as connection:
+            async with connection.transaction():
+                updated = await connection.fetchrow(
+                    "UPDATE study_materials SET content=?2,quality_review_version=?3,"
+                    "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                    "WHERE id=?1 AND status='ready' AND quality_review_version<?3 "
+                    "AND content=?4 RETURNING id",
+                    material_id,
+                    json.dumps(normalized),
+                    STUDY_GUIDE_QUALITY_VERSION,
+                    old_content,
+                )
+                if updated:
+                    await connection.execute(
+                        "DELETE FROM study_material_files WHERE material_id=?1", material_id
+                    )
+                    await connection.executemany(
+                        "INSERT INTO study_material_files (material_id,format,content) "
+                        "VALUES (?1,?2,?3)",
+                        [(material_id, format, data) for format, data in files.items()],
+                    )
+        if not updated:
+            latest = await database.fetchrow(
+                "SELECT * FROM study_materials WHERE id=?1", material_id
+            )
+            if (
+                latest is None
+                or latest.get("status") != "ready"
+                or int(latest.get("quality_review_version") or 0)
+                < STUDY_GUIDE_QUALITY_VERSION
+            ):
+                raise ContentGenerationFailure(
+                    "The guide changed during deterministic validation.",
+                    code="study_guide_quality_failed",
+                    diagnostic_code="quality_validation_compare_and_swap_failed",
+                )
+        return await database.fetchrow(
+            "SELECT m.*,c.name AS class_name FROM study_materials m "
+            "LEFT JOIN course_classes c ON c.id=COALESCE(m.class_id,m.origin_class_id) "
+            "WHERE m.id=?1",
+            material_id,
+        )
+    except ApiError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "study_guide_validation_failed material_id=%s error_code=%s",
+            material_id,
+            _study_generation_failure_code(exc),
+        )
+        raise ApiError(
+            503,
+            "study_guide_quality_unavailable",
+            "This study guide did not pass document validation or export. Try again later.",
+        ) from exc
 
 
 def _infer_kind(filename: str, extension: str, default_kind: str) -> str:
@@ -1889,6 +2151,7 @@ async def _create_material_job(
         material = await database.fetchrow(
             "SELECT m.id,m.class_id,m.origin_class_id,m.owner_id,m.created_by,m.resource_scope,"
             "m.kind,m.scope,m.options,m.generation_instructions, "
+            "m.title_override, "
             "c.name AS class_name "
             "FROM study_materials m LEFT JOIN course_classes c ON c.id = COALESCE(m.class_id,m.origin_class_id) "
             "WHERE m.id = ?1 AND m.status = 'generating'",
@@ -1900,8 +2163,10 @@ async def _create_material_job(
             "SELECT COALESCE(n.id,s.source_note_id,s.note_id) AS id,"
             "COALESCE(n.title,s.source_title) AS title,COALESCE(n.kind,s.source_kind) AS kind,"
             "COALESCE(n.class_id,s.source_class_id,s.class_id) AS class_id,n.created_by,"
-            "n.publication_state,n.release_at,n.resource_scope,n.extracted_text,n.summary,a.id AS assessment_id,"
-            "a.owner_id AS assessment_owner,a.has_student_responses,a.score_percent,a.grading_result,"
+            "n.publication_state,n.release_at,n.resource_scope,n.extracted_text,n.summary,"
+            "n.original_filename,n.mime_type,n.source_type,a.id AS assessment_id,"
+            "n.storage_key AS _storage_key,a.owner_id AS assessment_owner,a.has_student_responses,"
+            "a.score_percent,a.grading_result,"
             "a.answer_key_release_state,a.answer_key_release_at "
             "FROM study_material_sources s LEFT JOIN course_notes n "
             "ON n.id=COALESCE(s.source_note_id,s.note_id) "
@@ -1975,17 +2240,59 @@ async def _create_material_job(
             int(any(excerpt["truncated"] for excerpt in source_excerpts(sources, MAX_NOTE_CONTEXT_CHARS))),
         )
         generation_stage = "material_generation"
+        guide_progress_callback = None
+        if material["kind"] == "study_guide":
+            event_loop = asyncio.get_running_loop()
+
+            def persist_guide_preview(preview: dict) -> None:
+                preview_json = json.dumps(preview, ensure_ascii=False)
+                if len(preview_json.encode("utf-8")) > MAX_SERIALIZED_BYTES:
+                    return
+                future = asyncio.run_coroutine_threadsafe(
+                    database.execute(
+                        "UPDATE study_materials SET preview_content=?2,"
+                        "preview_revision=preview_revision+1,"
+                        "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                        "WHERE id=?1 AND kind='study_guide' AND status='generating'",
+                        material_id,
+                        preview_json,
+                    ),
+                    event_loop,
+                )
+                try:
+                    future.result(timeout=10)
+                except Exception:
+                    future.cancel()
+                    logger.warning("study_guide_preview_persist_failed material_id=%s", material_id)
+
+            guide_progress_callback = persist_guide_preview
         for generation_attempt in range(2):
             try:
+                generation_kwargs = {
+                    "kind": material["kind"],
+                    "class_name": material["class_name"] or "Personal study materials",
+                    "scope": json_value(material["scope"], {}),
+                    "options": json_value(material["options"], {}),
+                    "additional_instructions": material["generation_instructions"],
+                    "sources": sources,
+                }
+                if guide_progress_callback is not None:
+                    generation_kwargs["guide_progress_callback"] = guide_progress_callback
                 title, content = await asyncio.to_thread(
                     service.generate_material,
-                    kind=material["kind"],
-                    class_name=material["class_name"] or "Personal study materials",
-                    scope=json_value(material["scope"], {}),
-                    options=json_value(material["options"], {}),
-                    additional_instructions=material["generation_instructions"],
-                    sources=sources,
+                    **generation_kwargs,
                 )
+                if material["kind"] == "study_guide":
+                    if material.get("title_override"):
+                        title = material["title_override"]
+                    else:
+                        title_suggester = getattr(service, "suggest_study_guide_title", None)
+                        if callable(title_suggester):
+                            title = await asyncio.to_thread(
+                                title_suggester,
+                                class_name=material["class_name"] or "Personal study materials",
+                                content=content,
+                            )
                 break
             except ContentGenerationFailure as exc:
                 if (
@@ -1994,28 +2301,34 @@ async def _create_material_job(
                 ):
                     raise
         files = {}
+        quality_review_version = 0
         if material["kind"] == "study_guide":
-            generation_stage = "pdf_export"
-            files = await asyncio.to_thread(
-                create_guide_files,
-                application.state.settings,
+            generation_stage = "document_validation_export"
+            content, files = await asyncio.to_thread(
+                _validate_and_export_study_guide,
+                service=service,
+                settings=application.state.settings,
                 title=title,
                 class_name=material["class_name"] or "Personal study materials",
                 material_id=UUID(str(material_id)),
                 content=content,
                 sources=sources,
             )
+            quality_review_version = STUDY_GUIDE_QUALITY_VERSION
         generation_stage = "persist"
         async with database.acquire() as connection:
             async with connection.transaction():
                 completed = await connection.fetchrow(
                     "UPDATE study_materials SET title = ?2, content = ?3, status = 'ready', "
+                    "preview_content = NULL, "
+                    "quality_review_version = ?4, "
                     "failure_code = NULL, generated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
                     "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
                     "WHERE id = ?1 AND status = 'generating' RETURNING id",
                     material_id,
                     title,
                     json.dumps(content),
+                    quality_review_version,
                 )
                 if completed and files:
                     await connection.executemany(
@@ -2028,14 +2341,20 @@ async def _create_material_job(
             exc.diagnostic_code if isinstance(exc, ContentGenerationFailure) else None
         )
         provider_code, provider_status = _provider_error_metadata(exc)
+        validation_issues = (
+            json.dumps(exc.validation_issues, ensure_ascii=True, separators=(",", ":"))
+            if isinstance(exc, ContentGenerationFailure) and exc.validation_issues
+            else "none"
+        )
         logger.error(
             "study_generation_failed material_id=%s stage=%s category=%s error_code=%s "
-            "failure_detail=%s provider_code=%s provider_status=%s",
+            "failure_detail=%s validation_issues=%s provider_code=%s provider_status=%s",
             material_id,
             generation_stage,
             type(exc).__name__,
             failure_code,
             failure_detail,
+            validation_issues,
             provider_code,
             provider_status,
         )
@@ -2069,6 +2388,12 @@ async def create_study_material(
     await _rate_limit(request, "generation_rate_limiter", user_id)
     scope = payload.scope.model_dump(mode="json")
     options = payload.options.model_dump(mode="json", exclude_none=True)
+    if payload.kind == "study_guide":
+        guide_styles = payload.guide_styles or [payload.guide_style or "balanced"]
+        options["guide_styles"] = guide_styles
+        # Preserve the old summary/options field as the primary style for clients
+        # that have not started reading guide_styles yet.
+        options["guide_style"] = guide_styles[0]
     if payload.kind in {"quiz", "practice_exam"}:
         options["language"] = payload.language
     if payload.kind != "practice_exam" and options.get("time_limit_minutes") is not None:
@@ -2080,7 +2405,7 @@ async def create_study_material(
             "Question types are available only for quizzes and practice exams.",
         )
     sources, scope = await _resolve_material_sources(database, class_id, scope, user_id, access)
-    title = f"{payload.kind.replace('_', ' ').title()}: {class_row['name']}"
+    title = payload.title or f"{payload.kind.replace('_', ' ').title()}: {class_row['name']}"
     personal = payload.destination == "personal"
     resource_scope = "personal" if personal else "student_contribution"
     material_class_id = None if personal else class_id
@@ -2308,8 +2633,8 @@ async def create_study_material(
             row = await connection.fetchrow(
                 "INSERT INTO study_materials "
                 "(id,class_id,origin_class_id,resource_scope,owner_id,created_by,publication_state, "
-                "feedback_release_policy,kind,title,status,scope,options,generation_instructions) "
-                "VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'generating',?11,?12,?13) "
+                "feedback_release_policy,kind,title,title_override,status,scope,options,generation_instructions) "
+                "VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'generating',?12,?13,?14) "
                 "RETURNING *",
                 uuid4(),
                 material_class_id,
@@ -2321,6 +2646,7 @@ async def create_study_material(
                 feedback_release_policy,
                 payload.kind,
                 title,
+                payload.title,
                 json.dumps(scope),
                 json.dumps(options),
                 payload.additional_instructions,
@@ -2440,10 +2766,37 @@ async def get_study_material(
         "WHERE f.material_id=m.id) AS feedback_released "
         "FROM study_materials m WHERE m.id=?1", material_id, user_id,
     )
+    guide_exports_ready = True
+    if row["kind"] == "study_guide" and row["status"] == "ready":
+        try:
+            row = await _ensure_study_guide_quality(
+                request.app,
+                database,
+                material_id,
+                user_id,
+                row,
+                access,
+                row=row,
+            )
+        except ApiError as exc:
+            if exc.code != "study_guide_quality_unavailable":
+                raise
+            # Keep the authored guide readable even when a legacy export cannot be rebuilt.
+            # File downloads still pass through the validation gate and remain unavailable.
+            guide_exports_ready = False
     response.headers["Cache-Control"] = "private, no-store"
     visible_source_ids = await _visible_material_source_ids(
         database, material_id, user_id, material, access
     )
+    preview_content = None
+    preview_revision = 0
+    if row["kind"] == "study_guide" and row["status"] in {"generating", "failed"}:
+        preview_content = _public_material_content(
+            row["kind"],
+            row.get("preview_content"),
+            visible_source_ids=visible_source_ids,
+        )
+        preview_revision = int(row.get("preview_revision") or 0)
     feedback_released = bool(
         await database.fetchval(
             "SELECT 1 FROM study_material_feedback_releases WHERE material_id=?1", material_id
@@ -2458,13 +2811,85 @@ async def get_study_material(
             visible_source_ids=visible_source_ids,
             include_assessment_feedback=feedback_released,
         ),
+        preview_content=preview_content,
+        preview_revision=preview_revision,
         download_urls={
             format: f"/api/study-materials/{material_id}/files/{format}"
             for format in ("pdf", "latex")
         }
-        if row["kind"] == "study_guide" and row["status"] == "ready"
+        if row["kind"] == "study_guide" and row["status"] == "ready" and guide_exports_ready
         else {},
     )
+
+
+@router.post("/api/study-materials/{material_id}/retry", status_code=202)
+async def retry_study_guide_generation(
+    material_id: UUID,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> MaterialSummary:
+    user_id, database, settings = await _authorize(request)
+    material, access = await material_access(database, material_id, user_id)
+    if access is not None:
+        require_resource_mutation(
+            access,
+            user_id,
+            material["created_by"],
+            "create",
+            resource_scope=material["resource_scope"],
+            publication_state=material["publication_state"],
+            release_at=material["release_at"],
+        )
+    if material["kind"] != "study_guide":
+        raise ApiError(409, "retry_not_supported", "Only failed study guides can be retried.")
+    if material["status"] != "failed":
+        code = "generation_in_progress" if material["status"] == "generating" else "material_not_retryable"
+        message = (
+            "This study guide is already generating."
+            if material["status"] == "generating"
+            else "Only failed study guides can be retried."
+        )
+        raise ApiError(409, code, message)
+    if getattr(request.app.state, "gemini_content_service", None) is None:
+        raise ApiError(
+            503, "content_processing_unavailable", "Study material generation is unavailable."
+        )
+    if not compiler_path(settings):
+        raise ApiError(503, "pdf_export_unavailable", "Study-guide PDF generation is unavailable.")
+    await _rate_limit(request, "generation_rate_limiter", user_id)
+
+    async with database.acquire() as connection:
+        async with connection.transaction():
+            claimed = await connection.fetchrow(
+                "UPDATE study_materials SET status='generating',content=NULL,failure_code=NULL,"
+                "quality_review_version=0,generated_at=NULL,"
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                "WHERE id=?1 AND kind='study_guide' AND status='failed' RETURNING id",
+                material_id,
+            )
+            if claimed is None:
+                current_status = await connection.fetchval(
+                    "SELECT status FROM study_materials WHERE id=?1 AND kind='study_guide'",
+                    material_id,
+                )
+                if current_status == "generating":
+                    raise ApiError(
+                        409, "generation_in_progress", "This study guide is already generating."
+                    )
+                raise ApiError(
+                    409, "material_not_retryable", "Only failed study guides can be retried."
+                )
+            await connection.execute(
+                "DELETE FROM study_material_files WHERE material_id=?1", material_id
+            )
+            row = await connection.fetchrow(
+                "SELECT m.*,COALESCE(json_extract(m.options,'$.count'),0) AS requested_count "
+                "FROM study_materials m WHERE m.id=?1",
+                material_id,
+            )
+
+    background_tasks.add_task(_create_material_job, request.app, material_id)
+    return _material_summary(row)
 
 
 @router.get("/api/study-materials/{material_id}/files/{format}")
@@ -2479,7 +2904,7 @@ async def download_study_file(
         "LEFT JOIN course_classes c ON c.id=COALESCE(m.class_id,m.origin_class_id) WHERE m.id=?1",
         material_id,
     )
-    await material_access(database, material_id, user_id)
+    _, access = await material_access(database, material_id, user_id)
     if material is None:
         raise ApiError(404, "not_found", "The requested resource was not found.")
     if material["kind"] != "study_guide":
@@ -2488,6 +2913,15 @@ async def download_study_file(
         )
     if material["status"] != "ready":
         raise ApiError(409, "material_not_ready", "Wait for this study guide to finish generating.")
+    material = await _ensure_study_guide_quality(
+        request.app,
+        database,
+        material_id,
+        user_id,
+        material,
+        access,
+        row=material,
+    )
     file = await database.fetchrow(
         "SELECT content FROM study_material_files WHERE material_id = ?1 AND format = ?2",
         material_id,
@@ -2506,12 +2940,14 @@ async def download_study_file(
             files = await asyncio.to_thread(
                 create_guide_files,
                 settings,
+                strict_math=False,
                 title=material["title"],
                 class_name=material["class_name"] or "Personal study materials",
                 material_id=material_id,
                 content=json_value(material["content"], {}),
                 sources=sources,
             )
+            _validate_guide_pdf(files, json_value(material["content"], {}))
         except StudyFileFailure as exc:
             raise ApiError(
                 503,

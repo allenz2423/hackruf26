@@ -4,6 +4,8 @@ import { icon } from "./icons.js";
 import { renderFlashcards, normalizeCards } from "./flashcards.js";
 import { sourceCitationHtml, bindSourceCitations, sourceWarningsHtml } from "./source-citations.js";
 import { downloadStudyFileApi } from "./api.js";
+import { normalizeGuideBlocks } from "./study-guide/normalize.js";
+import { mountStudyGuideBlocks, renderStudyGuideBlock } from "./study-guide/force-components.js";
 
 function addDialog(title) {
   const dialog = document.createElement("dialog");
@@ -15,11 +17,60 @@ function addDialog(title) {
         <h2 id="material-dialog-title">${escapeHtml(title)}</h2>
         <p class="row-meta" id="material-dialog-meta"></p>
       </div>
-      <button class="btn btn-secondary" type="button" data-close aria-label="Close study material">Close</button>
+      <div class="preview-header-actions">
+        <button class="btn btn-secondary" type="button" data-fullscreen hidden>Full screen</button>
+        <a class="btn btn-secondary" data-open-in-new-tab target="_blank" rel="noopener noreferrer" hidden>Open in new tab</a>
+        <button class="btn btn-secondary" type="button" data-close aria-label="Close study material">Close</button>
+      </div>
     </header>
     <div class="material-session" id="material-session"></div>
   `;
   dialog.querySelector("[data-close]").addEventListener("click", () => dialog.close());
+  const fullscreenButton = dialog.querySelector("[data-fullscreen]");
+  const updateFullscreenButton = () => {
+    if (!fullscreenButton) return;
+    const isFullscreen = document.fullscreenElement === dialog
+      || document.webkitFullscreenElement === dialog
+      || dialog.classList.contains("is-viewport-fullscreen");
+    fullscreenButton.textContent = isFullscreen ? "Exit full screen" : "Full screen";
+    fullscreenButton.setAttribute("aria-pressed", String(isFullscreen));
+  };
+  fullscreenButton?.addEventListener("click", async () => {
+    const isNativeFullscreen = document.fullscreenElement === dialog
+      || document.webkitFullscreenElement === dialog;
+    const isViewportFullscreen = dialog.classList.contains("is-viewport-fullscreen");
+    try {
+      if (isNativeFullscreen) {
+        const exit = document.exitFullscreen?.bind(document)
+          || document.webkitExitFullscreen?.bind(document);
+        if (exit) await exit();
+        else dialog.classList.add("is-viewport-fullscreen");
+      } else if (isViewportFullscreen) {
+        dialog.classList.remove("is-viewport-fullscreen");
+      } else {
+        const request = dialog.requestFullscreen?.bind(dialog)
+          || dialog.webkitRequestFullscreen?.bind(dialog);
+        if (request) {
+          await request();
+        } else {
+          dialog.classList.add("is-viewport-fullscreen");
+          toast("This browser keeps its toolbar visible; the guide now fills the tab.", { tone: "info" });
+        }
+      }
+    } catch {
+      dialog.classList.add("is-viewport-fullscreen");
+      toast("Browser fullscreen was blocked; the guide now fills this tab.", { tone: "info" });
+    }
+    updateFullscreenButton();
+  });
+  document.addEventListener?.("fullscreenchange", updateFullscreenButton);
+  document.addEventListener?.("webkitfullscreenchange", updateFullscreenButton);
+  dialog.addEventListener("close", () => {
+    document.removeEventListener?.("fullscreenchange", updateFullscreenButton);
+    document.removeEventListener?.("webkitfullscreenchange", updateFullscreenButton);
+    if (document.fullscreenElement === dialog) void document.exitFullscreen?.();
+    else if (document.webkitFullscreenElement === dialog) void document.webkitExitFullscreen?.();
+  }, { once: true });
   dialog.addEventListener("close", () => dialog.remove(), { once: true });
   document.body.append(dialog);
   dialog.showModal();
@@ -32,7 +83,7 @@ function addDialog(title) {
  * Supports objects with sections, raw arrays, JSON strings, markdown headings, or plain text.
  */
 export function parseGuideSections(material) {
-  let content = material.content;
+  let content = material.previewContent || material.content;
 
   if (!content) {
     if (Array.isArray(material.sections) && material.sections.length > 0) {
@@ -118,34 +169,42 @@ export function parseGuideSections(material) {
   return [];
 }
 
-function formatBodyParagraphs(body) {
-  if (!body) return "";
-  if (typeof body !== "string") {
-    if (typeof body === "object") {
-      try {
-        return `<pre class="document-text">${escapeHtml(JSON.stringify(body, null, 2))}</pre>`;
-      } catch {
-        return "";
-      }
-    }
-    body = String(body);
-  }
-  return body
-    .split(/\n{2,}/)
-    .filter((p) => p.trim())
-    .map((p) => `<p>${mathHtml(p.trim()).replace(/\n/g, "<br>")}</p>`)
-    .join("");
+function guideSectionSources(section, blocks) {
+  const sources = [...(Array.isArray(section.sources) ? section.sources : []), ...blocks.flatMap((block) => block.sources || [])];
+  const seen = new Set();
+  return sources.filter((source) => {
+    let key;
+    try { key = JSON.stringify(source); } catch { return false; }
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
-function renderGuide(root, material) {
+function renderGuide(root, material, onRetry = null) {
   const sections = parseGuideSections(material);
   const flashcardsAvailable = normalizeCards(material).length > 0;
   const questionsAvailable = (material.items?.length || material.questions?.length || 0) > 0;
 
   root.innerHTML = `
     ${sourceWarningsHtml(material)}
+    ${material.status === "generating" ? `
+      <div class="generation-preview-banner" role="status" aria-live="polite">
+        <strong>Live preview · not checked yet</strong>
+        <span>Sections appear as they are drafted and may change. The saved guide and downloads are available after document validation and export finish.</span>
+        <span>Closing this preview leaves generation running. Reopen it from Saved materials.</span>
+      </div>
+    ` : material.status === "failed" ? `
+      <div class="generation-preview-banner generation-preview-error" role="status">
+        <strong>Generation stopped before the guide was saved.</strong>
+        <span>${sections.length
+          ? "This partial preview is not saved or export-checked. Downloads are unavailable."
+          : "No preview was saved before generation stopped. Downloads are unavailable."}</span>
+        ${onRetry ? `<button class="btn btn-secondary btn-small" type="button" data-retry-guide>Retry generation</button>` : ""}
+      </div>
+    ` : ""}
     <div class="study-mode-actions">
-      ${material.isRemote ? `
+      ${material.isRemote && material.status === "ready" ? `
         <button class="btn btn-primary" type="button" data-download-guide="pdf">Download PDF</button>
         <button class="btn btn-secondary" type="button" data-download-guide="latex">Download LaTeX</button>
         <span class="field-hint" role="status" data-download-status></span>
@@ -165,38 +224,64 @@ function renderGuide(root, material) {
     <article class="guide-content">
       ${sections.length > 0 ? `
         <div class="guide-sections-list">
-          ${sections.map((section, idx) => `
-            <section class="guide-section">
+          ${sections.map((section, idx) => {
+            const blocks = normalizeGuideBlocks(section, idx);
+            const sources = guideSectionSources(section, blocks);
+            return `
+            <section class="guide-section" data-guide-section="${escapeHtml(section.id || `section-${idx + 1}`)}">
               <h3 class="guide-section-heading">${mathHtml(section.heading || `Section ${idx + 1}`)}</h3>
-              <div class="guide-section-body">
-                ${formatBodyParagraphs(section.body)}
+              <div class="guide-section-blocks">
+                ${blocks.map((block) => `<div class="guide-section-block" data-guide-block="${escapeHtml(block.id)}">${renderStudyGuideBlock(block)}</div>`).join("")}
               </div>
               ${Array.isArray(section.key_terms) && section.key_terms.length > 0 ? `
                 <div class="guide-meta-block">
                   <span class="guide-meta-label">Key terms:</span>
                   <div class="guide-chips">
-                    ${section.key_terms.map((term) => `<span class="chip key-term-chip">${escapeHtml(term)}</span>`).join("")}
+                    ${section.key_terms.map((term) => `<span class="chip key-term-chip">${mathHtml(term)}</span>`).join("")}
                   </div>
                 </div>
               ` : ""}
-              ${Array.isArray(section.sources) && section.sources.length > 0 ? `
+              ${sources.length > 0 ? `
                 <div class="guide-meta-block">
                   <span class="guide-meta-label">Sources:</span>
                   <div class="guide-chips">
-                    ${section.sources.map(sourceCitationHtml).join("")}
+                    ${sources.map(sourceCitationHtml).join("")}
                   </div>
                 </div>
               ` : ""}
             </section>
-          `).join("")}
+          `;
+          }).join("")}
         </div>
       ` : `
-        <p class="muted">This study guide has no written content yet.</p>
+        <p class="muted">${material.status === "generating"
+          ? "Preparing the first section preview…"
+          : material.status === "failed"
+            ? "No complete guide was saved. Generate a new study guide to try again."
+            : "This study guide has no written content yet."}</p>
       `}
     </article>
   `;
+  mountStudyGuideBlocks(root);
   void typesetMath(root);
   bindSourceCitations(root, material);
+
+  root.querySelector("[data-retry-guide]")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = "Starting retry…";
+    try {
+      const result = await onRetry(material);
+      if (result?.status === "failed" && root.isConnected) {
+        toast("The retry failed too. The saved preview is still provisional.", { tone: "error" });
+      }
+    } catch (error) {
+      if (error?.name === "AbortError" || !root.isConnected) return;
+      button.disabled = false;
+      button.textContent = "Retry generation";
+      toast(error.message || "Could not retry this study guide.", { tone: "error" });
+    }
+  });
 
   root.querySelectorAll("[data-download-guide]").forEach((button) => button.addEventListener("click", async () => {
     const buttons = root.querySelectorAll("[data-download-guide]");
@@ -223,11 +308,11 @@ function renderGuide(root, material) {
   }));
 
   root.querySelector("[data-flashcards]")?.addEventListener("click", () => {
-    renderFlashcards(root, material, { onBack: () => renderGuide(root, material) });
+    renderFlashcards(root, material, { onBack: () => renderGuide(root, material, onRetry) });
   });
 
   root.querySelector("[data-practice]")?.addEventListener("click", () => {
-    renderQuestions(root, material, () => renderGuide(root, material));
+    renderQuestions(root, material, () => renderGuide(root, material, onRetry));
   });
 }
 
@@ -331,20 +416,94 @@ function renderQuestions(root, material, onReturn = null) {
   draw();
 }
 
-export function openMaterialViewer(material) {
+export function openMaterialViewer(material, { onRetry = null } = {}) {
   const dialog = addDialog(material.type || "Study material");
   const root = dialog.querySelector("#material-session");
-  const count = material.items?.length || material.cards?.length || material.questions?.length || material.count || 0;
-  const label = material.isSample ? "Sample material" : material.isRemote ? "AI-generated" : "Local draft";
-  dialog.querySelector("#material-dialog-meta").textContent = `${material.scope || "Class review"} - ${count} ${count === 1 ? "item" : "items"} - ${label}`;
+  let currentMaterial = material;
 
-  if (material.type === "Flashcards") {
-    renderFlashcards(root, material, {
-      onBack: () => dialog.close()
-    });
-  } else if (material.type === "Study guide" && (material.content || material.sections)) {
-    renderGuide(root, material);
-  } else {
-    renderQuestions(root, material);
-  }
+  const render = (nextMaterial) => {
+    currentMaterial = nextMaterial;
+    const scrollTop = root.scrollTop;
+    const previewSectionCount = nextMaterial.previewContent?.sections?.length || 0;
+    const count = nextMaterial.items?.length
+      || nextMaterial.cards?.length
+      || nextMaterial.questions?.length
+      || nextMaterial.count
+      || 0;
+    const label = nextMaterial.status === "generating"
+      ? "Live preview · not checked"
+      : nextMaterial.status === "failed"
+        ? "Generation failed"
+        : nextMaterial.isSample ? "Sample material"
+          : nextMaterial.isRemote ? "AI-generated" : "Local draft";
+    const countLabel = nextMaterial.status === "generating"
+      ? `${previewSectionCount}${count ? ` of ${count}` : ""} sections`
+      : `${count} ${count === 1 ? "item" : "items"}`;
+    const title = dialog.querySelector("#material-dialog-title");
+    title.innerHTML = mathHtml(nextMaterial.title || nextMaterial.type || "Study material");
+    void typesetMath(title);
+    const meta = dialog.querySelector("#material-dialog-meta");
+    meta.innerHTML = mathHtml(`${nextMaterial.scope || "Class review"} - ${countLabel} - ${label}`);
+    void typesetMath(meta);
+
+    const fullscreenButton = dialog.querySelector("[data-fullscreen]");
+    if (fullscreenButton) fullscreenButton.hidden = nextMaterial.type !== "Study guide";
+    const openInNewTabLink = dialog.querySelector("[data-open-in-new-tab]");
+    if (openInNewTabLink) {
+      const isRemoteGuide = nextMaterial.type === "Study guide" && nextMaterial.isRemote && nextMaterial.id;
+      let href = "";
+      if (isRemoteGuide && globalThis.location?.href) {
+        const url = new URL(globalThis.location.href);
+        url.hash = "";
+        url.search = "";
+        url.searchParams.set("study_guide", nextMaterial.id);
+        href = `${url.pathname}${url.search}`;
+      }
+      openInNewTabLink.hidden = !href;
+      if (href) openInNewTabLink.href = href;
+    }
+
+    if (nextMaterial.type === "Flashcards") {
+      renderFlashcards(root, nextMaterial, {
+        onBack: () => dialog.close()
+      });
+    } else if (nextMaterial.type === "Study guide" && (
+      nextMaterial.content || nextMaterial.sections || nextMaterial.previewContent
+      || ["generating", "failed"].includes(nextMaterial.status)
+    )) {
+      renderGuide(root, nextMaterial, typeof onRetry === "function"
+        ? (failedMaterial) => onRetry(failedMaterial, render)
+        : null);
+    } else {
+      renderQuestions(root, nextMaterial);
+    }
+    root.scrollTop = scrollTop;
+  };
+
+  render(material);
+  return {
+    dialog,
+    close: () => dialog.close(),
+    get isOpen() { return dialog.open; },
+    update(nextMaterial) {
+      if (!dialog.open) return false;
+      if (
+        nextMaterial.status === currentMaterial.status
+        && nextMaterial.previewRevision === currentMaterial.previewRevision
+      ) return false;
+      if (
+        nextMaterial.status === "failed"
+        && !nextMaterial.previewContent
+        && currentMaterial.previewContent
+      ) {
+        nextMaterial = {
+          ...nextMaterial,
+          previewContent: currentMaterial.previewContent,
+          previewRevision: currentMaterial.previewRevision
+        };
+      }
+      render(nextMaterial);
+      return true;
+    }
+  };
 }

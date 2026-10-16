@@ -38,8 +38,8 @@ function delay(signal) {
   });
 }
 
-async function waitForJob(read, { signal, onStatus } = {}) {
-  const deadline = Date.now() + PROCESSING_WAIT_MS;
+async function waitForJob(read, { signal, onStatus, timeoutMs = PROCESSING_WAIT_MS } = {}) {
+  const deadline = Number.isFinite(timeoutMs) ? Date.now() + timeoutMs : Number.POSITIVE_INFINITY;
   while (true) {
     throwIfAborted(signal);
     const detail = await read();

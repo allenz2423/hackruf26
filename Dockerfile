@@ -17,7 +17,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y ca-certificates util-linux \
+    && apt-get install --no-install-recommends -y \
+        ca-certificates util-linux libreoffice-impress poppler-utils fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/pyproject.toml backend/README.md /app/backend/

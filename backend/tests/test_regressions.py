@@ -293,7 +293,9 @@ class ProcessingLifecycleRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_startup_recovers_interrupted_work_and_preserves_ready_records(self) -> None:
         pending = await self.note()
         ready = await self.note("ready")
-        assessment_id, material_id, ready_material = uuid4(), uuid4(), uuid4()
+        assessment_id, material_id, ready_material, guide_preview_id = (
+            uuid4(), uuid4(), uuid4(), uuid4()
+        )
         await self.database.execute(
             "INSERT INTO uploaded_assessments (id, class_id, note_id) VALUES (?1, ?2, ?3)",
             assessment_id,
@@ -312,6 +314,14 @@ class ProcessingLifecycleRegressionTests(unittest.IsolatedAsyncioTestCase):
                 status,
                 content,
             )
+        preview = {"format": "study_guide", "sections": [{"heading": "Saved preview"}]}
+        await self.database.execute(
+            "INSERT INTO study_materials (id, class_id, kind, title, status, preview_content, "
+            "preview_revision) VALUES (?1, ?2, 'study_guide', 'Guide', 'generating', ?3, 7)",
+            guide_preview_id,
+            self.class_id,
+            json.dumps(preview),
+        )
         await recover_interrupted_jobs(self.database)
         self.assertEqual(
             await self.database.fetchrow(
@@ -340,6 +350,19 @@ class ProcessingLifecycleRegressionTests(unittest.IsolatedAsyncioTestCase):
                 material_id,
             ),
             {"status": "failed", "failure_code": "generation_interrupted"},
+        )
+        self.assertEqual(
+            await self.database.fetchrow(
+                "SELECT status, failure_code, preview_content, preview_revision "
+                "FROM study_materials WHERE id = ?1",
+                guide_preview_id,
+            ),
+            {
+                "status": "failed",
+                "failure_code": "generation_interrupted",
+                "preview_content": json.dumps(preview),
+                "preview_revision": 7,
+            },
         )
         self.assertEqual(
             await self.database.fetchval(

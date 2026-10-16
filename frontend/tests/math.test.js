@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import katex from "katex";
 
-import { mathHtml, splitMath } from "../src/math.js";
+import { displayMathHtml, mathHtml, splitMath } from "../src/math.js";
 
 const kinds = (text) => splitMath(text).map((s) => (s.type === "math" ? `${s.display ? "D" : "I"}:${s.tex}` : `T:${s.value}`));
 
@@ -20,6 +22,10 @@ test("recognises the other delimiters", () => {
   assert.deepEqual(kinds("$$a+b$$"), ["D:a+b"]);
   assert.deepEqual(kinds("see \\[\\frac{1}{2}\\] now"), ["T:see ", "D:\\frac{1}{2}", "T: now"]);
   assert.deepEqual(kinds("$$\n a \\\\ b \n$$"), ["D:a \\\\ b"]);
+  assert.deepEqual(
+    kinds("\\begin{alignat}{2}x&=1&y&=2\\end{alignat}"),
+    ["D:\\begin{alignedat}{2}x&=1&y&=2\\end{alignedat}"]
+  );
 });
 
 test("prices and stray dollar signs stay plain text", () => {
@@ -62,6 +68,83 @@ test("an unclosed formula cannot swallow prose or later formulas", () => {
 
 test("multi-letter math names inside groups remain renderable", () => {
   assert.deepEqual(kinds("$x_{max}=\\text{kg}$ and $xy$"), ["I:x_{max}=\\text{kg}", "T: and ", "I:xy"]);
+});
+
+test("detects and KaTeX-renders the undelimited glossary symbols from study guide asa", () => {
+  const asaPreview = JSON.parse(readFileSync(
+    new URL("./fixtures/asa-active-preview.json", import.meta.url),
+    "utf8"
+  ));
+  const symbols = asaPreview.sections
+    .flatMap((section) => Array.isArray(section.blocks) ? section.blocks : [])
+    .filter((block) => block.type === "formula")
+    .flatMap((block) => Array.isArray(block.definitions) ? block.definitions : [])
+    .map((definition) => definition.symbol)
+    .filter((symbol) => typeof symbol === "string");
+  const targets = ["\\sigma_{max}", "\\sigma_{min}", "\\sigma_{ut}", "\\sigma_{uc}"];
+  const targetDefinitions = symbols.filter((symbol) => targets.some((target) => symbol.includes(target)));
+
+  assert.ok(targetDefinitions.some((symbol) => symbol.includes("\\sigma_{max},\\sigma_{min}")));
+  assert.ok(targetDefinitions.some((symbol) => symbol === "\\sigma_{ut}"));
+  assert.ok(targetDefinitions.some((symbol) => symbol === "\\sigma_{uc}"));
+
+  const math = targetDefinitions.flatMap((symbol) =>
+    splitMath(symbol).filter((segment) => segment.type === "math")
+  );
+  assert.deepEqual([...new Set(math.map((segment) => segment.tex))].sort(), [...targets].sort());
+  assert.ok(math.every((segment) => segment.raw === segment.tex));
+
+  for (const segment of math) {
+    assert.match(mathHtml(segment.raw), /class="tex-math"/);
+    assert.match(katex.renderToString(segment.tex, {
+      throwOnError: true,
+      trust: false,
+      output: "htmlAndMathml"
+    }), /class="katex"/);
+  }
+});
+
+test("detects bare TeX inline in prose without consuming the surrounding words", () => {
+  const inline = "The limit is \\sigma_{max} for this condition.";
+  assert.deepEqual(kinds(inline), [
+    "T:The limit is ",
+    "I:\\sigma_{max}",
+    "T: for this condition."
+  ]);
+  const segments = splitMath(inline);
+  assert.equal(segments.map((segment) => segment.raw ?? segment.value).join(""), inline);
+});
+
+test("renders math emitted in code fences, inline code, HTML entities, and double-escaped TeX", () => {
+  const samples = [
+    "```latex\n\\sigma_{max}=3\n```",
+    "Use `\\tau_{xy}` here.",
+    "&sigma;_{max} = 3",
+    String.raw`\\nu`,
+    "\\begin{alignat}{2}x&=1&y&=2\\end{alignat}",
+  ];
+  assert.deepEqual(kinds(samples[0]), ["D:\\sigma_{max}=3"]);
+  assert.deepEqual(kinds(samples[1]), ["T:Use ", "I:\\tau_{xy}", "T: here."]);
+  assert.deepEqual(kinds(samples[2]), ["I:\\sigma_{max} = 3"]);
+  assert.deepEqual(kinds(samples[3]), ["I:\\nu"]);
+
+  const expressions = samples.flatMap((sample) => splitMath(sample).filter((part) => part.type === "math"));
+  expressions.push(...["$σₓ=1$", "$\\text{H₂O}$", "$$\\sigma_{max}=3$$"]
+    .flatMap((sample) => splitMath(sample).filter((part) => part.type === "math")));
+  for (const expression of expressions) {
+    assert.match(katex.renderToString(expression.tex, {
+      throwOnError: true,
+      trust: false,
+      displayMode: expression.display,
+      output: "htmlAndMathml"
+    }), /class="katex"/);
+  }
+});
+
+test("formula fields normalize their existing delimiters and Unicode math", () => {
+  assert.match(displayMathHtml("$$\\sigma_{max}=3$$"), /data-tex="\\sigma_\{max\}=3"/);
+  assert.match(mathHtml("$σₓ=1$"), /data-tex="\\sigma_\{x\}=1"/);
+  assert.match(mathHtml("$\\text{H₂O}$"), /data-tex="\\text\{H\}_\{2\}\\text\{O\}"/);
 });
 
 test("text around math is escaped, so HTML in the text cannot run", () => {

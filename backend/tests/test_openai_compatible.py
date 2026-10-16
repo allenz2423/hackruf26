@@ -5,17 +5,22 @@ from __future__ import annotations
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import httpx
 from google.genai import types
 
+from app.services.gemini_content import _provider_response_schema, _StudyGuideSectionBatch
 from app.services.openai_compatible import (
     MAX_PROVIDER_RESPONSE_BYTES,
+    PROVIDER_REQUEST_TIMEOUT_SECONDS,
     OpenAICompatibleClient,
     OpenAICompatibleError,
     ProviderConfig,
     ProviderConfigManager,
     ProviderNotConfiguredError,
+    _extract_text,
+    _fallback_request_body,
     validate_base_url,
 )
 from app.services.quiz_reasoning import QuizReasoningService
@@ -35,6 +40,235 @@ def configured_client(handler, *, asynchronous: bool = False) -> OpenAICompatibl
 
 
 class OpenAICompatibleClientTests(unittest.TestCase):
+    def test_sync_provider_request_has_a_bounded_timeout(self) -> None:
+        observed = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            observed.update(request.extensions["timeout"])
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "ready"}, "finish_reason": "stop"}]},
+            )
+
+        result = configured_client(handler).models.generate_content(
+            model="ignored", contents="prompt", config=SimpleNamespace()
+        )
+
+        self.assertEqual(result.text, "ready")
+        self.assertEqual(
+            observed,
+            {
+                "connect": PROVIDER_REQUEST_TIMEOUT_SECONDS,
+                "read": PROVIDER_REQUEST_TIMEOUT_SECONDS,
+                "write": PROVIDER_REQUEST_TIMEOUT_SECONDS,
+                "pool": PROVIDER_REQUEST_TIMEOUT_SECONDS,
+            },
+        )
+
+    def test_sync_provider_timeout_is_reported_safely(self) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("private provider request details")
+
+        with self.assertRaises(OpenAICompatibleError) as raised:
+            configured_client(handler).models.generate_content(
+                model="ignored", contents="private source text", config=SimpleNamespace()
+            )
+
+        self.assertEqual(raised.exception.code, 504)
+        self.assertEqual(raised.exception.status, "PROVIDER_TIMEOUT")
+        self.assertNotIn("private", str(raised.exception))
+
+    def test_openrouter_haiku_uses_native_json_schema_outputs(self) -> None:
+        provider = ProviderConfig(
+            "https://openrouter.ai/api/v1",
+            "anthropic/claude-haiku-5.5",
+            "secret",
+        )
+        schema = {
+            "type": "object",
+            "properties": {
+                "label": {"type": "string", "nullable": True},
+                "shade": {"enum": ["dark", "light"], "nullable": True},
+                "kind": {"enum": ["paragraph", "formula"]},
+            },
+            "required": ["kind"],
+            "additionalProperties": False,
+        }
+        config = SimpleNamespace(
+            response_mime_type="application/json",
+            response_json_schema=schema,
+            system_instruction="Return a structured result.",
+            max_output_tokens=512,
+            temperature=0.2,
+        )
+
+        body = OpenAICompatibleClient._provider_request_body(provider, "prompt", config)
+
+        self.assertEqual(
+            body["response_format"],
+            {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "screen_tutor_output",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": ["string", "null"]},
+                            "shade": {
+                                "type": ["string", "null"],
+                                "enum": ["dark", "light", None],
+                            },
+                            "kind": {"enum": ["paragraph", "formula"]},
+                        },
+                        "required": ["kind", "label", "shade"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        )
+        self.assertEqual(body["provider"], {"only": ["azure"], "require_parameters": True})
+        self.assertEqual(body["reasoning"], {"enabled": False})
+        self.assertNotIn("temperature", body)
+        self.assertEqual(body["messages"][0]["content"], "Return a structured result.")
+
+    def test_openrouter_study_guide_schema_uses_provider_safe_nullable_types(self) -> None:
+        provider = ProviderConfig(
+            "https://openrouter.ai/api/v1",
+            "anthropic/claude-haiku-5.5",
+            "secret",
+        )
+        body = OpenAICompatibleClient._provider_request_body(
+            provider,
+            "Create a guide section.",
+            SimpleNamespace(
+                response_mime_type="application/json",
+                response_json_schema=_provider_response_schema(_StudyGuideSectionBatch),
+                system_instruction="Return valid JSON.",
+            ),
+        )
+        schema = body["response_format"]["json_schema"]["schema"]
+        pending = [schema]
+        nullable_count = 0
+        while pending:
+            node = pending.pop()
+            if isinstance(node, dict):
+                self.assertNotIn("anyOf", node)
+                value_type = node.get("type")
+                if isinstance(value_type, list) and "null" in value_type:
+                    nullable_count += 1
+                pending.extend(node.values())
+            elif isinstance(node, list):
+                pending.extend(node)
+
+        self.assertGreater(nullable_count, 0)
+        self.assertEqual(body["response_format"]["type"], "json_schema")
+
+    def test_reasoning_blocks_are_not_added_to_visible_json_text(self) -> None:
+        text, finish_reason = _extract_text(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": [
+                                {"type": "reasoning", "text": "Let me think through this."},
+                                {"type": "text", "text": '{"status":"ok"}'},
+                            ]
+                        },
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(text, '{"status":"ok"}')
+        self.assertEqual(finish_reason, "stop")
+
+    def test_unsupported_native_schema_falls_back_to_prompt_schema_json_mode(self) -> None:
+        provider = ProviderConfig(
+            "https://openrouter.ai/api/v1",
+            "anthropic/claude-haiku-5.5",
+            "secret",
+        )
+        schema = {
+            "type": "object",
+            "properties": {"status": {"type": "string"}},
+            "required": ["status"],
+            "additionalProperties": False,
+        }
+        body = OpenAICompatibleClient._provider_request_body(
+            provider,
+            "prompt",
+            SimpleNamespace(
+                response_mime_type="application/json",
+                response_json_schema=schema,
+                system_instruction="Return a result.",
+            ),
+        )
+
+        fallback = _fallback_request_body(body, {"error": {"code": 400}})
+
+        self.assertIsNotNone(fallback)
+        self.assertEqual(fallback["response_format"], {"type": "json_object"})
+        self.assertEqual(fallback["provider"], {"only": ["azure"]})
+        self.assertIn("trusted output schema", fallback["messages"][0]["content"])
+        self.assertIn('"required":["status"]', fallback["messages"][0]["content"])
+
+    def test_openrouter_no_schema_endpoint_falls_back_after_404(self) -> None:
+        bodies = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            bodies.append(body)
+            if body["response_format"]["type"] == "json_schema":
+                return httpx.Response(
+                    404,
+                    json={
+                        "error": {
+                            "code": 404,
+                            "message": "No provider endpoint supports the requested parameter.",
+                            "metadata": {},
+                        }
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": '{"status":"ok"}'}, "finish_reason": "stop"}
+                    ]
+                },
+            )
+
+        manager = ProviderConfigManager(
+            ProviderConfig(
+                "https://openrouter.ai/api/v1",
+                "anthropic/claude-haiku-5.5",
+                "secret-test-key",
+            )
+        )
+        client = OpenAICompatibleClient(manager, sync_transport=httpx.MockTransport(handler))
+        result = client.models.generate_content(
+            model="",
+            contents="Return the status.",
+            config=SimpleNamespace(
+                response_mime_type="application/json",
+                response_json_schema={
+                    "type": "object",
+                    "properties": {"status": {"type": "string"}},
+                    "required": ["status"],
+                    "additionalProperties": False,
+                },
+                system_instruction="Return a status.",
+            ),
+        )
+
+        self.assertEqual(result.text, '{"status":"ok"}')
+        self.assertEqual(len(bodies), 2)
+        self.assertEqual(bodies[0]["response_format"]["type"], "json_schema")
+        self.assertEqual(bodies[1]["response_format"], {"type": "json_object"})
+        self.assertEqual(bodies[1]["provider"], {"only": ["azure"]})
+
     def test_sync_request_uses_configured_route_key_model_and_json_mode(self) -> None:
         captured = {}
 
@@ -119,16 +353,12 @@ class OpenAICompatibleClientTests(unittest.TestCase):
         selected_model = ProviderConfig(
             "https://openrouter.ai/api/v1", "deepseek/deepseek-v4.1-flash", "secret"
         )
-        other_model = ProviderConfig(
-            "https://openrouter.ai/api/v1", "openai/gpt-test", "secret"
-        )
+        other_model = ProviderConfig("https://openrouter.ai/api/v1", "openai/gpt-test", "secret")
         other_provider = ProviderConfig(
             "https://provider.example/v1", "deepseek/deepseek-v4.1-flash", "secret"
         )
 
-        selected = OpenAICompatibleClient._provider_request_body(
-            selected_model, "prompt", config
-        )
+        selected = OpenAICompatibleClient._provider_request_body(selected_model, "prompt", config)
         self.assertEqual(selected["reasoning_effort"], "high")
         self.assertEqual(selected["max_completion_tokens"], 96_000)
         self.assertNotIn(
@@ -140,6 +370,70 @@ class OpenAICompatibleClientTests(unittest.TestCase):
             OpenAICompatibleClient._provider_request_body(other_provider, "prompt", config),
         )
 
+    def test_study_guide_field_edits_disable_reasoning_tokens(self) -> None:
+        provider = ProviderConfig(
+            "https://openrouter.ai/api/v1", "deepseek/deepseek-v4.1-flash", "secret"
+        )
+        config = SimpleNamespace(
+            max_output_tokens=8_000,
+            system_instruction=(
+                "You are applying small, source-grounded corrections to an existing study guide."
+            ),
+        )
+
+        body = OpenAICompatibleClient._provider_request_body(provider, "one field", config)
+
+        self.assertEqual(body["reasoning_effort"], "none")
+        self.assertEqual(body["max_completion_tokens"], 8_000)
+
+    def test_study_guide_reviews_use_minimal_reasoning_effort(self) -> None:
+        provider = ProviderConfig(
+            "https://openrouter.ai/api/v1", "deepseek/deepseek-v4.1-flash", "secret"
+        )
+        config = SimpleNamespace(
+            max_output_tokens=24_000,
+            system_instruction=(
+                "You are an independent course-material verifier. Review selected sections."
+            ),
+        )
+
+        body = OpenAICompatibleClient._provider_request_body(provider, "bounded review", config)
+
+        self.assertEqual(body["reasoning_effort"], "minimal")
+        self.assertEqual(body["max_completion_tokens"], 24_000)
+
+    def test_study_guide_finding_adjudication_disables_reasoning_tokens(self) -> None:
+        provider = ProviderConfig(
+            "https://openrouter.ai/api/v1", "deepseek/deepseek-v4.1-flash", "secret"
+        )
+        config = SimpleNamespace(
+            max_output_tokens=3_000,
+            system_instruction=(
+                "You are adjudicating reported unsupported-claim findings. Return quoted evidence."
+            ),
+        )
+
+        body = OpenAICompatibleClient._provider_request_body(provider, "quoted evidence", config)
+
+        self.assertEqual(body["reasoning_effort"], "none")
+        self.assertEqual(body["max_completion_tokens"], 3_000)
+
+    def test_study_guide_authorship_uses_minimal_reasoning_effort(self) -> None:
+        provider = ProviderConfig(
+            "https://openrouter.ai/api/v1", "deepseek/deepseek-v4.1-flash", "secret"
+        )
+        config = SimpleNamespace(
+            max_output_tokens=12_000,
+            system_instruction=(
+                "You are Screen Tutor's course study-guide author. Create a useful guide."
+            ),
+        )
+
+        body = OpenAICompatibleClient._provider_request_body(provider, "four sections", config)
+
+        self.assertEqual(body["reasoning_effort"], "minimal")
+        self.assertEqual(body["max_completion_tokens"], 12_000)
+
     def test_provider_error_preserves_status_without_exposing_body(self) -> None:
         def handler(_request: httpx.Request) -> httpx.Response:
             return httpx.Response(
@@ -147,6 +441,7 @@ class OpenAICompatibleClientTests(unittest.TestCase):
                 json={
                     "error": {
                         "code": "insufficient_quota",
+                        "type": "insufficient_quota",
                         "message": "private provider response and prompt content",
                     }
                 },
@@ -160,6 +455,33 @@ class OpenAICompatibleClientTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 402)
         self.assertEqual(raised.exception.status, "INSUFFICIENT_QUOTA")
         self.assertNotIn("private", str(raised.exception))
+
+    def test_sync_request_retries_rate_limit_using_retry_after(self) -> None:
+        request_count = 0
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal request_count
+            request_count += 1
+            if request_count == 1:
+                return httpx.Response(
+                    429,
+                    headers={"retry-after": "60"},
+                    json={"error": {"code": 429, "type": "rate_limit_exceeded"}},
+                )
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "ready"}, "finish_reason": "stop"}]},
+            )
+
+        client = configured_client(handler)
+        with patch("app.services.openai_compatible.time.sleep") as sleep:
+            result = client.models.generate_content(
+                model="ignored", contents="prompt", config=SimpleNamespace()
+            )
+
+        self.assertEqual(result.text, "ready")
+        self.assertEqual(request_count, 2)
+        sleep.assert_called_once_with(60.0)
 
     def test_empty_reasoning_response_preserves_token_limit_signal(self) -> None:
         def handler(_request: httpx.Request) -> httpx.Response:
@@ -299,6 +621,44 @@ class OpenAICompatibleClientTests(unittest.TestCase):
 
 
 class AsyncOpenAICompatibleClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_async_provider_request_has_a_bounded_timeout(self) -> None:
+        observed = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            observed.update(request.extensions["timeout"])
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "ready"}, "finish_reason": "stop"}]},
+            )
+
+        result = await configured_client(handler, asynchronous=True).aio.models.generate_content(
+            model="ignored", contents="prompt", config=SimpleNamespace()
+        )
+
+        self.assertEqual(result.text, "ready")
+        self.assertEqual(
+            observed,
+            {
+                "connect": PROVIDER_REQUEST_TIMEOUT_SECONDS,
+                "read": PROVIDER_REQUEST_TIMEOUT_SECONDS,
+                "write": PROVIDER_REQUEST_TIMEOUT_SECONDS,
+                "pool": PROVIDER_REQUEST_TIMEOUT_SECONDS,
+            },
+        )
+
+    async def test_async_provider_timeout_is_reported_safely(self) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("private provider request details")
+
+        with self.assertRaises(OpenAICompatibleError) as raised:
+            await configured_client(handler, asynchronous=True).aio.models.generate_content(
+                model="ignored", contents="private source text", config=SimpleNamespace()
+            )
+
+        self.assertEqual(raised.exception.code, 504)
+        self.assertEqual(raised.exception.status, "PROVIDER_TIMEOUT")
+        self.assertNotIn("private", str(raised.exception))
+
     async def test_connection_check_reserves_reasoning_headroom_without_temperature(self) -> None:
         captured = {}
 
@@ -343,3 +703,28 @@ class AsyncOpenAICompatibleClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [item["role"] for item in messages], ["system", "user", "assistant", "user"]
         )
+
+    async def test_async_request_retries_rate_limit(self) -> None:
+        request_count = 0
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal request_count
+            request_count += 1
+            if request_count == 1:
+                return httpx.Response(
+                    429,
+                    headers={"retry-after": "0"},
+                    json={"error": {"code": 429, "type": "rate_limit_exceeded"}},
+                )
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "ready"}, "finish_reason": "stop"}]},
+            )
+
+        client = configured_client(handler, asynchronous=True)
+        result = await client.aio.models.generate_content(
+            model="ignored", contents="prompt", config=SimpleNamespace()
+        )
+
+        self.assertEqual(result.text, "ready")
+        self.assertEqual(request_count, 2)

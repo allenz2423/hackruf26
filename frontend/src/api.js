@@ -615,6 +615,9 @@ export async function getMyStudyMaterialsApi() {
 
 export async function createStudyMaterialApi(classId, {
   kind,
+  title = "",
+  guideStyle = null,
+  guideStyles = null,
   scope = { kind: "all" },
   options = { count: 10, difficulty: "mixed" },
   additionalInstructions = "",
@@ -623,6 +626,9 @@ export async function createStudyMaterialApi(classId, {
   operationId = null
 }) {
   const body = { kind, scope, options, destination };
+  if (typeof title === "string" && title.trim()) body.title = title.trim();
+  if (Array.isArray(guideStyles) && guideStyles.length) body.guide_styles = guideStyles;
+  else if (typeof guideStyle === "string" && guideStyle.trim()) body.guide_style = guideStyle.trim();
   if (typeof language === "string" && language.trim()) body.language = language.trim();
   if (typeof operationId === "string" && operationId.trim()) body.operation_id = operationId.trim();
   if (typeof additionalInstructions === "string" && additionalInstructions.trim()) {
@@ -636,6 +642,12 @@ export async function createStudyMaterialApi(classId, {
 
 export async function getStudyMaterialDetailApi(materialId) {
   return await apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}`);
+}
+
+export async function retryStudyMaterialApi(materialId) {
+  return await apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/retry`, {
+    method: "POST"
+  });
 }
 
 async function downloadFile(path, fallbackFilename) {

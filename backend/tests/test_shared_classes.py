@@ -260,6 +260,73 @@ class SharedClassApiTests(unittest.TestCase):
         )
         return response
 
+    def test_study_guide_detail_filters_section_and_block_citations(self) -> None:
+        self.add_user("guide_reader")
+        self.join("guide_reader", self.invite("class_owner", ["read"]))
+        visible_source_id = self.seed_note(
+            title="Published notes", text="Publicly released source material."
+        )
+        hidden_source_id = self.seed_note(
+            title="Draft notes",
+            text="Unreleased source material.",
+            created_by="class_owner",
+            publication_state="draft",
+        )
+        material_id = str(uuid4())
+        visible_citation = {"upload_id": visible_source_id, "page": 1}
+        hidden_citation = {"upload_id": hidden_source_id, "page": 2}
+        content = {
+            "format": "study_guide",
+            "schema_version": 2,
+            "sections": [
+                {
+                    "heading": "Source access",
+                    "body": "Only released citations should be visible.",
+                    "key_terms": [],
+                    "sources": [visible_citation, hidden_citation],
+                    "blocks": [
+                        {
+                            "id": "intro",
+                            "type": "paragraph",
+                            "text": "Citations are checked for this learner.",
+                            "sources": [visible_citation, hidden_citation],
+                        }
+                    ],
+                }
+            ],
+        }
+        self.client.portal.call(
+            self.database.execute,
+            "INSERT INTO study_materials "
+            "(id,class_id,resource_scope,created_by,publication_state,kind,title,status,content,"
+            "quality_review_version) "
+            "VALUES (?1,?2,'class_owned',?3,'published','study_guide','Citation guide','ready',?4,2)",
+            material_id,
+            self.class_id,
+            self.owner["id"],
+            json.dumps(content),
+        )
+        for position, source_id in enumerate([visible_source_id, hidden_source_id]):
+            self.client.portal.call(
+                self.database.execute,
+                "INSERT INTO study_material_sources "
+                "(material_id,source_class_id,source_note_id,source_title,source_kind,position) "
+                "VALUES (?1,?2,?3,?4,'document',?5)",
+                material_id,
+                self.class_id,
+                source_id,
+                "Published notes" if source_id == visible_source_id else "Draft notes",
+                position,
+            )
+
+        response = self.call(
+            "get", f"/api/study-materials/{material_id}", "guide_reader"
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        section = response.json()["content"]["sections"][0]
+        self.assertEqual(section["sources"], [visible_citation])
+        self.assertEqual(section["blocks"][0]["sources"], [visible_citation])
+
     def _ensure_validated_concept(self, source_id: str) -> None:
         existing = self.client.portal.call(
             self.database.fetchval,

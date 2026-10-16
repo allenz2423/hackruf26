@@ -257,13 +257,24 @@ async def _add_missing_columns(connection: aiosqlite.Connection) -> None:
             "published_at": "TEXT",
         },
         "study_materials": {
+            "title_override": (
+                "TEXT CHECK (title_override IS NULL OR length(title_override) BETWEEN 1 AND 160)"
+            ),
             "sources_outdated": "INTEGER NOT NULL DEFAULT 0",
             "sources_missing": "INTEGER NOT NULL DEFAULT 0",
             "context_truncated": "INTEGER NOT NULL DEFAULT 0",
+            "quality_review_version": (
+                "INTEGER NOT NULL DEFAULT 0 CHECK (quality_review_version >= 0)"
+            ),
             "generation_instructions": (
                 "TEXT CHECK (generation_instructions IS NULL OR "
                 "length(generation_instructions) <= 2000)"
             ),
+            "preview_content": (
+                "TEXT CHECK (preview_content IS NULL OR "
+                "(json_valid(preview_content) AND json_type(preview_content)='object'))"
+            ),
+            "preview_revision": "INTEGER NOT NULL DEFAULT 0 CHECK (preview_revision >= 0)",
             "origin_class_id": "TEXT",
             "resource_scope": (
                 "TEXT NOT NULL DEFAULT 'class_owned' CHECK "
@@ -455,13 +466,17 @@ async def _migrate_shared_class_schema(connection: aiosqlite.Connection) -> None
                 "assessment_validation_version TEXT, "
                 "assessment_engine_version INTEGER NOT NULL DEFAULT 0 "
                 "CHECK (assessment_engine_version IN (0,1)), "
+                "quality_review_version INTEGER NOT NULL DEFAULT 0 CHECK (quality_review_version>=0), "
                 "kind TEXT NOT NULL CHECK (kind IN ('quiz','practice_exam','study_guide','flashcards')), "
                 "title TEXT NOT NULL CHECK (trim(title) <> ''), "
+                "title_override TEXT CHECK (title_override IS NULL OR length(title_override) BETWEEN 1 AND 160), "
                 "status TEXT NOT NULL DEFAULT 'generating' CHECK (status IN ('generating','ready','failed')), "
                 "scope TEXT NOT NULL DEFAULT '{\"kind\":\"all\"}' CHECK (json_valid(scope) AND json_type(scope)='object'), "
                 "options TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(options) AND json_type(options)='object'), "
                 "generation_instructions TEXT CHECK (generation_instructions IS NULL OR length(generation_instructions)<=2000), "
                 "content TEXT CHECK (content IS NULL OR (json_valid(content) AND json_type(content)='object')), "
+                "preview_content TEXT CHECK (preview_content IS NULL OR (json_valid(preview_content) AND json_type(preview_content)='object')), "
+                "preview_revision INTEGER NOT NULL DEFAULT 0 CHECK (preview_revision>=0), "
                 "failure_code TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), "
                 "updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), generated_at TEXT, "
                 "sources_outdated INTEGER NOT NULL DEFAULT 0 CHECK (sources_outdated IN (0,1)), "
@@ -482,8 +497,10 @@ async def _migrate_shared_class_schema(connection: aiosqlite.Connection) -> None
                 "INSERT INTO study_materials_new (id,class_id,origin_class_id,resource_scope,owner_id,"
                 "created_by,publication_state,release_at,published_at,feedback_release_policy,"
                 "assessment_validation_state,assessment_validation_version,assessment_engine_version,"
+                "quality_review_version,title_override,"
                 "kind,title,status,scope,options,"
-                "generation_instructions,content,failure_code,created_at,updated_at,generated_at,"
+                "generation_instructions,content,preview_content,preview_revision,failure_code,"
+                "created_at,updated_at,generated_at,"
                 "sources_outdated,sources_missing,context_truncated) "
                 "SELECT id,class_id,COALESCE(origin_class_id,class_id),COALESCE(resource_scope,'class_owned'),"
                 "owner_id,created_by,COALESCE(publication_state,'published'),release_at,"
@@ -491,8 +508,10 @@ async def _migrate_shared_class_schema(connection: aiosqlite.Connection) -> None
                 "COALESCE(assessment_validation_state,'legacy_unvalidated'),"
                 "assessment_validation_version,"
                 "COALESCE(assessment_engine_version,0),"
-                "kind,title,status,scope,options,generation_instructions,"
-                "content,failure_code,created_at,updated_at,generated_at,sources_outdated,sources_missing,"
+                "COALESCE(quality_review_version,0),"
+                "title_override,kind,title,status,scope,options,generation_instructions,"
+                "content,preview_content,COALESCE(preview_revision,0),failure_code,"
+                "created_at,updated_at,generated_at,sources_outdated,sources_missing,"
                 "context_truncated FROM study_materials"
             )
             await connection.execute(

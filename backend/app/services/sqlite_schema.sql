@@ -489,8 +489,10 @@ CREATE TABLE IF NOT EXISTS study_materials (
         CHECK (assessment_validation_state IN ('legacy_unvalidated','validated')),
     assessment_validation_version TEXT,
     assessment_engine_version INTEGER NOT NULL DEFAULT 0 CHECK (assessment_engine_version IN (0,1)),
+    quality_review_version INTEGER NOT NULL DEFAULT 0 CHECK (quality_review_version >= 0),
     kind            TEXT NOT NULL CHECK (kind IN ('quiz', 'practice_exam', 'study_guide', 'flashcards')),
     title           TEXT NOT NULL CHECK (trim(title) <> ''),
+    title_override  TEXT CHECK (title_override IS NULL OR length(title_override) BETWEEN 1 AND 160),
     status          TEXT NOT NULL DEFAULT 'generating'
         CHECK (status IN ('generating', 'ready', 'failed')),
     scope           TEXT NOT NULL DEFAULT '{"kind":"all"}'
@@ -501,6 +503,9 @@ CREATE TABLE IF NOT EXISTS study_materials (
         CHECK (generation_instructions IS NULL OR length(generation_instructions) <= 2000),
     content         TEXT
         CHECK (content IS NULL OR (json_valid(content) AND json_type(content) = 'object')),
+    preview_content TEXT
+        CHECK (preview_content IS NULL OR (json_valid(preview_content) AND json_type(preview_content) = 'object')),
+    preview_revision INTEGER NOT NULL DEFAULT 0 CHECK (preview_revision >= 0),
     failure_code    TEXT,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),

@@ -2,7 +2,7 @@
 
 Research date: **2026-10-14**.
 
-Status: **research and implementation proposal**. The libraries below were researched through their official documentation, repositories, and license pages. They have not been installed, integrated, or benchmarked in this repository. Recommendations and effort estimates are engineering judgments, distinguished from documented tool capabilities.
+Status: **bounded study-guide implementation delivered and deployed on 2026-10-14; later subject activities are local additions pending independent qualification**. The third-party libraries below were researched through their official documentation, repositories, and license pages; none has been installed or benchmarked. The versioned reader supports force components, linear and first-order graphs, an ideal resistor divider, a binary-search trace, selectable app-owned 2D molecule models, ordered example steps, a source-selected animal-cell organelle map with fixed descriptions, and a statistics sampling demonstration. The animal-cell and statistics additions are local additions and have not been qualified or deployed. Browser activities and matching default-state LaTeX/PDF representations use application-owned SVG/HTML and safe server-authored LaTeX. The broader library comparisons and effort estimates remain research recommendations, not claims that those packages were adopted.
 
 Selection constraint: **visualization tools must work without a mandatory license fee, subscription, commercial-license purchase, or paid external API**. Use self-hosted open-source packages and freely usable or app-authored assets. This constraint applies to the visualization dependencies; infrastructure and the application's existing model-generation costs are separate.
 
@@ -17,7 +17,8 @@ Start with a small component library:
 | Need | Initial choice | Why this fits Jot |
 | --- | --- | --- |
 | Clickable labeled diagrams | App-authored SVG and HTML controls | Fits the existing browser stack and gives direct control over labels, keyboard behavior, and print layout. |
-| Graphs, vectors, geometry, force components | JSXGraph | Its documented mathematical construction model matches draggable points, arrows, curves, and sliders. |
+| First graph, vector, and force-component activity | App-authored SVG and HTML controls | The bounded first template needs axes, arrows, a deterministic curve, and accessible numeric controls; SVG keeps the initial bundle dependency-free. |
+| Broader mathematical constructions | JSXGraph, evaluated when needed | Its documented mathematical construction model fits draggable points, curves, and sliders beyond the first fixed template. |
 | Mathematical and chemical notation | Existing KaTeX, with its mhchem extension evaluated separately | Reuses the current formula renderer; chemical typesetting and molecular structure visualization remain separate tasks. |
 | Concept maps, pathways, algorithm graphs | Cytoscape.js when these blocks are introduced | Provides a graph data model and interaction APIs; the app still supplies the teaching behavior. |
 | Small-molecule 2D structures | SmilesDrawer; RDKit.js when chemical operations are needed | A depiction library is sufficient for display. A chemistry toolkit is appropriate when parsing, matching, or other chemistry operations become requirements. |
@@ -26,7 +27,7 @@ Start with a small component library:
 
 The supporting research and primary links appear in sections 4–9. These choices are a shortlist, not a proposal to install every package.
 
-The first complete example should teach **force components**: explanation, formulas, a labeled vector diagram, an angle control, a related graph, a prediction prompt, citations, and a static export. It exercises the shared reader without requiring chemistry data, a circuit engine, or a general physics simulator.
+The first complete example teaches **force components**: explanation, formulas, a labeled vector diagram, magnitude/angle controls, a related graph, a prediction prompt, citations, and a static export. The reader has since added representative graph, chemistry, circuit, and algorithm templates without a third-party rendering dependency. A later JSXGraph or simulator comparison remains appropriate if activities outgrow these fixed models.
 
 ## 2. What already exists in this repository
 
@@ -35,23 +36,26 @@ The current application already separates generated guide content from its downl
 | Existing location | Current behavior | Implication for this proposal |
 | --- | --- | --- |
 | [frontend/package.json](../frontend/package.json) | Vanilla JavaScript/Vite with KaTeX, pdf.js, and JSZip declared. | Prefer imperative JavaScript libraries, web components, or separately embedded applications. No framework migration is required for the initial approach. |
-| [backend/app/api/schemas.py](../backend/app/api/schemas.py) | `GuideSectionContent` contains heading, body, key terms, and sources. Its schema rejects extra fields. | Interactive blocks require an explicit schema extension. Sending new fields today is insufficient. |
-| [backend/app/services/gemini_content.py](../backend/app/services/gemini_content.py) | Generates structured guide sections through draft/revision passes and checks source citations. | Introduce supported visual templates into this validated generation process. Keep provider configuration and prompts here. |
-| [frontend/src/study.js](../frontend/src/study.js) | Adapts remote material into browser objects, retaining structured sections and also a Markdown representation. | Carry future block data through the structured path; verify adapters do not discard it or prefer a flattened representation. |
-| [frontend/src/material-viewer.js](../frontend/src/material-viewer.js) | Renders guide sections as browser content and provides PDF/LaTeX downloads. | This is the starting point for a shared guide reader and block dispatcher. |
+| [backend/app/api/schemas.py](../backend/app/api/schemas.py) | Upload companions keep `GuideSectionContent`; generated guides accept version 1 and version 2 typed sections. | Preserve the companion schema and version-1 guide compatibility. |
+| [backend/app/services/gemini_content.py](../backend/app/services/gemini_content.py) | Generates version-2 guide blocks through draft/revision passes, assigns stable IDs, derives fallback text, and validates section/block citations. | Keep provider configuration and prompts server-side; add templates through this bounded registry. |
+| [frontend/src/study.js](../frontend/src/study.js) | Adapts remote guide content as structured sections and retains block data and nested citation names. | Keep visual blocks on the structured path rather than flattening them to Markdown. |
+| [frontend/src/material-viewer.js](../frontend/src/material-viewer.js) | Renders legacy sections and dispatches supported guide blocks, with PDF/LaTeX downloads. | Keep the reader separate from the fixed activity registry. |
+| [frontend/src/study-guide/activity-blocks.js](../frontend/src/study-guide/activity-blocks.js) | Renders and mounts the linear and first-order plots, resistor divider, molecule catalog, animal-cell map, sampling demonstration, process pathway, algorithm trace, and ordered example steps. | Keep app-owned structures and deterministic calculations bounded and synchronized with backend exports. |
 | [frontend/src/file-preview.js](../frontend/src/file-preview.js) | Separately renders upload companion documents with sections and detail levels. | A common section renderer may eventually serve both views, but generated guides should be the first rollout target. |
 | [frontend/src/math.js](../frontend/src/math.js) | Escapes surrounding prose, loads KaTeX on demand, and disables trusted TeX features. | Extend the existing math path rather than adding a second inconsistent formula renderer. |
 | [frontend/src/source-citations.js](../frontend/src/source-citations.js) | Opens authorized source uploads at available page/timestamp locators and shows source-change warnings. | Reuse this behavior for diagrams and their explanations. |
 | [frontend/src/concept-graph.js](../frontend/src/concept-graph.js) | Displays source-backed concepts and relationships through cards and management controls. | There is graph data to reuse, but a node-link visualization still needs implementation. |
 | [frontend/src/flashcards.js](../frontend/src/flashcards.js), [quiz-player.js](../frontend/src/quiz-player.js) | Provide existing study interactions and a server-backed assessment player. | Reuse appropriate components; preserve remote quiz grading and feedback-release rules. |
-| [backend/app/api/class_library.py](../backend/app/api/class_library.py) | Persists guide content and generated PDF/LaTeX files before marking a guide ready; creation requires the PDF compiler. | Browser readiness independent of export would be a deliberate behavior change, not existing behavior. |
-| [backend/app/services/study_files.py](../backend/app/services/study_files.py) | Uses server-owned LaTeX templates, escaped text, allow-listed math, and Tectonic. | Visual blocks need explicit export support; a browser library does not automatically change PDF generation. |
+| [backend/app/api/class_library.py](../backend/app/api/class_library.py) | Persists guide content and generated PDF/LaTeX files before marking a guide ready; filters nested block citations against current source access. | Browser readiness independent of export remains a deliberate behavior change. |
+| [backend/app/services/study_files.py](../backend/app/services/study_files.py) | Uses server-owned LaTeX templates, escaped text, allow-listed math, Tectonic, and static default-state diagrams/plots for the supported templates. | Each future visual template needs its own safe default-state export representation. |
+| [backend/app/services/guide_templates.py](../backend/app/services/guide_templates.py) | Holds reviewed molecule structures, fixed animal-cell feature descriptions, the synthetic sampling population, deterministic guide fallback descriptions, and algorithm traces. | Keep server validation, fallback text, and export logic aligned with the browser templates. |
+| [backend/app/services/study_guide_tools.py](../backend/app/services/study_guide_tools.py) | Provides a brief allow-listed tool catalog and supplies full usage instructions only for tools requested in the draft. | Keep request IDs, instruction text, response schema, validators, browser renderers, and static exports in sync. |
 | [backend/app/services/calculator.py](../backend/app/services/calculator.py) | Implements a bounded parser backed by SymPy. | Keep authoritative symbolic operations on the existing server boundary; this is not a general simulation engine. |
 
-Two details need particular attention during implementation:
+Implementation guardrails for future blocks:
 
-1. The shared guide-section model is also used by upload companion documents. Decide whether a new guide-only block type is enough before changing both generation pipelines.
-2. Source filtering in `_public_material_content` currently traverses known top-level item collections. Nested block citations and assets would need their own authorization/filtering paths.
+1. Keep guide-only block types separate from the shared upload-companion section model.
+2. Add an authorization/filtering path for every nested citation or asset reference before exposing a new block type.
 
 This document proposes saved **generated educational content**. It does not propose recording live screen frames, audio, or tutoring conversations. Study interactions also do not expand the Live model's tool permissions.
 
@@ -96,7 +100,7 @@ JSXGraph supports browser mathematical constructions including points, arrows, c
 
 **Limits:** mathematical drawing primitives do not establish physical correctness. We must supply units, angle conventions, constraints, and numerical fixtures. Avoid model-generated JavaScript callbacks or unrestricted JessieCode/function strings.
 
-**Decision:** evaluate as the first added visualization dependency. Its name does not mean the application needs React or JSX.
+**Decision:** reserve for broader mathematical interactions that exceed the first fixed SVG template. Its name does not mean the application needs React or JSX.
 
 ### 4.3 D3 — useful when custom visual behavior becomes substantial
 
@@ -449,20 +453,20 @@ Coverage should grow by reusable **activity templates**, such as vector decompos
 
 ### 11.1 Keep a small application-owned block vocabulary
 
-Initial block types could be:
+The version-2 guide contract now supports these block types:
 
 | Block | Stored content | Browser behavior |
 | --- | --- | --- |
 | Paragraph | Plain text with the existing supported math notation. | Render prose and typeset formulas. |
 | Formula | Expression plus variable definitions and units. | Display notation and expandable definitions. |
-| Labeled diagram | A known diagram template, objects/labels, and descriptions. | Select a labeled object and show the matching explanation. |
-| Interactive model | A known activity template and validated initial parameters. | Mount the appropriate adapter with trusted controls. |
-| Example steps | An ordered, reviewed analogous example. | Reveal steps through app-owned controls. |
+| Labeled diagram | A known diagram template and validated parameters. | Select an app-owned molecule atom, inspect source-selected animal-cell features, or select an ordered stage in a source-grounded process pathway. |
+| Interactive model | A known activity template and validated initial parameters. | Mount trusted controls for force decomposition, graphing, first-order response, a resistor divider, or binary search. |
+| Example steps | An ordered example with bounded explanations. | Reveal steps through app-owned controls. |
 | Takeaway | Short explanatory text. | Reinforce the idea after the activity. |
 
 A knowledge-check block can be added later. An assessed question should reference the existing authorized assessment/run flow rather than putting a hidden answer key into a public guide payload.
 
-Use a versioned union on the backend and a browser dispatcher over that same published vocabulary. New kinds require an explicit renderer and a fallback. The model should select only from the server-advertised supported templates.
+The backend uses a versioned block contract and the browser dispatches over that same bounded vocabulary. The generator selects only from the server-owned template IDs; the frontend and export layer provide explicit renderers and text fallbacks. The companion upload-document schema remains unchanged.
 
 ### 11.2 Illustrative payload
 
@@ -551,18 +555,9 @@ The following paths are illustrative implementation targets, not files added by 
 
 ~~~text
 frontend/src/study-guide/
-  reader.js
   normalize.js
-  block-renderer.js
-  template-registry.js
-  controls.js
-  adapters/
-    svg-diagram.js
-    jsxgraph.js
-    cytoscape.js
-    molecule-2d.js
-    molecule-3d.js
-    circuit.js
+  force-components.js
+  activity-blocks.js
 ~~~
 
 Keep library-specific state inside adapters. The reader handles document navigation, source links, errors, and layout. A shared normalization layer keeps local/sample, legacy, and new remote guides consistent.
@@ -583,7 +578,7 @@ The context should contain only the app services a component needs, such as sour
 
 ### 12.2 Loading and cleanup
 
-Use a fixed mapping from supported template IDs to dynamic imports. A payload must not choose module URLs or script paths.
+The current fixed dispatcher is synchronous because all selected templates use app-owned SVG and HTML. If a future template adds a large rendering engine, use a fixed mapping from template IDs to dynamic imports; a payload must never choose module URLs or script paths.
 
 Load large engines when their block is opened or approaches view. For a long guide, pause animations outside the visible activity and limit how many heavy viewers are mounted simultaneously. A collapsed activity still has its caption and reading fallback.
 
@@ -691,9 +686,15 @@ Effort labels below are relative planning estimates, not measured delivery dates
 | F. Evaluate circuits | One bounded circuit lesson; separate CircuitJS1 integration spike if full simulation is desired. | Frontend and backend coordination. | Medium for a template; large for a full simulator. |
 | G. Expand reusable families | Graph activities, pathway views, algorithm traces, and subject-specific templates. | Per-template split. | Ongoing. |
 
+**Implementation record (2026-10-14):** milestones A-D are implemented for the bounded vocabulary. Milestone E has a source-selected 2D pilot backed by four fixed app-owned structures; no 3D viewer was needed for this pilot. Milestone F has an ideal resistor-divider lesson, not a general circuit simulator. Milestone G includes adjustable linear/first-order plots, a selectable process pathway, and a deterministic binary-search trace. Native SVG/HTML was selected because these activities use fixed layouts and equations; they do not need unconstrained geometric construction. No shortlisted visualization package was installed, and no bundle comparison was run.
+
+**Current branch addition (2026-10-16):** an animal-cell map uses fixed, source-transcribed organelle descriptions, a model-selected allowlist of feature IDs, accessible browser selection, and a static numbered LaTeX diagram with a readable legend. It remains subject to the independent test and release qualification requested for this branch.
+
+**Verification and deployment (2026-10-14):** the backend suite passed 280 tests, the frontend suite passed 112, and the Vite production build succeeded. The new schema/template files and LaTeX exporter passed Ruff, and `git diff --check` passed. The checks include fixed-template calculations and fallbacks, citations, authorization, escaping, default-state PDF/LaTeX output, and Tectonic PDF compilation. On `root@alma`, the installed Google SDK accepted the guide-generation schema and the cached Tectonic binary compiled a synthetic PDF exercising every supported template. The deployed container is healthy at `https://jotai.tech/healthz`; HTTPS health, home, and auth-me endpoints returned 200, and the live SQLite integrity check returned `ok`. The database backup is `/srv/jotai/backups/screen_tutor.sqlite3.pre-study-guide-20261014T235455Z`; it passed `PRAGMA integrity_check`. Responsive behavior was checked through CSS rules and controls through DOM fakes; an interactive browser session was unavailable. Vite retains its warning that `audio.js` is imported both statically and dynamically.
+
 Implementations remain within the active role's ownership. A frontend task should describe required backend contract work and leave backend implementation to that role, and vice versa.
 
-Do not install every shortlisted package in milestone B. First compare a small JSXGraph prototype against an SVG-only alternative, inspect actual bundle output, and choose the simpler approach that meets the interaction requirements.
+Do not install every shortlisted package in milestone B. The current bounded templates use native SVG/HTML; reconsider a small JSXGraph prototype and measure bundle output only if later activities need unconstrained geometric construction.
 
 Suggested first template acceptance criteria:
 
@@ -723,9 +724,7 @@ Suggested first template acceptance criteria:
 | Export | Default-state reproducibility, readable labels/fonts, source references, missing-renderer recovery, and continued PDF/LaTeX compatibility. |
 | Access boundaries | Personal/shared material authorization, removed source access, asset endpoints, and preserved assessment feedback policies. |
 
-Use real browser checks for graphics lifecycle and interaction. Pure string-output tests cannot establish that a WebGL scene disposes correctly or that a slider is usable on a small screen.
-
-No runtime tests were required for writing this research document. The checks above describe future implementation verification; they are not claims that these integrations have already passed.
+Use real browser checks for graphics lifecycle and interaction as a future verification step. The implementation's current controls use application-owned SVG/HTML, and its unit/API/build/PDF checks are listed in the implementation and verification records above. Interactive browser behavior and real-device layout have not been exercised.
 
 ### 15.2 Decisions to refine next
 

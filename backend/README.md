@@ -31,6 +31,8 @@ FastAPI owns provider credentials, model configuration, Live sessions, and model
 
 The API listens on port 8000. A Vite development server can proxy `/api` to it. If `frontend/dist` exists, FastAPI serves it from the same origin. Original course files are stored privately under `backend/.local/private_uploads` by default; use persistent private storage for both that directory and the SQLite database file when deploying this single-instance implementation. Back up both together. SQLite is configured for one backend process; move to a shared database before running multiple workers or instances.
 
+Study-guide generation does not call a separate reviewer model. The backend validates the structured schema and size, typesets standard LaTeX/KaTeX delimiters and equation environments, bare symbols, Markdown math fences and formula code spans, HTML-encoded math symbols, Unicode operators, and subscript/superscript notation, normalizes existing formula delimiters, blocks TeX file/system commands, preserves unparseable notation as readable text, and checks that the PDF is readable. These checks do not verify factual accuracy; students should inspect cited course sources.
+
 ## Saved PDF documents
 
 Install the pinned local LaTeX engine and cache its template dependencies once:
