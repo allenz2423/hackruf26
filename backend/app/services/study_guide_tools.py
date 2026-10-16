@@ -34,14 +34,16 @@ class GuideTool:
 GUIDE_TOOLS: tuple[GuideTool, ...] = (
     GuideTool(
         id="math_graph",
-        name="2D linear graph",
-        purpose="Show how changing slope or intercept changes a linear relationship.",
+        name="JSXGraph function plot",
+        purpose="Plot and explore a source-supported mathematical relationship with bounded controls.",
         instructions=(
-            "For a source-supported y = mx + b relationship, use one `interactive_model` "
-            "block with template_id `linear_graph_v1` and parameters `{slope, intercept}`. "
+            "The reader renders this fixed linear-function template with JSXGraph. Use one "
+            "`interactive_model` block with template_id `linear_graph_v1` and parameters "
+            "`{slope, intercept}` only when the supplied course material explicitly uses a "
+            "linear relationship or the graph directly teaches a stated learning objective. "
             "Both values must be between -10 and 10 in 0.1 increments. Explain what the axes "
-            "and controls mean; do not imply the example parameters came from the source unless "
-            "they did."
+            "and controls mean. Never add a generic y = mx + b graph just to make the guide "
+            "interactive, and do not invent source parameters."
         ),
     ),
     GuideTool(
@@ -57,24 +59,28 @@ GUIDE_TOOLS: tuple[GuideTool, ...] = (
     ),
     GuideTool(
         id="response_plot",
-        name="First-order response plot",
-        purpose="Explore an exponential approach from an initial value toward a final value.",
+        name="ECharts response plot",
+        purpose="Plot a source-supported first-order time response with a movable time marker.",
         instructions=(
-            "Use one `interactive_model` block with template_id `first_order_response_v1` "
+            "The reader renders this fixed first-order curve with Apache ECharts. Use one "
+            "`interactive_model` block with template_id `first_order_response_v1` "
             "and parameters `{initial_value, final_value, time_constant_s}`. Initial and final "
             "values are whole numbers from -1000 to 1000; the time constant is 0.01–3600 s in "
-            "0.01 s increments. Describe the first-order model assumption."
+            "0.01 s increments. Include this only when the source teaches a first-order time "
+            "response; do not turn unrelated slope, intercept, or generic process topics into "
+            "a response curve. Describe the first-order model assumption."
         ),
     ),
     GuideTool(
         id="molecule_diagram",
-        name="Reviewed 2D molecule",
-        purpose="Label one of the built-in water, carbon-dioxide, methane, or ammonia structures.",
+        name="SmilesDrawer molecule",
+        purpose="Show a reviewed 2D structure for water, carbon dioxide, methane, or ammonia.",
         instructions=(
-            "Use one `labeled_diagram` block with template_id `molecule_2d_v1` and "
+            "The reader draws the selected fixed, reviewed SMILES with SmilesDrawer. Use one "
+            "`labeled_diagram` block with template_id `molecule_2d_v1` and "
             "parameters `{molecule_id}`. The only molecule IDs are `water`, `carbon_dioxide`, "
-            "`methane`, and `ammonia`. This is a reviewed 2D teaching depiction, not a 3D "
-            "geometry or a general chemical-structure editor."
+            "`methane`, and `ammonia`. Do not provide or invent SMILES. This is a reviewed 2D "
+            "teaching depiction, not a 3D geometry or a general chemical-structure editor."
         ),
     ),
     GuideTool(
@@ -93,12 +99,16 @@ GUIDE_TOOLS: tuple[GuideTool, ...] = (
     ),
     GuideTool(
         id="process_pathway",
-        name="Ordered process pathway",
-        purpose="Present a source-supported process as two to twelve selectable stages.",
+        name="Mermaid process flow",
+        purpose="Present a source-supported process as two to twelve ordered, connected stages.",
         instructions=(
-            "Use one `labeled_diagram` block with template_id `process_pathway_v1` and "
+            "The reader draws the ordered flow with Mermaid and keeps keyboard-accessible stage "
+            "controls beside it. Use one `labeled_diagram` block with template_id "
+            "`process_pathway_v1` and "
             "parameters `{stages:[{id,title,explanation}]}`. Include 2–12 ordered stages with "
-            "unique short IDs. Keep each explanation grounded in cited source material."
+            "unique short IDs. Keep each stage and explanation grounded in cited source material; "
+            "a flow diagram represents order and does not imply a simulation or causality unless "
+            "the source supports it."
         ),
     ),
     GuideTool(

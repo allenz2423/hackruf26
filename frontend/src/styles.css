@@ -3414,6 +3414,54 @@ main {
   overflow: visible;
 }
 
+.guide-library-visual {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  background: var(--surface);
+}
+
+.guide-library-plot,
+.guide-library-molecule {
+  min-height: 14rem;
+  height: 14rem;
+}
+
+.guide-library-diagram {
+  max-width: 100%;
+  margin: 0 auto;
+  padding: var(--space-2);
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+.guide-library-diagram svg {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
+.guide-library-molecule {
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-md);
+}
+
+.guide-library-molecule svg {
+  display: block;
+  width: min(100%, 24rem);
+  max-height: 14rem;
+}
+
+.molecule-atom-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
 .activity-grid {
   fill: none;
   stroke: var(--line);

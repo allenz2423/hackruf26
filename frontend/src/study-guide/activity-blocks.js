@@ -76,6 +76,38 @@ function modelText(block) {
   return `<details class="activity-text-alternative"><summary>Text description</summary><p>${mathHtml(block.alt_text)}</p><p>${mathHtml(block.fallback_text)}</p></details>`;
 }
 
+function disposeGuideLibrary(handle) {
+  if (typeof handle === "function") handle();
+  else if (typeof handle?.dispose === "function") handle.dispose();
+  else handle?.cleanup?.();
+}
+
+function mountGuideLibrary(card, load, onReady, onFailure) {
+  let handle = null;
+  let disposed = false;
+  const dialog = card.closest?.("dialog");
+  const dispose = () => {
+    disposed = true;
+    disposeGuideLibrary(handle);
+  };
+  dialog?.addEventListener?.("close", dispose, { once: true });
+  void Promise.resolve().then(load).then(async (mounted) => {
+    handle = mounted;
+    if (mounted?.ready) {
+      const result = await mounted.ready;
+      if (result === false || result?.ok === false) throw new Error("Guide library renderer did not become ready.");
+    }
+    if (disposed || card.isConnected === false) {
+      disposeGuideLibrary(handle);
+      return;
+    }
+    onReady?.(mounted);
+  }).catch(() => {
+    if (!disposed) onFailure?.();
+    disposeGuideLibrary(handle);
+  });
+}
+
 function pairControl(label, key, value, { min, max, step, unit = "", precision = 2 }) {
   const id = safeId(`activity-${key}`);
   const shown = number(value, precision);
@@ -115,7 +147,7 @@ function linearGraphCard(block) {
   return `<section class="study-interactive-model activity-model" data-guide-activity="linear_graph_v1" data-activity-id="${id}" data-default-slope="${slope}" data-default-intercept="${intercept}" aria-labelledby="${id}-title">
     <div class="activity-heading"><div><span class="guide-meta-label">Interactive graph</span><h4 id="${id}-title">${mathHtml(block.title)}</h4></div><button class="btn btn-secondary btn-small" type="button" data-activity-reset>Reset</button></div>
     <p class="activity-intro">Explore how the slope and y-intercept change the line. The graph uses a fixed x range from −10 to 10.</p>
-    <div class="activity-layout"><figure class="activity-figure"><div data-activity-visual>${lineSvg(slope, intercept, id)}</div><figcaption>${mathHtml(block.alt_text)}</figcaption></figure>
+    <div class="activity-layout"><figure class="activity-figure"><div data-activity-visual><div data-library-fallback>${lineSvg(slope, intercept, id)}</div><div class="guide-library-visual guide-library-plot" data-jsxgraph-board role="img" aria-label="Interactive JSXGraph plot of y equals ${escapeHtml(linearExpression(slope, intercept))}." hidden></div></div><figcaption>${mathHtml(block.alt_text)}</figcaption></figure>
       <div class="activity-controls">${pairControl("Slope (m)", "slope", slope, { min: -10, max: 10, step: 0.1 })}${pairControl("Y-intercept (b)", "intercept", intercept, { min: -10, max: 10, step: 0.1 })}
       <p class="activity-equation" data-activity-result>${mathHtml(linearMath(slope, intercept))}</p></div></div>${modelText(block)}</section>`;
 }
@@ -150,7 +182,7 @@ function responseCard(block) {
   return `<section class="study-interactive-model activity-model" data-guide-activity="first_order_response_v1" data-activity-id="${id}" data-default-initial="${initial}" data-default-final="${final}" data-default-tau="${tau}" aria-labelledby="${id}-title">
     <div class="activity-heading"><div><span class="guide-meta-label">Interactive model</span><h4 id="${id}-title">${mathHtml(block.title)}</h4></div><button class="btn btn-secondary btn-small" type="button" data-activity-reset>Reset</button></div>
     <p class="activity-intro">This ideal first-order response follows y(t) = y<sub>f</sub> + (y<sub>0</sub> − y<sub>f</sub>)e<sup>−t/τ</sup>.</p>
-    <div class="activity-layout"><figure class="activity-figure"><div data-activity-visual>${responseSvg(initial, final, tau, time, id)}</div><figcaption>${mathHtml(block.alt_text)}</figcaption></figure>
+    <div class="activity-layout"><figure class="activity-figure"><div data-activity-visual><div data-library-fallback>${responseSvg(initial, final, tau, time, id)}</div><div class="guide-library-visual guide-library-plot" data-echarts-response role="img" aria-label="Interactive ECharts plot of the first-order response." hidden></div></div><figcaption>${mathHtml(block.alt_text)}</figcaption></figure>
       <div class="activity-controls">${pairControl("Initial value", "initial_value", initial, { min: -1000, max: 1000, step: 1 })}${pairControl("Final value", "final_value", final, { min: -1000, max: 1000, step: 1 })}${pairControl("Time constant", "time_constant_s", tau, { min: 0.01, max: 3600, step: 0.01, unit: "s" })}
       <label class="activity-control" for="${id}-time"><span>Time</span><span class="activity-control-inputs"><input id="${id}-time" type="range" min="0" max="${5 * tau}" step="${Math.max(0.01, tau / 100)}" value="0" data-activity-control="time" aria-label="Elapsed time in seconds"><span class="activity-unit">s</span></span><span class="activity-control-readout" data-activity-readout="time">0 s</span></label>
       <p class="activity-equation" data-activity-result>At 0 s: y = ${escapeHtml(number(initial))}.</p></div></div>${modelText(block)}</section>`;
@@ -264,8 +296,8 @@ function moleculeCard(block) {
   const molecule = MOLECULES[block.molecule_id];
   return `<section class="study-interactive-model activity-model molecule-model" data-guide-activity="molecule_2d_v1" data-molecule-id="${block.molecule_id}" data-activity-id="${id}" aria-labelledby="${id}-title">
     <div class="activity-heading"><div><span class="guide-meta-label">2D molecular model</span><h4 id="${id}-title">${mathHtml(block.title)} <span class="molecule-formula">${escapeHtml(molecule.formula)}</span></h4></div></div>
-    <div class="activity-layout"><figure class="activity-figure"><div data-molecule-visual>${moleculeSvg(block.molecule_id, id)}</div><figcaption>${mathHtml(block.alt_text)}</figcaption></figure>
-      <div class="molecule-description"><p>${escapeHtml(molecule.description)}</p><p>Select an atom with a mouse, touch, Enter, or Space to read its role in this model.</p><p class="activity-result" data-molecule-status role="status" aria-live="polite">Select an atom to inspect it.</p></div></div>${modelText(block)}</section>`;
+    <div class="activity-layout"><figure class="activity-figure"><div data-molecule-visual><div data-molecule-fallback>${moleculeSvg(block.molecule_id, id)}</div><div class="guide-library-visual guide-library-molecule" data-smiles-drawer role="img" aria-label="SmilesDrawer molecular structure for ${escapeHtml(molecule.name)}." hidden></div></div><figcaption>${mathHtml(block.alt_text)}</figcaption></figure>
+      <div class="molecule-description"><p>${escapeHtml(molecule.description)}</p><p>Select an atom with a mouse, touch, Enter, or Space to read its role in this model.</p><div class="molecule-atom-controls" aria-label="Molecule atoms">${molecule.atoms.map((atom) => `<button class="btn btn-secondary btn-small" type="button" data-molecule-atom="${atom.id}" aria-pressed="false" aria-label="${escapeHtml(`${atom.element} atom. ${atom.description}`)}">${escapeHtml(atom.element)} atom</button>`).join("")}</div><p class="activity-result" data-molecule-status role="status" aria-live="polite">Select an atom to inspect it.</p></div></div>${modelText(block)}</section>`;
 }
 
 function processPathwayCard(block) {
@@ -273,7 +305,8 @@ function processPathwayCard(block) {
   return `<section class="study-interactive-model activity-model process-pathway" data-guide-activity="process_pathway_v1" data-activity-id="${id}" aria-labelledby="${id}-title">
     <div class="activity-heading"><div><span class="guide-meta-label">Process pathway</span><h4 id="${id}-title">${mathHtml(block.title)}</h4></div></div>
     <p class="activity-intro">Select a stage to read its explanation. The order follows the supplied course material.</p>
-    <ol class="pathway-stage-list">${block.stages.map((stage, index) => `<li><button class="pathway-stage-button" type="button" data-pathway-stage="${escapeHtml(stage.id)}" aria-pressed="${index === 0}"><span>Stage ${index + 1}</span><strong>${mathHtml(stage.title)}</strong></button><p data-pathway-explanation="${escapeHtml(stage.id)}" data-stage-text="${escapeHtml(stage.explanation)}"${index > 0 ? " hidden" : ""}>${mathHtml(stage.explanation)}</p>${index < block.stages.length - 1 ? `<span class="pathway-connector" aria-hidden="true">↓</span>` : ""}</li>`).join("")}</ol>
+    <div class="guide-library-visual guide-library-diagram" data-mermaid-pathway role="img" aria-label="Mermaid flow diagram of the ordered process stages." hidden></div>
+    <ol class="pathway-stage-list">${block.stages.map((stage, index) => `<li><button class="pathway-stage-button" type="button" data-pathway-stage="${escapeHtml(stage.id)}" data-stage-title="${escapeHtml(stage.title)}" aria-pressed="${index === 0}"><span>Stage ${index + 1}</span><strong>${mathHtml(stage.title)}</strong></button><p data-pathway-explanation="${escapeHtml(stage.id)}" data-stage-text="${escapeHtml(stage.explanation)}"${index > 0 ? " hidden" : ""}>${mathHtml(stage.explanation)}</p>${index < block.stages.length - 1 ? `<span class="pathway-connector" aria-hidden="true">↓</span>` : ""}</li>`).join("")}</ol>
     <p class="activity-result" data-pathway-status role="status" aria-live="polite">Stage 1 of ${block.stages.length}: ${mathHtml(block.stages[0].explanation)}</p>${modelText(block)}</section>`;
 }
 
@@ -388,12 +421,30 @@ function mountPairedControls(card, keys, defaults, update, onReset = null) {
 function mountLinearGraph(card) {
   const id = card.dataset.activityId;
   const defaults = { slope: Number(card.dataset.defaultSlope), intercept: Number(card.dataset.defaultIntercept) };
+  const fallback = card.querySelector("[data-library-fallback]") || card.querySelector("[data-activity-visual]");
+  const plot = card.querySelector("[data-jsxgraph-board]");
+  let graph = null;
+  let latest = defaults;
   mountPairedControls(card, Object.keys(defaults), defaults, ({ slope, intercept }) => {
-    card.querySelector("[data-activity-visual]").innerHTML = lineSvg(slope, intercept, id);
+    latest = { slope, intercept };
+    if (fallback) fallback.innerHTML = lineSvg(slope, intercept, id);
+    graph?.update?.(latest);
     const result = card.querySelector("[data-activity-result]");
     result.innerHTML = mathHtml(linearMath(slope, intercept));
     void typesetMath(result);
   });
+  if (plot && fallback) {
+    mountGuideLibrary(card, async () => {
+      const { mountLinearGraph: mountPlot } = await import("./libraries/plots.js");
+      return mountPlot(plot, defaults);
+    }, (mounted) => {
+      graph = mounted;
+      plot.hidden = false;
+      fallback.hidden = true;
+      graph?.resize?.();
+      graph?.update?.(latest);
+    }, () => { fallback.hidden = false; plot.hidden = true; });
+  }
 }
 
 function mountResponse(card) {
@@ -404,14 +455,20 @@ function mountResponse(card) {
     time_constant_s: Number(card.dataset.defaultTau)
   };
   let currentTime = 0;
+  const fallback = card.querySelector("[data-library-fallback]") || card.querySelector("[data-activity-visual]");
+  const plot = card.querySelector("[data-echarts-response]");
+  let responseChart = null;
+  let latest = { initial: defaults.initial_value, final: defaults.final_value, tau: defaults.time_constant_s, time: currentTime };
   const timeInput = card.querySelector('[data-activity-control="time"]');
   const controller = mountPairedControls(card, Object.keys(defaults), defaults, ({ initial_value: initial, final_value: final, time_constant_s: tau }) => {
     timeInput.max = String(5 * tau);
     timeInput.step = String(Math.max(0.01, tau / 100));
     currentTime = clamped(currentTime, 0, 5 * tau);
     timeInput.value = String(currentTime);
+    latest = { initial, final, tau, time: currentTime };
     const current = final + (initial - final) * Math.exp(-currentTime / tau);
-    card.querySelector("[data-activity-visual]").innerHTML = responseSvg(initial, final, tau, currentTime, id);
+    if (fallback) fallback.innerHTML = responseSvg(initial, final, tau, currentTime, id);
+    responseChart?.update?.(latest);
     const result = card.querySelector("[data-activity-result]");
     result.innerHTML = mathHtml(`At ${number(currentTime)} s: y = ${number(current)}.`);
     void typesetMath(result);
@@ -422,6 +479,17 @@ function mountResponse(card) {
     if (Number.isFinite(value)) currentTime = value;
     controller.sync();
   });
+  if (plot && fallback) {
+    mountGuideLibrary(card, async () => {
+      const { mountResponsePlot } = await import("./libraries/plots.js");
+      return mountResponsePlot(plot, latest);
+    }, (mounted) => {
+      responseChart = mounted;
+      plot.hidden = false;
+      fallback.hidden = true;
+      responseChart?.update?.(latest);
+    }, () => { fallback.hidden = false; plot.hidden = true; });
+  }
 }
 
 function mountDivider(card) {
@@ -540,6 +608,17 @@ function mountMolecule(card) {
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(atom); }
     });
   });
+  const fallback = card.querySelector("[data-molecule-fallback]");
+  const visual = card.querySelector("[data-smiles-drawer]");
+  if (fallback && visual) {
+    mountGuideLibrary(card, async () => {
+      const { mountMolecule: mountSmilesDrawer } = await import("./libraries/molecules.js");
+      return mountSmilesDrawer(visual, card.dataset.moleculeId);
+    }, () => {
+      visual.hidden = false;
+      fallback.hidden = true;
+    }, () => { fallback.hidden = false; visual.hidden = true; });
+  }
 }
 
 function mountProcessPathway(card) {
@@ -557,6 +636,17 @@ function mountProcessPathway(card) {
     void typesetMath(status);
   }
   buttons.forEach((button, index) => button.addEventListener("click", () => select(button, index)));
+  const diagram = card.querySelector("[data-mermaid-pathway]");
+  if (diagram && buttons.length >= 2) {
+    const stages = buttons.map((button) => ({
+      id: button.dataset.pathwayStage,
+      title: button.dataset.stageTitle || button.querySelector("strong")?.textContent || ""
+    }));
+    mountGuideLibrary(card, async () => {
+      const { mountMermaidFlow } = await import("./libraries/mermaid-flow.js");
+      return mountMermaidFlow(diagram, stages);
+    }, () => { diagram.hidden = false; }, () => { diagram.hidden = true; });
+  }
 }
 
 function mountAnimalCellMap(card) {

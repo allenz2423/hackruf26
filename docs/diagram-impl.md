@@ -1,8 +1,10 @@
 # Interactive STEM study guides: tools and implementation plan
 
-Research date: **2026-10-14**.
+Research date: **2026-10-16**.
 
-Status: **bounded study-guide implementation delivered and deployed on 2026-10-14; later subject activities are local additions pending independent qualification**. The third-party libraries below were researched through their official documentation, repositories, and license pages; none has been installed or benchmarked. The versioned reader supports force components, linear and first-order graphs, an ideal resistor divider, a binary-search trace, selectable app-owned 2D molecule models, ordered example steps, a source-selected animal-cell organelle map with fixed descriptions, and a statistics sampling demonstration. The animal-cell and statistics additions are local additions and have not been qualified or deployed. Browser activities and matching default-state LaTeX/PDF representations use application-owned SVG/HTML and safe server-authored LaTeX. The broader library comparisons and effort estimates remain research recommendations, not claims that those packages were adopted.
+Status: **the first library-backed guide adapters are implemented locally and await qualification/deployment**. The previous implementation used hand-built SVG/HTML for every activity, despite the later decision to use libraries where they provide real value. The frontend now has on-demand adapters for JSXGraph linear plots, Apache ECharts response plots, Mermaid process flows, and SmilesDrawer depictions of a fixed reviewed molecule set. Those adapters still consume bounded, app-owned template data; the model does not supply library options, executable code, arbitrary Mermaid syntax, or SMILES. Static SVG/HTML and text fallbacks remain available when a library cannot load. The existing force, circuit-divider, binary-search, cell-map, and sampling activities remain app-authored and do not yet use the broader discipline-specific libraries. These changes have not yet been deployed.
+
+The installed packages' published license metadata is: ECharts 6.1.0, Apache-2.0; JSXGraph 1.14.0, `(MIT OR LGPL-3.0-or-later)`; Mermaid 12.2.0, MIT; SmilesDrawer 2.4.1, MIT. Preserve the packages' license and notice files in the deployed dependency bundle. The JSXGraph package offers an MIT licensing option; retain that option's notice when redistributing.
 
 Selection constraint: **visualization tools must work without a mandatory license fee, subscription, commercial-license purchase, or paid external API**. Use self-hosted open-source packages and freely usable or app-authored assets. This constraint applies to the visualization dependencies; infrastructure and the application's existing model-generation costs are separate.
 
@@ -14,20 +16,21 @@ Build a browser study-guide reader with optional interactive blocks inside ordin
 
 Start with a small component library:
 
-| Need | Initial choice | Why this fits Jot |
+| Need | Current choice | Why this fits Jot |
 | --- | --- | --- |
-| Clickable labeled diagrams | App-authored SVG and HTML controls | Fits the existing browser stack and gives direct control over labels, keyboard behavior, and print layout. |
-| First graph, vector, and force-component activity | App-authored SVG and HTML controls | The bounded first template needs axes, arrows, a deterministic curve, and accessible numeric controls; SVG keeps the initial bundle dependency-free. |
-| Broader mathematical constructions | JSXGraph, evaluated when needed | Its documented mathematical construction model fits draggable points, curves, and sliders beyond the first fixed template. |
+| Clickable labeled figures | App-authored SVG and HTML controls | Gives direct control over labels, keyboard behavior, and the static export for small fixed diagrams. |
+| Linear function exploration | JSXGraph adapter | Uses the existing bounded linear template while providing a real mathematical plotting board; controls and function data remain app-owned. |
+| First-order response plot | Apache ECharts adapter | Uses a dedicated chart engine for a calculated response curve and current-time marker. |
+| Process pathways | Mermaid adapter | Renders a read-oriented flow from validated stage titles and order, while keyboard-accessible stage controls remain in HTML. |
 | Mathematical and chemical notation | Existing KaTeX, with its mhchem extension evaluated separately | Reuses the current formula renderer; chemical typesetting and molecular structure visualization remain separate tasks. |
-| Concept maps, pathways, algorithm graphs | Cytoscape.js when these blocks are introduced | Provides a graph data model and interaction APIs; the app still supplies the teaching behavior. |
-| Small-molecule 2D structures | SmilesDrawer; RDKit.js when chemical operations are needed | A depiction library is sufficient for display. A chemistry toolkit is appropriate when parsing, matching, or other chemistry operations become requirements. |
+| Concept maps and richer network activities | Cytoscape.js when such guide blocks are introduced | Provides a graph data model and interaction APIs; source-backed relationships and teaching behavior still belong to the app. |
+| Small-molecule 2D structures | SmilesDrawer for the fixed reviewed structures; RDKit.js when chemical operations are needed | A depiction library is sufficient for display. A chemistry toolkit is appropriate when parsing, matching, or other chemistry operations become requirements. |
 | Rotatable molecular structures | 3Dmol.js | A dedicated molecular viewer avoids building atom/bond rendering from scratch. |
 | Circuit exploration | Begin with a bounded app-authored circuit template; evaluate CircuitJS1 for a larger simulator | A few reviewed circuits have a much smaller integration scope than a full editor and simulation environment. |
 
 The supporting research and primary links appear in sections 4–9. These choices are a shortlist, not a proposal to install every package.
 
-The first complete example teaches **force components**: explanation, formulas, a labeled vector diagram, magnitude/angle controls, a related graph, a prediction prompt, citations, and a static export. The reader has since added representative graph, chemistry, circuit, and algorithm templates without a third-party rendering dependency. A later JSXGraph or simulator comparison remains appropriate if activities outgrow these fixed models.
+The first complete example teaches **force components**: explanation, formulas, a labeled vector diagram, magnitude/angle controls, a related graph, a prediction prompt, citations, and a static export. The first third-party adapters reuse existing linear-graph, first-order-response, process-pathway, and molecule template IDs so previously saved guides can render with the libraries after deployment. Circuit simulation, source-backed concept networks, executable code sandboxes, and 3D molecular viewing still need separate contracts and qualification; the current custom templates do not count as those integrations.
 
 ## 2. What already exists in this repository
 

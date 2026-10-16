@@ -25,6 +25,9 @@ test("fixed molecule structures render deterministically with keyboard-accessibl
 
     assert.equal(block.template_id, "molecule_2d_v1");
     assert.match(html, new RegExp(`aria-label="[^"]*${formula}`));
+    assert.match(html, /data-smiles-drawer/);
+    assert.match(html, /data-molecule-fallback/);
+    assert.match(html, /class="molecule-atom-controls"/);
     assert.match(html, /data-molecule-atom="[a-z0-9]+"[^>]*role="button" tabindex="0"/);
     assert.match(html, /aria-pressed="false"/);
     assert.match(html, /data-molecule-status role="status" aria-live="polite"/);
@@ -50,9 +53,10 @@ test("process pathways expose each stage, announce selection, and escape authore
   });
   const html = renderAdditionalGuideBlock(block);
 
+  assert.match(html, /data-mermaid-pathway/);
   assert.match(html, /<ol class="pathway-stage-list">/);
-  assert.match(html, /<button class="pathway-stage-button" type="button" data-pathway-stage="evaporation" aria-pressed="true"/);
-  assert.match(html, /data-pathway-stage="condensation" aria-pressed="false"/);
+  assert.match(html, /<button class="pathway-stage-button" type="button" data-pathway-stage="evaporation"[^>]* aria-pressed="true"/);
+  assert.match(html, /data-pathway-stage="condensation"[^>]*aria-pressed="false"/);
   assert.match(html, /data-pathway-explanation="evaporation"[^>]*>Liquid becomes vapor/);
   assert.match(html, /data-pathway-explanation="condensation"[^>]* hidden>/);
   assert.match(html, /role="status" aria-live="polite"/);

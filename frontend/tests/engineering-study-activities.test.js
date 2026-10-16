@@ -55,11 +55,15 @@ test("engineering and CS activities expose accessible controls, graphics, and te
   assert.match(force, /aria-label="Angle in degrees"/);
 
   const graph = renderAdditionalGuideBlock(blocks[1]);
+  assert.match(graph, /data-jsxgraph-board/);
+  assert.match(graph, /data-library-fallback/);
   assert.match(graph, /Graph of y equals/);
   assert.match(graph, /type="range"[^>]+data-activity-control="slope"/);
   assert.match(graph, /type="number"[^>]+data-activity-control="intercept"/);
 
   const response = renderAdditionalGuideBlock(blocks[2]);
+  assert.match(response, /data-echarts-response/);
+  assert.match(response, /data-library-fallback/);
   assert.match(response, /First-order response starting at 0, approaching 10/);
   assert.match(response, /aria-label="Elapsed time in seconds"/);
 
