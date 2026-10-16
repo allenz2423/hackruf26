@@ -92,6 +92,80 @@ class FakeElement {
   removeEventListener() {}
 }
 
+function studyTabElements() {
+  const form = new FakeElement();
+  const list = new FakeElement();
+  const picker = new FakeElement();
+  const filters = new Map(["all", "none", "notes", "syllabus"].map((key) => [key, new FakeElement()]));
+  picker.querySelector = (selector) => filters.get(selector.match(/"([^"]+)"/)?.[1]);
+  picker.querySelectorAll = () => [];
+  const elements = new Map([
+    ["#generate-form", form], ["#material-list", list], ["#generate-btn", new FakeElement()],
+    ["#generation-status", new FakeElement()], ["#study-source-picker", picker],
+    ["#source-selection-count", new FakeElement()], ["#generation-instructions-block", new FakeElement()],
+    ["#generation-language-block", new FakeElement()], ["#study-guide-title-block", new FakeElement()],
+    ["#study-guide-style-block", new FakeElement()], ["#generate-count-label", new FakeElement()]
+  ]);
+  return { root: { innerHTML: "", querySelector: (selector) => elements.get(selector) }, list };
+}
+
+test("a class study tab only includes personal guides originating in that class", async (t) => {
+  const computerScienceId = "11111111-1111-4111-8111-111111111111";
+  const economicsId = "22222222-2222-4222-8222-222222222222";
+  const guides = [
+    {
+      id: "cs-guide", kind: "study_guide", title: "Computer Science Source Study Guide",
+      origin_class_id: computerScienceId, resource_scope: "personal", created_by: "user-1",
+      status: "ready", item_count: 4, created_at: "2026-10-16T00:00:00Z",
+      scope: { kind: "all" }, options: {}
+    },
+    {
+      id: "economics-guide", kind: "study_guide", title: "Economics Source Study Guide",
+      origin_class_id: economicsId, resource_scope: "personal", created_by: "user-1",
+      status: "ready", item_count: 4, created_at: "2026-10-16T00:00:00Z",
+      scope: { kind: "all" }, options: {}
+    }
+  ];
+  globals(t, {
+    localStorage: (() => {
+      const values = new Map([["screen-tutor-classes", JSON.stringify([{
+        id: "computer-science-local-id", backendId: computerScienceId,
+        name: "Computer Science", uploads: [], materials: [], capabilities: []
+      }])]]);
+      return {
+        getItem: (key) => values.get(key) ?? null,
+        setItem: (key, value) => values.set(key, String(value)),
+        removeItem: (key) => values.delete(key)
+      };
+    })(),
+    fetch: async (path) => {
+      let items = [];
+      if (path === "/api/me/study-materials") items = guides;
+      if (path === `/api/classes/${computerScienceId}/study-materials`) items = [guides[0]];
+      return new Response(JSON.stringify({ items }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+  });
+
+  const klass = {
+    id: "computer-science-local-id", backendId: computerScienceId, name: "Computer Science",
+    uploads: [], materials: [], capabilities: [], isOwner: false
+  };
+  const classView = studyTabElements();
+  await renderStudyTab({ root: classView.root, klass, currentUserId: "user-1" });
+
+  assert.match(classView.list.innerHTML, /Computer Science Source Study Guide/);
+  assert.doesNotMatch(classView.list.innerHTML, /Economics Source Study Guide/);
+  assert.deepEqual(klass.materials.map((material) => material.id), ["cs-guide"]);
+
+  const localClass = { id: "local-only-class", name: "Local class", uploads: [], materials: [] };
+  const localView = studyTabElements();
+  await renderStudyTab({ root: localView.root, klass: localClass, currentUserId: "user-1" });
+  assert.doesNotMatch(localView.list.innerHTML, /Computer Science Source Study Guide|Economics Source Study Guide/);
+});
+
 test("additional-instructions control appears only for quizzes and practice tests", async () => {
   const form = new FakeElement();
   const list = new FakeElement();

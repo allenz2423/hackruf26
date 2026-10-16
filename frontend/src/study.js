@@ -319,9 +319,13 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
       }
       const classMaterials = materialResult.status === "fulfilled" ? materialResult.value : [];
       const classMaterialIds = new Set(classMaterials.map((material) => material.id));
+      const personalMaterialsForClass = personalSummaries.filter((material) =>
+        material.resource_scope === "personal"
+        && String(material.origin_class_id || "") === String(backendClassId)
+      );
       const remoteMaterials = [
         ...classMaterials,
-        ...personalSummaries.filter((material) => !classMaterialIds.has(material.id))
+        ...personalMaterialsForClass.filter((material) => !classMaterialIds.has(material.id))
       ];
       const existing = new Map(klass.materials.map((material) => [material.id, material]));
       const merged = remoteMaterials.map((summary) => {
@@ -349,20 +353,6 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
     } catch (e) {
       console.warn("Could not sync remote study materials:", e);
     }
-  } else if (personalSummaries.length) {
-    const existing = new Map(klass.materials.map((material) => [material.id, material]));
-    const personalMaterials = personalSummaries.map((summary) => {
-      const cached = existing.get(summary.id);
-      return formatRemoteMaterial(
-        { ...summary, download_urls: cached?.downloadUrls, content: cached?.status === "ready" ? cached : null },
-        klass.id,
-        undefined,
-        klass.uploads,
-        null,
-      );
-    });
-    const personalIds = new Set(personalMaterials.map((material) => material.id));
-    klass.materials = [...klass.materials.filter((material) => !personalIds.has(material.id)), ...personalMaterials];
   }
 
   // Retain choices when returning from a saved quiz or flashcard player.
