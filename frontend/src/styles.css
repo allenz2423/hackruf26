@@ -3632,22 +3632,33 @@ main {
   gap: var(--space-1);
 }
 
-.pathway-stage-button {
-  display: grid;
+.pathway-stage-card {
   width: min(100%, 32rem);
-  gap: var(--space-1);
-  padding: var(--space-3);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--surface);
+}
+
+.pathway-stage-card[data-active] {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 20%, transparent);
+}
+
+.pathway-stage-button {
+  display: grid;
+  width: 100%;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
   color: var(--text);
   text-align: left;
   cursor: pointer;
 }
 
-.pathway-stage-button[aria-pressed="true"] {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 20%, transparent);
+.pathway-stage-button:focus-visible {
+  outline-offset: -3px;
 }
 
 .pathway-stage-button span {
@@ -3655,10 +3666,9 @@ main {
   font-size: 0.8125rem;
 }
 
-.pathway-stage-list li > p {
-  width: min(100%, 32rem);
+.pathway-stage-explanation {
   margin: 0;
-  padding: 0 var(--space-3) var(--space-2);
+  padding: 0 var(--space-3) var(--space-3);
   color: var(--muted);
   line-height: 1.5;
 }

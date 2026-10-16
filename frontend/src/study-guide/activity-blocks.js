@@ -306,8 +306,8 @@ function processPathwayCard(block) {
     <div class="activity-heading"><div><span class="guide-meta-label">Process pathway</span><h4 id="${id}-title">${mathHtml(block.title)}</h4></div></div>
     <p class="activity-intro">Select a stage to read its explanation. The order follows the supplied course material.</p>
     <div class="guide-library-visual guide-library-diagram" data-mermaid-pathway role="img" aria-label="Mermaid flow diagram of the ordered process stages." hidden></div>
-    <ol class="pathway-stage-list">${block.stages.map((stage, index) => `<li><button class="pathway-stage-button" type="button" data-pathway-stage="${escapeHtml(stage.id)}" data-stage-title="${escapeHtml(stage.title)}" aria-pressed="${index === 0}"><span>Stage ${index + 1}</span><strong>${mathHtml(stage.title)}</strong></button><p data-pathway-explanation="${escapeHtml(stage.id)}" data-stage-text="${escapeHtml(stage.explanation)}"${index > 0 ? " hidden" : ""}>${mathHtml(stage.explanation)}</p>${index < block.stages.length - 1 ? `<span class="pathway-connector" aria-hidden="true">↓</span>` : ""}</li>`).join("")}</ol>
-    <p class="activity-result" data-pathway-status role="status" aria-live="polite">Stage 1 of ${block.stages.length}: ${mathHtml(block.stages[0].explanation)}</p>${modelText(block)}</section>`;
+    <ol class="pathway-stage-list">${block.stages.map((stage, index) => `<li><div class="pathway-stage-card" data-pathway-stage-card${index === 0 ? " data-active" : ""}><button class="pathway-stage-button" type="button" data-pathway-stage="${escapeHtml(stage.id)}" data-stage-title="${escapeHtml(stage.title)}"${index === 0 ? ` aria-describedby="${id}-stage-explanation-${index}"` : ""} aria-pressed="${index === 0}"><span>Stage ${index + 1}</span><strong>${mathHtml(stage.title)}</strong></button><p class="pathway-stage-explanation" id="${id}-stage-explanation-${index}" data-pathway-explanation="${escapeHtml(stage.id)}" data-stage-text="${escapeHtml(stage.explanation)}"${index > 0 ? " hidden" : ""}>${mathHtml(stage.explanation)}</p></div>${index < block.stages.length - 1 ? `<span class="pathway-connector" aria-hidden="true">↓</span>` : ""}</li>`).join("")}</ol>
+    <p class="activity-result visually-hidden" data-pathway-status role="status" aria-live="polite">Stage 1 of ${block.stages.length}: ${mathHtml(block.stages[0].explanation)}</p>${modelText(block)}</section>`;
 }
 
 function animalCellSvg(focusIds, id) {
@@ -628,8 +628,12 @@ function mountProcessPathway(card) {
     buttons.forEach((item) => {
       const active = item === button;
       item.setAttribute("aria-pressed", String(active));
+      const stageCard = item.closest?.("[data-pathway-stage-card]");
+      stageCard?.toggleAttribute?.("data-active", active);
       const explanation = card.querySelector(`[data-pathway-explanation="${item.dataset.pathwayStage}"]`);
       if (explanation) explanation.hidden = !active;
+      if (active && explanation?.id) item.setAttribute("aria-describedby", explanation.id);
+      else item.removeAttribute?.("aria-describedby");
     });
     const explanation = card.querySelector(`[data-pathway-explanation="${button.dataset.pathwayStage}"]`);
     status.innerHTML = mathHtml(`Stage ${index + 1} of ${buttons.length}: ${explanation?.dataset.stageText || ""}`);
