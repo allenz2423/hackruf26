@@ -597,6 +597,16 @@ CREATE TABLE IF NOT EXISTS study_material_files (
     PRIMARY KEY (material_id, format)
 );
 
+CREATE TABLE IF NOT EXISTS study_guide_generation_checkpoints (
+    material_id        TEXT PRIMARY KEY REFERENCES study_materials(id) ON DELETE CASCADE,
+    fingerprint        TEXT NOT NULL CHECK (length(fingerprint) = 64),
+    checkpoint_version INTEGER NOT NULL CHECK (checkpoint_version > 0),
+    completed_sections INTEGER NOT NULL CHECK (completed_sections > 0),
+    content            TEXT NOT NULL
+        CHECK (json_valid(content) AND json_type(content) = 'object'),
+    updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 CREATE TABLE IF NOT EXISTS study_material_sources (
     material_id TEXT NOT NULL,
     source_class_id TEXT,

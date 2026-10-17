@@ -18,6 +18,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import ValidationError
 from pypdf import PdfReader
 
 from app.api.dependencies import (
@@ -65,8 +66,14 @@ from app.services.class_access import (
 from app.services.database import SQLiteConnection, SQLiteDatabase, json_value
 from app.services.gemini_content import (
     MAX_NOTE_CONTEXT_CHARS,
+    STUDY_GUIDE_CHECKPOINT_VERSION,
     ContentGenerationFailure,
     GeminiContentService,
+    _guide_citation_validation_issues,
+    _guide_has_meaningful_interaction,
+    _guide_interaction_contract_issues,
+    _guide_unsupported_markdown_table_issues,
+    _normalized_study_guide,
 )
 from app.services.learning_scoring import (
     award_run_completion,
@@ -279,6 +286,114 @@ def _requested_guide_section_count(material: dict[str, Any]) -> int | None:
     if isinstance(count, int) and not isinstance(count, bool) and count > 0:
         return count
     return None
+
+
+def _study_guide_checkpoint_fingerprint(
+    *, material: dict[str, Any], sources: list[dict], model_name: str
+) -> str:
+    """Bind reusable work to every input that can change authored guide content."""
+    source_fingerprints: list[dict[str, object]] = []
+    for source in sources:
+        original_fingerprint = None
+        original_path = source.get("original_path")
+        if original_path:
+            digest = hashlib.sha256()
+            try:
+                with Path(str(original_path)).open("rb") as source_file:
+                    for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                original_fingerprint = digest.hexdigest()
+            except OSError:
+                # Extracted text remains usable when the original was already
+                # unavailable to the optional visual-evidence path. Include the
+                # stable path marker so a later restored asset invalidates this.
+                original_fingerprint = f"unavailable:{original_path}"
+        source_fingerprints.append(
+            {
+                "id": source.get("id"),
+                "title": source.get("title"),
+                "kind": source.get("kind"),
+                "source_type": source.get("source_type"),
+                "mime_type": source.get("mime_type"),
+                "original_filename": source.get("original_filename"),
+                "source_updated_at": source.get("source_updated_at"),
+                "processing_revision": source.get("processing_revision"),
+                "extracted_text": source.get("extracted_text"),
+                "summary": source.get("summary"),
+                "original_sha256": original_fingerprint,
+            }
+        )
+    payload = {
+        "checkpoint_version": STUDY_GUIDE_CHECKPOINT_VERSION,
+        "material_kind": material.get("kind"),
+        "class_name": material.get("class_name"),
+        "scope": json_value(material.get("scope"), {}),
+        "options": json_value(material.get("options"), {}),
+        "generation_instructions": material.get("generation_instructions"),
+        "model_name": model_name,
+        "sources": source_fingerprints,
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _validated_guide_checkpoint_sections(
+    row: dict[str, Any],
+    *,
+    fingerprint: str,
+    requested_count: int | None,
+    source_ids: set[str],
+    require_interaction: bool,
+) -> list[dict] | None:
+    """Return a safe completed prefix, or reject a stale/corrupt checkpoint."""
+    if (
+        requested_count is None
+        or row.get("fingerprint") != fingerprint
+        or int(row.get("checkpoint_version") or 0) != STUDY_GUIDE_CHECKPOINT_VERSION
+    ):
+        return None
+    try:
+        content = json.loads(row["content"])
+        parsed = StudyGuideContent.model_validate(content)
+        if parsed.schema_version != 2:
+            return None
+        sections = [section.model_dump(mode="json", exclude_none=True) for section in parsed.sections]
+        completed = len(sections)
+        if (
+            completed == 0
+            or completed > requested_count
+            or int(row.get("completed_sections") or 0) != completed
+            or (completed % 4 != 0 and completed != requested_count)
+        ):
+            return None
+        if _guide_citation_validation_issues(sections, source_ids):
+            return None
+        if _guide_unsupported_markdown_table_issues(sections):
+            return None
+        if _guide_interaction_contract_issues(sections):
+            return None
+        if require_interaction:
+            for start in range(0, min(completed, 16), 4):
+                if not _guide_has_meaningful_interaction(sections[start : start + 4]):
+                    return None
+        normalized = _normalized_study_guide(sections, source_ids)
+        if len(json.dumps(normalized, ensure_ascii=False).encode("utf-8")) > MAX_SERIALIZED_BYTES:
+            return None
+        return normalized["sections"]
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+        ValidationError,
+        ContentGenerationFailure,
+    ):
+        return None
 
 
 def _material_summary(row: dict[str, Any]) -> MaterialSummary:
@@ -2204,6 +2319,7 @@ async def _create_material_job(
         source_rows = await database.fetch(
             "SELECT COALESCE(n.id,s.source_note_id,s.note_id) AS id,"
             "COALESCE(n.title,s.source_title) AS title,COALESCE(n.kind,s.source_kind) AS kind,"
+            "n.updated_at AS source_updated_at,n.processing_revision AS processing_revision,"
             "COALESCE(n.class_id,s.source_class_id,s.class_id) AS class_id,n.created_by,"
             "n.publication_state,n.release_at,n.resource_scope,n.extracted_text,n.summary,"
             "n.original_filename,n.mime_type,n.source_type,a.id AS assessment_id,"
@@ -2262,6 +2378,52 @@ async def _create_material_job(
             sources.append(source)
         if not sources or len(sources) != len(source_rows):
             raise RuntimeError("no generation sources remain accessible")
+        material_options = json_value(material["options"], {})
+        if not isinstance(material_options, dict):
+            material_options = {}
+        resume_sections: list[dict] = []
+        checkpoint_fingerprint: str | None = None
+        if material_kind == "study_guide":
+            model_name = str(getattr(service, "model_name", "unconfigured"))
+            checkpoint_fingerprint = _study_guide_checkpoint_fingerprint(
+                material=material,
+                sources=sources,
+                model_name=model_name,
+            )
+            raw_styles = material_options.get("guide_styles")
+            if isinstance(raw_styles, list):
+                require_interaction = "interactive" in raw_styles
+            else:
+                require_interaction = material_options.get("guide_style") == "interactive"
+            checkpoint = await database.fetchrow(
+                "SELECT fingerprint,checkpoint_version,completed_sections,content "
+                "FROM study_guide_generation_checkpoints WHERE material_id=?1",
+                material_id,
+            )
+            if checkpoint is not None:
+                restored = _validated_guide_checkpoint_sections(
+                    checkpoint,
+                    fingerprint=checkpoint_fingerprint,
+                    requested_count=_requested_guide_section_count(material),
+                    source_ids={str(source["id"]) for source in sources},
+                    require_interaction=require_interaction,
+                )
+                if restored is None:
+                    await database.execute(
+                        "DELETE FROM study_guide_generation_checkpoints WHERE material_id=?1",
+                        material_id,
+                    )
+                    logger.info(
+                        "study_guide_checkpoint_discarded material_id=%s reason=stale_or_invalid",
+                        material_id,
+                    )
+                else:
+                    resume_sections = restored
+                    logger.info(
+                        "study_guide_checkpoint_resumed material_id=%s completed_sections=%s",
+                        material_id,
+                        len(resume_sections),
+                    )
         if material["kind"] in {"quiz", "practice_exam"}:
             # Personal assessments are kept owner-private and do not write to
             # the class bank, but they must still pass the same structured
@@ -2281,8 +2443,8 @@ async def _create_material_job(
                 class_id=str(origin_class_id),
                 user_id=str(actor_id),
                 material_kind=material["kind"],
-                options=json_value(material["options"], {}),
-                language=str(json_value(material["options"], {}).get("language") or "en"),
+                options=material_options,
+                language=str(material_options.get("language") or "en"),
                 additional_instructions=material.get("generation_instructions"),
                 source_rows=sources,
                 service=service,
@@ -2295,6 +2457,7 @@ async def _create_material_job(
         )
         generation_stage = "material_generation"
         guide_progress_callback = None
+        guide_checkpoint_callback = None
         if material["kind"] == "study_guide":
             event_loop = asyncio.get_running_loop()
 
@@ -2320,6 +2483,55 @@ async def _create_material_job(
                     logger.warning("study_guide_preview_persist_failed material_id=%s", material_id)
 
             guide_progress_callback = persist_guide_preview
+
+            def persist_guide_checkpoint(checkpoint_content: dict) -> None:
+                if checkpoint_fingerprint is None:
+                    raise RuntimeError("study-guide checkpoint fingerprint is unavailable")
+                checkpoint_json = json.dumps(checkpoint_content, ensure_ascii=False)
+                if len(checkpoint_json.encode("utf-8")) > MAX_SERIALIZED_BYTES:
+                    raise RuntimeError("validated study-guide checkpoint exceeds its storage limit")
+                completed_sections = len(checkpoint_content.get("sections") or [])
+
+                async def persist() -> None:
+                    async with database.acquire() as connection:
+                        async with connection.transaction():
+                            status = await connection.fetchval(
+                                "SELECT status FROM study_materials "
+                                "WHERE id=?1 AND kind='study_guide'",
+                                material_id,
+                            )
+                            if status != "generating":
+                                raise RuntimeError("study guide stopped before checkpoint persistence")
+                            await connection.execute(
+                                "INSERT INTO study_guide_generation_checkpoints "
+                                "(material_id,fingerprint,checkpoint_version,completed_sections,content) "
+                                "VALUES (?1,?2,?3,?4,?5) "
+                                "ON CONFLICT(material_id) DO UPDATE SET "
+                                "fingerprint=excluded.fingerprint,"
+                                "checkpoint_version=excluded.checkpoint_version,"
+                                "completed_sections=excluded.completed_sections,"
+                                "content=excluded.content,"
+                                "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+                                material_id,
+                                checkpoint_fingerprint,
+                                STUDY_GUIDE_CHECKPOINT_VERSION,
+                                completed_sections,
+                                checkpoint_json,
+                            )
+
+                future = asyncio.run_coroutine_threadsafe(persist(), event_loop)
+                try:
+                    future.result(timeout=30)
+                except Exception as exc:
+                    future.cancel()
+                    logger.error(
+                        "study_guide_checkpoint_persist_failed material_id=%s", material_id
+                    )
+                    raise RuntimeError(
+                        "validated study-guide work could not be saved for retry"
+                    ) from exc
+
+            guide_checkpoint_callback = persist_guide_checkpoint
         # Study-guide authoring already retries malformed batches and splits
         # them to isolate bad sections. Preserve one whole-generation retry for
         # unclassified empty/invalid responses, but don't repeat every batch
@@ -2331,12 +2543,14 @@ async def _create_material_job(
                     "kind": material["kind"],
                     "class_name": material["class_name"] or "Personal study materials",
                     "scope": json_value(material["scope"], {}),
-                    "options": json_value(material["options"], {}),
+                    "options": material_options,
                     "additional_instructions": material["generation_instructions"],
                     "sources": sources,
                 }
                 if guide_progress_callback is not None:
                     generation_kwargs["guide_progress_callback"] = guide_progress_callback
+                    generation_kwargs["guide_checkpoint_callback"] = guide_checkpoint_callback
+                    generation_kwargs["resume_sections"] = resume_sections
                 title, content = await asyncio.to_thread(
                     service.generate_material,
                     **generation_kwargs,
@@ -2399,6 +2613,11 @@ async def _create_material_job(
                     await connection.executemany(
                         "INSERT INTO study_material_files (material_id, format, content) VALUES (?1, ?2, ?3)",
                         [(material_id, format, data) for format, data in files.items()],
+                    )
+                if completed:
+                    await connection.execute(
+                        "DELETE FROM study_guide_generation_checkpoints WHERE material_id=?1",
+                        material_id,
                     )
     except Exception as exc:
         failure_code = _study_generation_failure_code(exc)

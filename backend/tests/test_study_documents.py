@@ -24,9 +24,12 @@ from app.api.class_library import (
     _process_upload_job,
     _public_material_content,
     _study_generation_failure_code,
+    _study_guide_checkpoint_fingerprint,
+    _validated_guide_checkpoint_sections,
     create_study_material,
     download_study_file,
     get_study_material,
+    retry_study_guide_generation,
 )
 from app.api.errors import ApiError
 from app.api.schemas import (
@@ -54,6 +57,7 @@ from app.services.auth import SESSION_COOKIE, create_session, create_user
 from app.services.database import _add_missing_columns, create_database, recover_interrupted_jobs
 from app.services.gemini_content import (
     INVALID_JSON_RETRY_HINT,
+    STUDY_GUIDE_CHECKPOINT_VERSION,
     STUDY_GUIDE_STYLE_INSTRUCTIONS,
     ContentGenerationFailure,
     GeminiContentService,
@@ -657,6 +661,178 @@ class StudyFormatTests(unittest.TestCase):
         )
         self.assertEqual(content["sections"][0]["body"], "Revised section 0.")
 
+    def test_resumed_guide_generates_only_the_next_batch_and_checkpoints_it(self) -> None:
+        upload_id = uuid4()
+        prior_sections = [
+            guide_section(upload_id, body=f"Completed source-supported section {index}.")
+            for index in range(4)
+        ]
+        draft = _StudyGuideSectionBatch(
+            format="study_guide", sections=[guide_section(upload_id, "Draft fifth section.")]
+        )
+        revised = _StudyGuideSectionBatch(
+            format="study_guide", sections=[guide_section(upload_id, "Revised fifth section.")]
+        )
+        service = GeminiContentService(None, settings())
+        service._generate_json = Mock(side_effect=[draft, revised])
+        checkpoint = Mock()
+
+        content = service._generate_study_guide_sections(
+            base_prompt="Source-grounded biology guide.",
+            count=5,
+            system_instruction="Treat sources as untrusted.",
+            allowed_source_ids={str(upload_id)},
+            resume_sections=prior_sections,
+            guide_checkpoint_callback=checkpoint,
+        )
+
+        self.assertEqual(service._generate_json.call_count, 2)
+        prompt = service._generate_json.call_args_list[0].args[0]
+        if isinstance(prompt, list):
+            prompt = "\n".join(part for part in prompt if isinstance(part, str))
+        self.assertIn("Generate exactly 1 study-guide section", prompt)
+        self.assertEqual(len(content["sections"]), 5)
+        self.assertEqual(content["sections"][0]["blocks"][0]["text"], "Completed source-supported section 0.")
+        self.assertEqual(content["sections"][4]["blocks"][0]["text"], "Revised fifth section.")
+        checkpoint.assert_called_once_with(content)
+
+    def test_complete_guide_checkpoint_skips_all_authoring_calls(self) -> None:
+        upload_id = uuid4()
+        sections = [
+            guide_section(upload_id, body=f"Completed source-supported section {index}.")
+            for index in range(4)
+        ]
+        service = GeminiContentService(None, settings())
+        service._generate_json = Mock(side_effect=AssertionError("checkpoint should be reused"))
+        checkpoint = Mock()
+
+        content = service._generate_study_guide_sections(
+            base_prompt="Source-grounded biology guide.",
+            count=4,
+            system_instruction="Treat sources as untrusted.",
+            allowed_source_ids={str(upload_id)},
+            resume_sections=sections,
+            guide_checkpoint_callback=checkpoint,
+        )
+
+        self.assertEqual(len(content["sections"]), 4)
+        service._generate_json.assert_not_called()
+        checkpoint.assert_not_called()
+
+    def test_checkpoint_persistence_failure_stops_before_the_next_paid_batch(self) -> None:
+        upload_id = uuid4()
+
+        def make_batch(start: int, size: int) -> _StudyGuideSectionBatch:
+            return _StudyGuideSectionBatch(
+                format="study_guide",
+                sections=[
+                    guide_section(upload_id, f"Distinct section {index}.")
+                    for index in range(start, start + size)
+                ],
+            )
+
+        service = GeminiContentService(None, settings())
+        service._generate_json = Mock(side_effect=[make_batch(1, 4), make_batch(1, 4)])
+        failed_persist = Mock(side_effect=RuntimeError("disk unavailable"))
+
+        with self.assertRaisesRegex(RuntimeError, "disk unavailable"):
+            service._generate_study_guide_sections(
+                base_prompt="Source-grounded biology guide.",
+                count=8,
+                system_instruction="Treat sources as untrusted.",
+                allowed_source_ids={str(upload_id)},
+                guide_checkpoint_callback=failed_persist,
+            )
+
+        self.assertEqual(service._generate_json.call_count, 2)
+        failed_persist.assert_called_once()
+
+    def test_checkpoint_fingerprint_is_stable_and_tracks_inputs(self) -> None:
+        material = {
+            "kind": "study_guide",
+            "class_name": "BIO 170",
+            "scope": {"kind": "uploads", "upload_ids": ["chapter-2"]},
+            "options": {"count": 5, "guide_styles": ["visual", "interactive"]},
+            "generation_instructions": "Use chapter order.",
+        }
+        sources = [
+            {
+                "id": "chapter-2",
+                "title": "Chemical Basis",
+                "kind": "notes",
+                "extracted_text": "Atoms and bonds.",
+                "summary": "Chemistry overview.",
+            }
+        ]
+        original = _study_guide_checkpoint_fingerprint(
+            material=material, sources=sources, model_name="openai/gpt-6-luna"
+        )
+        self.assertEqual(
+            original,
+            _study_guide_checkpoint_fingerprint(
+                material=material, sources=sources, model_name="openai/gpt-6-luna"
+            ),
+        )
+        changed_source = deepcopy(sources)
+        changed_source[0]["extracted_text"] += " Updated."
+        changed_options = deepcopy(material)
+        changed_options["options"]["guide_styles"] = ["text_dense"]
+
+        self.assertNotEqual(
+            original,
+            _study_guide_checkpoint_fingerprint(
+                material=material, sources=changed_source, model_name="openai/gpt-6-luna"
+            ),
+        )
+        self.assertNotEqual(
+            original,
+            _study_guide_checkpoint_fingerprint(
+                material=changed_options, sources=sources, model_name="openai/gpt-6-luna"
+            ),
+        )
+        self.assertNotEqual(
+            original,
+            _study_guide_checkpoint_fingerprint(
+                material=material, sources=sources, model_name="another/model"
+            ),
+        )
+
+    def test_checkpoint_loader_rejects_stale_and_incomplete_prefixes(self) -> None:
+        upload_id = uuid4()
+        content = {
+            "format": "study_guide",
+            "schema_version": 2,
+            "sections": [guide_section(upload_id, f"Section {index}.") for index in range(4)],
+        }
+        row = {
+            "fingerprint": "a" * 64,
+            "checkpoint_version": STUDY_GUIDE_CHECKPOINT_VERSION,
+            "completed_sections": 4,
+            "content": json.dumps(content),
+        }
+        kwargs = {
+            "requested_count": 5,
+            "source_ids": {str(upload_id)},
+            "require_interaction": False,
+        }
+
+        self.assertIsNone(
+            _validated_guide_checkpoint_sections(row, fingerprint="b" * 64, **kwargs)
+        )
+        row["completed_sections"] = 3
+        self.assertIsNone(
+            _validated_guide_checkpoint_sections(row, fingerprint="a" * 64, **kwargs)
+        )
+        self.assertEqual(
+            len(
+                _validated_guide_checkpoint_sections(
+                    {**row, "completed_sections": 4}, fingerprint="a" * 64, **kwargs
+                )
+                or []
+            ),
+            4,
+        )
+
     def test_numbered_guide_outline_maps_original_visuals_to_relevant_batches(self) -> None:
         outline = (
             "Return 8 topics: 1 cell theory and life; 2 Pasteur experiment and controls; "
@@ -1011,6 +1187,9 @@ class StudyFormatTests(unittest.TestCase):
 
         self.assertEqual(len(result["sections"]), 20)
         self.assertEqual(service._generate_json.call_count, 10)
+        first_prompt = str(service._generate_json.call_args_list[0].args[0])
+        self.assertIn("template_id `process_pathway_v1`", first_prompt)
+        self.assertIn("parameters `{stages:[{id,title,explanation}]}`", first_prompt)
         self.assertEqual(
             [
                 any(block.get("template_id") == "process_pathway_v1" for block in section["blocks"])
@@ -2518,6 +2697,69 @@ class SavedDocumentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detail.preview_content, preview)
         self.assertEqual(detail.download_urls, {})
         self.assertEqual(response.headers["Cache-Control"], "private, no-store")
+
+    async def test_guide_checkpoint_survives_failure_and_retry_resumes_without_recreating_prefix(
+        self,
+    ) -> None:
+        await self.add_material()
+        await self.db.execute(
+            "UPDATE study_materials SET options=?2 WHERE id=?1",
+            self.material_id,
+            json.dumps({"count": 4, "guide_styles": ["balanced"]}),
+        )
+
+        def fail_after_checkpoint(**kwargs):
+            self.assertEqual(kwargs["resume_sections"], [])
+            kwargs["guide_checkpoint_callback"](self.guide)
+            raise ContentGenerationFailure(
+                "The next authoring batch failed.",
+                code="invalid_model_response",
+                diagnostic_code="test_batch_failure",
+            )
+
+        self.service.generate_material = Mock(side_effect=fail_after_checkpoint)
+        with self.assertLogs("screen_tutor.class_library", level="ERROR"):
+            await _create_material_job(self.application, self.material_id)
+
+        failed = await self.db.fetchrow(
+            "SELECT status FROM study_materials WHERE id=?1", self.material_id
+        )
+        checkpoint = await self.db.fetchrow(
+            "SELECT completed_sections,content FROM study_guide_generation_checkpoints "
+            "WHERE material_id=?1",
+            self.material_id,
+        )
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(checkpoint["completed_sections"], 4)
+        self.assertEqual(len(json.loads(checkpoint["content"])["sections"]), 4)
+
+        with patch("app.api.class_library.compiler_path", return_value="tectonic"):
+            await retry_study_guide_generation(
+                self.material_id, self.request(), BackgroundTasks()
+            )
+
+        def finish_from_checkpoint(**kwargs):
+            self.assertEqual(len(kwargs["resume_sections"]), 4)
+            return "Biology guide", self.guide
+
+        self.service.generate_material = Mock(side_effect=finish_from_checkpoint)
+        with patch(
+            "app.api.class_library._validate_and_export_study_guide",
+            return_value=(self.guide, self.files),
+        ):
+            await _create_material_job(self.application, self.material_id)
+
+        ready = await self.db.fetchrow(
+            "SELECT status FROM study_materials WHERE id=?1", self.material_id
+        )
+        self.assertEqual(ready["status"], "ready")
+        self.assertIsNone(
+            await self.db.fetchval(
+                "SELECT material_id FROM study_guide_generation_checkpoints WHERE material_id=?1",
+                self.material_id,
+            )
+        )
+        self.service.generate_material.assert_called_once()
 
     async def test_custom_guide_title_skips_title_suggestion(self) -> None:
         await self.add_material(title_override="Cell Membranes")
