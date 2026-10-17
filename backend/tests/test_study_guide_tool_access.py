@@ -69,13 +69,23 @@ class StudyGuideToolAccessTests(unittest.TestCase):
 
         self.assertIn("360-unit-wide viewBox", prompt)
         self.assertIn("18–22 units for primary labels", prompt)
-        self.assertIn("at least four meaningful", prompt)
         self.assertIn("<animate attributeName=", prompt)
         self.assertIn(
             "include at least four such activities in distinct sections",
             STUDY_GUIDE_STYLE_INSTRUCTIONS["interactive"],
         )
         self.assertIn("select a meaningful stage", STUDY_GUIDE_STYLE_INSTRUCTIONS["interactive"])
+        self.assertIn(
+            "Each generated batch of up to four sections must contain at least "
+            "one meaningful learner action",
+            STUDY_GUIDE_STYLE_INSTRUCTIONS["interactive"],
+        )
+        self.assertIn(
+            "same section as the explanation", STUDY_GUIDE_STYLE_INSTRUCTIONS["interactive"]
+        )
+        self.assertIn("Every generated batch", prompt)
+        self.assertIn("exact UUID", prompt)
+        self.assertIn("no more than 12 citations", prompt)
         self.assertIn("360-unit-wide", custom_svg)
         self.assertIn("repeatCount", custom_svg)
         self.assertIn("one or two sentences", custom_svg)

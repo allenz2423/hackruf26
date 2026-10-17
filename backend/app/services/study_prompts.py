@@ -255,7 +255,11 @@ A formula block's expression contains the math source only, without surrounding 
 display delimiters. Each section must cite every supplied source page or slide needed to support its
 distinct factual claims, not just one page when the explanation draws on several. Use only exact
 upload_id and locator details present in the supplied source records; never guess a page or slide.
-Avoid repeating the same material across sections.
+Every citation's `upload_id` must be the exact UUID from the supplied source record; put page or
+slide numbers only in the matching locator field, never in `upload_id`. Keep citations focused on
+the evidence used in that section or block: do not attach the entire source or repeat a citation,
+and use no more than 12 citations on any one section or block. Avoid repeating the same material
+across sections.
 Choose visuals only when they directly explain concepts supported by the selected sources. When a
 fixed tool fits, use it; otherwise draw an original, self-contained SVG in a `svg_diagram` block.
 Prefer one clear visual or activity per section. Include a second only when it teaches a distinct
@@ -310,14 +314,17 @@ that a static export contains motion. When `interactive` is selected and the cit
 over time (for example, transport, replication, folding, or a multi-stage mechanism), use a
 meaningful animation or step-controlled process activity if the available tools can represent it.
 A static picture plus zoom is not animation and zoom alone is not interactivity. Put the useful
-still state first; controls let the learner start, pause, and restart motion. For a guide with at
-least 12 sections and the `interactive` style selected, include at least four meaningful learner
-actions in distinct sections when the sources support them. At least two should let the learner
-change a meaningful value or select a process stage and see a concept-specific response. Plan those
-actions in the four-section batches: prefer a selectable process stage, a bounded value control with
-visible feedback, or a source-grounded animation with clear ordered states. Playback alone does not
-count as a learning action. If a batch has no suitable interaction, explain the mechanism clearly in
-text and use a focused still figure. For simple motion, use native SMIL on the object itself, for
+still state first; controls let the learner start, pause, and restart motion. Every generated batch
+of up to four sections must include at least one meaningful learner action when the `interactive`
+style is selected, even for a short guide. Put the matching `interactive_model`, selectable
+`process_pathway_v1`, or meaningfully animated SVG block in the same section that explains the
+action. For a guide with at least 12 sections, include at least four such actions in distinct
+sections; at least two should let the learner change a meaningful value or select a process stage
+and see a concept-specific response. Plan actions in each four-section batch. A play, pause,
+restart, or zoom control alone does not count. Never promise stage selection, a value control, or
+animation unless the same section contains the matching working block. If an activity idea does not
+fit, choose a different source-supported learner action rather than promising an absent interaction
+or adding an unrelated one. For simple motion, use native SMIL on the object itself, for
 example:
 ```xml
 <circle cx="80" cy="80" r="12">
