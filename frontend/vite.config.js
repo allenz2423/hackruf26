@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
-import { copyFile, mkdir, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -51,8 +52,40 @@ function selfHostPyodide() {
   };
 }
 
+function fingerprintCssAssets() {
+  return {
+    name: "fingerprint-css-content",
+    async writeBundle(outputOptions, bundle) {
+      const outputDirectory = outputOptions.dir || resolve(frontendDirectory, "dist");
+      for (const asset of Object.values(bundle)) {
+        if (asset.type !== "asset" || !asset.fileName.endsWith(".css")) continue;
+
+        const oldFileName = asset.fileName;
+        const oldPath = resolve(outputDirectory, oldFileName);
+        const contents = await readFile(oldPath);
+        const digest = createHash("sha256").update(contents).digest("hex").slice(0, 12);
+        const newFileName = oldFileName.replace(/\.css$/, `-${digest}.css`);
+        const newPath = resolve(outputDirectory, newFileName);
+
+        if (newFileName === oldFileName) continue;
+        await rename(oldPath, newPath);
+
+        const textOutputs = Object.values(bundle).filter((output) =>
+          output.type === "chunk" || (output.type === "asset" && output.fileName.endsWith(".html"))
+        );
+        for (const output of textOutputs) {
+          const outputPath = resolve(outputDirectory, output.fileName);
+          const source = await readFile(outputPath, "utf8");
+          const updated = source.replaceAll(oldFileName, newFileName);
+          if (updated !== source) await writeFile(outputPath, updated);
+        }
+      }
+    }
+  };
+}
+
 export default defineConfig({
-  plugins: [selfHostPyodide()],
+  plugins: [selfHostPyodide(), fingerprintCssAssets()],
   server: {
     port: 5173,
     proxy: {
