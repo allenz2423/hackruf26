@@ -115,6 +115,13 @@ test("a source filename is human-readable in material metadata while citation na
   assert.equal(material.sources[0], originalName);
 });
 
+test("long material metadata filenames wrap inside narrow viewer headers", async () => {
+  const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+  const rule = css.match(/\.preview-header \.row-meta\s*\{([^}]*)\}/);
+  assert.ok(rule, "material viewer metadata must have a dedicated wrapping rule");
+  assert.match(rule[1], /overflow-wrap:\s*anywhere\s*;/);
+});
+
 test("malformed and oversized structured sections fall back to their body", () => {
   for (const blocks of [
     [{ type: "paragraph", text: "valid" }, { type: "unknown", text: "bad" }],
