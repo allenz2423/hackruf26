@@ -3200,6 +3200,7 @@ main {
 
 .preview-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-4);
@@ -3211,8 +3212,14 @@ main {
   min-width: 0;
 }
 
+.preview-header > div:first-child {
+  flex: 1 1 18rem;
+  min-width: min(100%, 18rem);
+}
+
 .preview-header h2 {
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 
 .preview-header .row-meta {
@@ -3222,7 +3229,8 @@ main {
 
 .preview-header-actions {
   display: flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  max-width: 100%;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--space-2);
