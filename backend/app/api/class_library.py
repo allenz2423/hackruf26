@@ -96,7 +96,7 @@ from app.services.study_files import StudyFileFailure, compiler_path, create_gui
 
 logger = logging.getLogger("screen_tutor.class_library")
 router = APIRouter(tags=["class-library"])
-STUDY_GUIDE_QUALITY_VERSION = 5
+STUDY_GUIDE_QUALITY_VERSION = 6
 
 
 def _provider_error_metadata(exc: Exception) -> tuple[int | None, str | None]:

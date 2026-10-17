@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import subprocess
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -15,6 +16,7 @@ from app.services.study_files import (
     _body,
     _inline,
     _safe_math,
+    compile_guide_pdf,
     compiler_path,
     create_guide_files,
 )
@@ -72,6 +74,99 @@ class StrictStudyFileTests(unittest.TestCase):
             r"[\(\mathrm{H}^+\)]: Hydrogen-ion concentration.",
         )
 
+    def test_compact_unicode_engineering_math_keeps_indices_decimals_and_units(self) -> None:
+        rendered = _inline(
+            "σ₃ = 1.4678 MPa. With σY = 300 MPa, Kc = 80 MPa√m, "
+            "the check uses x^8 ≡x^4 + x^3 + x + 1, ΔG < 0, "
+            "τxy, γxy, and 3.57 ± 0.005 \\pu{kg}. The unit is MPa√m."
+        )
+
+        self.assertIn(r"\(\sigma_{3} = 1.4678 MPa\)", rendered)
+        self.assertIn(r"\sigma_{Y} = 300 MPa", rendered)
+        self.assertIn(r"\sqrt{m}", rendered)
+        self.assertIn(r"MPa\(\sqrt{m}\)", rendered)
+        self.assertIn(r"\equiv{}x", rendered)
+        self.assertIn(r"\Delta{}G < 0", rendered)
+        self.assertIn(r"\tau_{xy}", rendered)
+        self.assertIn(r"\gamma_{xy}", rendered)
+        self.assertIn(r"\mathrm{kg}", rendered)
+
+    def test_long_related_display_equations_are_stacked_and_aligned(self) -> None:
+        formula = (
+            r"n=\frac{4E}{3(1-\nu^2)},\qquad m=\frac{4}{1/r_1+1/r_2},"
+            r"\qquad A=\frac{2}{m},\qquad B=\frac{1}{2}\left|"
+            r"\frac{1}{r_1}-\frac{1}{r_2}\right|,\qquad p_0=\frac{1.5F}{\pi ab}"
+        )
+        rendered = _inline("$$" + formula + "$$", strict_math=True)
+
+        self.assertIn(r"\begin{aligned}", rendered)
+        self.assertIn(r"n &= \frac{4E}{3(1-\nu^2)}", rendered)
+        self.assertIn(r"m &= \frac{4}{1/r_1+1/r_2}", rendered)
+        self.assertIn("\\\\\n", rendered)
+
+    @unittest.skipUnless(compiler_path(settings()), "Tectonic is not installed")
+    def test_source_reference_list_flows_after_short_guide_content(self) -> None:
+        upload_id = uuid4()
+        arguments = guide("A short, complete explanation.")
+        arguments["content"]["sections"][0]["sources"] = [
+            {"upload_id": str(upload_id), "page": 2}
+        ]
+        arguments["sources"] = [{"id": upload_id, "title": "Lecture.pdf"}]
+        files = create_guide_files(settings(), strict_math=True, **arguments)
+
+        self.assertNotIn(
+            "\\newpage\n\\section*{Source references}", files["latex"].decode("utf-8")
+        )
+        self.assertEqual(len(PdfReader(io.BytesIO(files["pdf"])).pages), 2)
+
+    @unittest.skipUnless(compiler_path(settings()), "Tectonic is not installed")
+    def test_compact_unicode_engineering_math_compiles_without_global_fallback(self) -> None:
+        body = (
+            "The reported principal stress is σ₃ = 1.4678 MPa. The yield strength is "
+            "σY = 300 MPa. Fracture toughness is Kc = 80 MPa√m. For the polynomial, "
+            "x^8 ≡x^4 + x^3 + x + 1. The reaction is spontaneous when ΔG < 0. "
+            "The measured components are τxy and γxy; the mass is 3.57 ± 0.005 \\pu{kg}. "
+            "The unit is MPa√m."
+        )
+        files = create_guide_files(settings(), strict_math=True, **guide(body))
+        latex = files["latex"].decode("utf-8")
+        extracted = " ".join(
+            page.extract_text() or ""
+            for page in PdfReader(io.BytesIO(files["pdf"])).pages
+        )
+
+        self.assertIn(r"\(\sigma_{3} = 1.4678 MPa\)", latex)
+        self.assertIn(r"\sigma_{Y} = 300 MPa", latex)
+        self.assertIn(r"\sqrt{m}", latex)
+        self.assertIn(r"MPa\(\sqrt{m}\)", latex)
+        self.assertIn(r"\equiv{}x", latex)
+        self.assertIn(r"\Delta{}G < 0", latex)
+        self.assertIn(r"\tau_{xy}", latex)
+        self.assertIn(r"\gamma_{xy}", latex)
+        self.assertIn(r"\mathrm{kg}", latex)
+        self.assertIn("1.4678", extracted)
+        self.assertIn("300", extracted)
+        self.assertNotIn(r"\textbackslash{}sigma", latex)
+
+    def test_compile_failure_uses_error_line_after_earlier_warnings(self) -> None:
+        diagnostics = (
+            b"warning: guide.tex:22: Overfull \\hbox detected\n"
+            b"error: guide.tex:63: Undefined control sequence"
+        )
+        with (
+            patch("app.services.study_files.compiler_path", return_value="/fake/tectonic"),
+            patch(
+                "app.services.study_files.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    args=["tectonic"], returncode=1, stdout=b"", stderr=diagnostics
+                ),
+            ),
+        ):
+            with self.assertRaises(StudyFileFailure) as failure:
+                compile_guide_pdf("\\begin{document}x\\end{document}", settings())
+
+        self.assertEqual(failure.exception.line_number, 63)
+
     def test_hyphenated_prose_remains_plain_text_while_bare_subtraction_renders(self) -> None:
         prose = (
             "A six-carbon sugar has a non-reducing end, a two-dimensional cis-trans model, "
@@ -103,7 +198,7 @@ class StrictStudyFileTests(unittest.TestCase):
             for page in PdfReader(io.BytesIO(files["pdf"])).pages
         )
 
-        self.assertIn(r"\cdot K", files["latex"].decode("utf-8"))
+        self.assertIn(r"\cdot{}K", files["latex"].decode("utf-8"))
         self.assertIn(r"\mathrm{H}^+", files["latex"].decode("utf-8"))
         self.assertNotIn(r"\textbackslash{}cdot", files["latex"].decode("utf-8"))
         self.assertNotIn(r"\textbackslash{}mathrm", files["latex"].decode("utf-8"))

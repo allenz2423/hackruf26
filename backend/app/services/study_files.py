@@ -97,6 +97,7 @@ _UNICODE_MATH_TEX = {
     "ℝ": r"\mathbb{R}", "ℤ": r"\mathbb{Z}", "ℕ": r"\mathbb{N}",
     "ℚ": r"\mathbb{Q}", "ℂ": r"\mathbb{C}", "°": r"^{\circ}",
 }
+_GREEK_IMPLICIT_SUBSCRIPT_BASES = frozenset("αβγδεζηθικλμνξπρστυφχψω")
 _UNICODE_SUBSCRIPT = {
     "₀": "0", "₁": "1", "₂": "2", "₃": "3", "₄": "4", "₅": "5",
     "₆": "6", "₇": "7", "₈": "8", "₉": "9", "₊": "+", "₋": "-",
@@ -310,6 +311,48 @@ def _balanced_group_end(value: str, start: int) -> int:
     return -1
 
 
+def _balanced_parenthesis_end(value: str, start: int) -> int:
+    if start >= len(value) or value[start] != "(":
+        return -1
+    depth = 0
+    index = start
+    while index < len(value):
+        if value[index] == "\\":
+            index += 2
+            continue
+        if value[index] == "(":
+            depth += 1
+        elif value[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return -1
+
+
+def _bare_sqrt_end(value: str, start: int) -> int:
+    if start >= len(value) or value[start] != "√":
+        return -1
+    radicand_start = start + 1
+    if radicand_start >= len(value):
+        return -1
+    if value[radicand_start] == "{":
+        return _balanced_group_end(value, radicand_start)
+    if value[radicand_start] == "(":
+        return _balanced_parenthesis_end(value, radicand_start)
+    if value[radicand_start] == "\\":
+        return _bare_command_end(value, radicand_start)
+    radicand = re.match(r"[A-Za-z0-9\u0370-\u03ff]+", value[radicand_start:])
+    if not radicand:
+        return -1
+    return radicand_start + len(radicand[0])
+
+
+def _is_implicit_greek_subscript(value: str) -> bool:
+    """Recognize compact indices such as x, xy, Y, max, or p1 after a Greek symbol."""
+    return bool(re.fullmatch(r"(?:[A-Z]|[a-z]{1,3})(?:\d{1,2})?", value))
+
+
 def _bare_command_end(value: str, start: int, nesting: int = 0) -> int:
     if nesting > 8:
         return -1
@@ -378,7 +421,7 @@ def _normalize_text_argument(command: str, inner: str) -> str:
 
 
 def _normalize_bare_math(value: str) -> str:
-    text_commands = {"text", "textrm", "textsf", "texttt", "textbf", "textit", "mbox"}
+    text_commands = {"text", "textrm", "textsf", "texttt", "textbf", "textit", "mbox", "pu"}
     operator_commands = (
         "cdot|times|pm|mp|leq|geq|neq|approx|equiv|in|notin|perp|parallel|"
         "to|rightarrow|leftarrow|leftrightarrow|quad|qquad|ldots|cdots|dots"
@@ -399,7 +442,64 @@ def _normalize_bare_math(value: str) -> str:
     )
 
     def normalize_segment(segment: str) -> str:
-        normalized = "".join(_UNICODE_MATH_TEX.get(char, char) for char in segment)
+        normalized_parts: list[str] = []
+        cursor = 0
+        while cursor < len(segment):
+            char = segment[cursor]
+            if char == "√":
+                next_index = cursor + 1
+                if next_index < len(segment) and segment[next_index] == "{":
+                    group_end = _balanced_group_end(segment, next_index)
+                    if group_end != -1:
+                        normalized_parts.append(r"\sqrt" + segment[next_index:group_end])
+                        cursor = group_end
+                        continue
+                if next_index < len(segment) and segment[next_index] == "(":
+                    group_end = _balanced_parenthesis_end(segment, next_index)
+                    if group_end != -1:
+                        normalized_parts.append(
+                            r"\sqrt{" + segment[next_index + 1 : group_end - 1] + "}"
+                        )
+                        cursor = group_end
+                        continue
+                radicand = re.match(r"[A-Za-z0-9\u0370-\u03ff]+", segment[next_index:])
+                if radicand:
+                    normalized_parts.append(r"\sqrt{" + radicand[0] + "}")
+                    cursor = next_index + len(radicand[0])
+                    continue
+
+            command = _UNICODE_MATH_TEX.get(char)
+            if command is None:
+                normalized_parts.append(char)
+                cursor += 1
+                continue
+
+            suffix = re.match(r"[A-Za-z][A-Za-z0-9]*", segment[cursor + 1 :])
+            if suffix and char in _GREEK_IMPLICIT_SUBSCRIPT_BASES:
+                suffix_text = suffix[0]
+                is_unit_suffix = char == "μ" and suffix_text in {
+                    "m", "g", "L", "l", "s", "M", "A", "F", "V", "mol",
+                }
+                if not is_unit_suffix and _is_implicit_greek_subscript(suffix_text):
+                    normalized_parts.append(command + "_{" + suffix_text + "}")
+                    cursor += 1 + len(suffix_text)
+                    continue
+
+            # TeX reads every following ASCII letter as part of a control word.
+            # End symbol commands before the adjacent variable (e.g. ≡x → \equiv{}x).
+            if (
+                command.startswith("\\")
+                and not command.endswith("}")
+                and cursor + 1 < len(segment)
+                and segment[cursor + 1].isascii()
+                and segment[cursor + 1].isalpha()
+            ):
+                normalized_parts.append(command + "{}")
+            else:
+                normalized_parts.append(command)
+            cursor += 1
+
+        normalized = "".join(normalized_parts)
         normalized = re.sub(
             rf"\\({operator_commands})(?=[A-Z])",
             lambda match: "\\" + match[1] + " ",
@@ -427,7 +527,8 @@ def _normalize_bare_math(value: str) -> str:
             if group_end != -1:
                 inner = value[group_start + 1 : group_end - 1]
                 pieces.append(normalize_segment(value[segment_start:cursor]))
-                pieces.append(_normalize_text_argument(command[0], inner))
+                text_command = r"\mathrm" if command[1] == "pu" else command[0]
+                pieces.append(_normalize_text_argument(text_command, inner))
                 cursor = group_end
                 segment_start = cursor
                 continue
@@ -468,7 +569,16 @@ def _bare_script_end(value: str, start: int) -> int:
     if not base:
         return -1
     index = start + len(base[0])
-    has_script = False
+    implicit_greek = re.fullmatch(r"([\u0370-\u03ff])([A-Za-z][A-Za-z0-9]*)", base[0])
+    has_script = bool(
+        implicit_greek
+        and implicit_greek[1] in _GREEK_IMPLICIT_SUBSCRIPT_BASES
+        and _is_implicit_greek_subscript(implicit_greek[2])
+        and not (
+            implicit_greek[1] == "μ"
+            and implicit_greek[2] in {"m", "g", "L", "l", "s", "M", "A", "F", "V", "mol"}
+        )
+    )
     while index < len(value):
         if value[index] in "_^":
             argument_start = index + 1
@@ -525,7 +635,10 @@ def _bare_equation_end(value: str, start: int) -> int:
         token = re.match(r"[A-Za-z0-9\u0370-\u03ff]+", value[index:])
         if token:
             word = token[0].casefold()
-            if word in _PROSE_WORDS or (len(token[0]) > 3 and word not in _MATH_WORDS):
+            is_numeric = token[0].isascii() and token[0].isdigit()
+            if word in _PROSE_WORDS or (
+                not is_numeric and len(token[0]) > 3 and word not in _MATH_WORDS
+            ):
                 break
             index += len(token[0])
             has_value = True
@@ -549,7 +662,7 @@ def _bare_equation_end(value: str, start: int) -> int:
             or char in "_^.,'′+-−=*/×÷<>≤≥≠≈≡∝|:∂∇∫∑√∞"
             or char in _UNICODE_MATH_TEX
         ):
-            if char in "=+-−=*/×÷<>≤≥≠≈≡∝":
+            if char in "=+-−=*/×÷<>≤≥≠≈≡∝±∓":
                 has_operator = True
             index += 1
             continue
@@ -589,6 +702,25 @@ def _normalize_math_environment(value: str) -> tuple[str, bool]:
     if replacement is None:
         return body, name != "math"
     return rf"\begin{{{replacement}}}{body}\end{{{replacement}}}", True
+
+
+def _wrap_long_display_math(value: str) -> str:
+    """Stack long lists of related equations instead of letting them run off the page."""
+    if len(value) < 140 or r"\begin{" in value:
+        return value
+    rows = re.split(r"\s*,?\s*\\(?:qquad|quad)\s*", value)
+    if len(rows) < 3 or any(not row.strip() for row in rows):
+        return value
+    aligned_rows = []
+    for row in rows:
+        row = row.strip().rstrip(",")
+        equation = re.split(r"(?<![<>])=(?!=)", row, maxsplit=1)
+        if len(equation) == 2:
+            aligned_rows.append(equation[0].rstrip() + " &= " + equation[1].lstrip())
+        else:
+            aligned_rows.append(row)
+    line_break = r" \\" + "\n"
+    return r"\begin{aligned}" + line_break.join(aligned_rows) + r"\end{aligned}"
 
 
 def _bare_environment(value: str, start: int) -> tuple[int, str, bool] | None:
@@ -691,6 +823,9 @@ def _inline_bare(value: str, strict_math: bool = False) -> str:
             if end == -1:
                 end = _bare_command_end(value, cursor)
             tex = value[cursor:end] if end != -1 else ""
+        elif value[cursor] == "√":
+            end = _bare_sqrt_end(value, cursor)
+            tex = value[cursor:end] if end != -1 else ""
         else:
             end = _bare_equation_end(value, cursor)
             if end == -1:
@@ -736,6 +871,8 @@ def _inline(value: str, render_math: bool = True, strict_math: bool = False) -> 
         math = _normalize_bare_math(math)
         if _safe_math(math):
             display = match[1] is not None or match[2] is not None or environment_display
+            if display and not environment_display:
+                math = _wrap_long_display_math(math)
             parts.append((r"\[" if display else r"\(") + math + (r"\]" if display else r"\)"))
             cursor = match.end()
         elif match[0].startswith("$") and not match[0].startswith("$$"):
@@ -1749,7 +1886,7 @@ def render_guide_latex(
             citations.append(r"\hyperref[source:" + str(number) + "]{" + escape_latex(label) + "}")
         document.append(r"\par\textbf{Sources:} " + "; ".join(citations))
     if source_map:
-        document.extend([r"\newpage", r"\section*{Source references}", r"\begin{description}"])
+        document.extend([r"\section*{Source references}", r"\begin{description}"])
         for source_id, (number, name) in source_map.items():
             document.extend(
                 [
@@ -1844,10 +1981,16 @@ def compile_guide_pdf(
                 diagnostics = b"\n".join((result.stdout or b"", result.stderr or b"")).decode(
                     "utf-8", errors="replace"
                 )
-                line_match = re.search(r"guide\.tex:(\d+):", diagnostics)
+                # Tectonic prints warnings and errors using the same file:line
+                # shape. Recovery must target the actual error; choosing an
+                # earlier overfull-box warning can repeatedly rewrite a good
+                # equation while leaving the invalid line untouched.
+                error_line = re.search(
+                    r"(?m)^error:\s*guide\.tex:(\d+):", diagnostics, re.IGNORECASE
+                )
                 raise StudyFileFailure(
                     "Study-guide PDF compilation failed.",
-                    line_number=int(line_match[1]) if line_match else None,
+                    line_number=int(error_line[1]) if error_line else None,
                 )
             data = pdf.read_bytes()
             if not data.startswith(b"%PDF-"):
