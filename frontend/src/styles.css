@@ -5148,12 +5148,8 @@ main {
     gap: 0.125rem;
   }
 
-  .interactive-card {
-    background-image: linear-gradient(
-      transparent 72px,
-      color-mix(in srgb, #c4483c 62%, transparent) 72px 74px,
-      transparent 74px
-    );
+  .flashcard-stage-interactive .interactive-card {
+    --flashcard-rule-y: 72px;
   }
 
   .flashcard-card-sources,
@@ -6219,7 +6215,12 @@ p {
 .interactive-card {
   border: 1px solid var(--line-strong);
   box-shadow: none;
-  background-image: linear-gradient(transparent 50px, color-mix(in srgb, #c4483c 62%, transparent) 50px 52px, transparent 52px);
+  --flashcard-rule-y: 50px;
+  background-image: linear-gradient(
+    transparent var(--flashcard-rule-y),
+    color-mix(in srgb, #c4483c 62%, transparent) var(--flashcard-rule-y) calc(var(--flashcard-rule-y) + 2px),
+    transparent calc(var(--flashcard-rule-y) + 2px)
+  );
   background-repeat: no-repeat;
 }
 
