@@ -1,5 +1,6 @@
 import { icon } from "./icons.js";
 import { mathHtml, typesetMath } from "./math.js";
+import { focusStudyPlayer } from "./ui.js";
 
 import { sourceCitationHtml, bindSourceCitations, sourceWarningsHtml } from "./source-citations.js";
 export { formatSourceCitation } from "./source-citations.js";
@@ -434,4 +435,5 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
   }
 
   render();
+  focusStudyPlayer(root);
 }

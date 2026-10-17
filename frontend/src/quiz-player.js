@@ -1,5 +1,5 @@
 import { mathHtml, typesetMath } from "./math.js";
-import { escapeHtml, toast } from "./ui.js";
+import { escapeHtml, focusStudyPlayer, toast } from "./ui.js";
 import {
   submitAttemptApi, flagMaterialItemApi, createQuizRunApi, getQuizRunApi,
   submitReasoningApi, retryReasoningApi, skipQuizQuestionApi,
@@ -250,6 +250,7 @@ function renderRemoteQuizStart(root, material, options, { preferredMode = "stand
       <div class="assessment-actions"><button class="btn btn-secondary" type="button" data-start-back>Cancel</button><button class="btn btn-primary" type="button" data-start-quiz>Start quiz</button></div>
     </section>`;
   root.querySelectorAll("[data-start-back]").forEach((button) => button.addEventListener("click", () => options.onBack?.()));
+  focusStudyPlayer(root);
   const startButton = root.querySelector("[data-start-quiz]");
   const errorNode = root.querySelector(".quiz-start-error");
   startButton.addEventListener("click", async () => {
@@ -263,6 +264,7 @@ function renderRemoteQuizStart(root, material, options, { preferredMode = "stand
       run = normalizePublicQuizRun(run, { materialId: material.id, mode });
       if (mode === "reasoning") {
         renderReasoningQuizPlayer(root, { ...material, questions: run.questions }, options, run);
+        focusStudyPlayer(root);
       } else {
         renderQuizPlayer(root, { ...material, questions: run.questions }, {
           ...options, runContext: { mode, runId: run.run_id, run }
@@ -896,6 +898,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
           <button class="btn btn-secondary" type="button" data-secure-quiz-back>Back to study materials</button>
         </section>`;
       root.querySelector("[data-secure-quiz-back]")?.addEventListener("click", () => onBack?.());
+      focusStudyPlayer(root);
       return;
     }
   }
@@ -1052,9 +1055,9 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
     void typesetMath(root);
     bindSourceCitations(root, material);
 
-    root.querySelectorAll("[data-back-to-study]").forEach((button) => {
-      button.addEventListener("click", goBack);
-    });
+  root.querySelectorAll("[data-back-to-study]").forEach((button) => {
+    button.addEventListener("click", goBack);
+  });
 
     root.querySelector("[data-retake]").addEventListener("click", () => {
       disposed = true;
@@ -1295,9 +1298,11 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
   `;
   void typesetMath(root);
 
-  root.querySelectorAll("[data-back-to-study]").forEach((button) => {
-    button.addEventListener("click", goBack);
-  });
+    root.querySelectorAll("[data-back-to-study]").forEach((button) => {
+      button.addEventListener("click", goBack);
+    });
+
+  focusStudyPlayer(root);
 
   const form = root.querySelector("#assessment-form");
   form.addEventListener("submit", (event) => {

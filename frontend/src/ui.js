@@ -17,6 +17,17 @@ export function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+export function focusStudyPlayer(root) {
+  const target = root?.querySelector(
+    ".flashcard-player [data-card-flip], .assessment-view h2, .assessment-view h3"
+  );
+  if (target) {
+    if (target.tabIndex < 0) target.setAttribute("tabindex", "-1");
+    target.focus?.({ preventScroll: true });
+  }
+  if (typeof window !== "undefined") window.scrollTo?.(0, 0);
+}
+
 // Accessible replacement for window.prompt/confirm, built on <dialog>.
 // Resolves with the entered text (prompt), true (confirm), or null when cancelled.
 export function openDialog({ title, message = "", input = null, confirmLabel = "Save", confirmIcon = null, danger = false }) {

@@ -93,6 +93,23 @@ class SafeSvgTests(unittest.TestCase):
         self.assertEqual(animation.get("keyTimes"), "0;1")
         self.assertEqual(animation.get("fill"), "freeze")
 
+    def test_preserves_group_translation_with_negative_offset(self) -> None:
+        svg = f"""<svg xmlns="{SVG_NAMESPACE}" viewBox="0 0 100 200">
+          <g><circle cx="50" cy="160" r="8"/>
+            <animateTransform attributeName="transform" type="translate"
+                              from="0 0" to="0 -120" dur="3s" repeatCount="1"/>
+          </g>
+        </svg>"""
+
+        group = ET.fromstring(sanitize_svg(svg)).find(f"{{{SVG_NAMESPACE}}}g")
+        animation = group.find(f"{{{SVG_NAMESPACE}}}animateTransform")
+
+        self.assertIsNotNone(animation)
+        self.assertEqual(animation.get("type"), "translate")
+        self.assertEqual(animation.get("from"), "0 0")
+        self.assertEqual(animation.get("to"), "0 -120")
+        self.assertEqual(animation.get("fill"), "freeze")
+
     def test_drops_executable_markup_events_styles_and_external_references(self) -> None:
         svg = f"""<svg xmlns="{SVG_NAMESPACE}" viewBox="0 0 100 100">
           <script>alert(1)</script>

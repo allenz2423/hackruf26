@@ -1784,8 +1784,20 @@ async def process_queued_concept_extractions(
                         job_id,
                     )
         except Exception as exc:
+            error_code = getattr(exc, "code", None)
+            diagnostic_code = getattr(exc, "diagnostic_code", None)
+            validation_issues = getattr(exc, "validation_issues", None)
+            validation_issue_count = (
+                len(validation_issues) if isinstance(validation_issues, list) else 0
+            )
             logger.warning(
-                "concept_extraction_failed operation_id=%s category=%s", job_id, type(exc).__name__
+                "concept_extraction_failed operation_id=%s category=%s error_code=%s "
+                "diagnostic_code=%s validation_issue_count=%s",
+                job_id,
+                type(exc).__name__,
+                error_code,
+                diagnostic_code,
+                validation_issue_count,
             )
             attempts = int(claimed["attempts"])
             if attempts < int(claimed["max_attempts"]):

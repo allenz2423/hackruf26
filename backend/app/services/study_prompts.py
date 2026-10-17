@@ -325,6 +325,12 @@ example:
            keyTimes="0;1" repeatCount="1" fill="freeze"/>
 </circle>
 ```
+For a labeled object that must translate as a unit, prefer `animateTransform` with
+`type="translate"` on its group and explicit offsets such as `from="0 0"` to `to="0 -80"`; put
+labels that must stay still outside that group. An `animateMotion` path uses SVG user-space
+coordinates and is not automatically a displacement from the object's starting position. Use it
+only when the complete path stays inside the viewBox. Check the sanitized animation at its initial,
+middle, and final times, and keep the full moving object visible in every frame.
 Every `animate` and `animateTransform` needs a safe target attribute, an explicit bounded duration,
 and either at least two valid values or a valid `from`/`to` pair. If `values` has multiple phases,
 provide the same number of semicolon-separated `keyTimes`, starting at 0 and ending at 1. For a

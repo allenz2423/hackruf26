@@ -23,6 +23,7 @@ from app.services.concept_graph import (
     recover_concept_extraction_jobs,
 )
 from app.services.database import create_database
+from app.services.gemini_content import ContentGenerationFailure
 
 ORIGIN = "http://localhost:5173"
 
@@ -32,6 +33,7 @@ class FakeGraphService:
         self.model_name = "fake-concept-model-v1"
         self.output = ConceptGraphAIOutput(concepts=[], edges=[])
         self.fail = False
+        self.failure: Exception | None = None
         self.contexts: list[dict] = []
 
     def process_text(self, text: str, _kind: str) -> dict:
@@ -46,6 +48,8 @@ class FakeGraphService:
 
     def extract_concept_graph(self, context: dict) -> ConceptGraphAIOutput:
         self.contexts.append(context)
+        if self.failure is not None:
+            raise self.failure
         if self.fail:
             raise RuntimeError("provider unavailable")
         return self.output
@@ -582,6 +586,30 @@ class ConceptGraphApiTests(unittest.TestCase):
         self.assertEqual(recovered["status"], "queued")
         self.assertEqual(recovered["error_code"], "extraction_interrupted")
         self.assertTrue(current_id)
+
+    def test_extraction_failure_logs_safe_structured_diagnostics(self) -> None:
+        self.fake.failure = ContentGenerationFailure(
+            "private provider response must not be logged",
+            code="invalid_model_response",
+            diagnostic_code="schema_validation_failed",
+            validation_issues=[{"type": "missing", "hint": "private detail"}],
+        )
+        with self.assertLogs("screen_tutor.concept_graph", level="WARNING") as captured:
+            response = self.call(
+                "post",
+                f"/api/classes/{self.class_id}/concept-graph/extractions",
+                "graph_owner",
+                json={"upload_id": self.note_id},
+            )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        message = "\n".join(captured.output)
+        self.assertIn("category=ContentGenerationFailure", message)
+        self.assertIn("error_code=invalid_model_response", message)
+        self.assertIn("diagnostic_code=schema_validation_failed", message)
+        self.assertIn("validation_issue_count=1", message)
+        self.assertNotIn("private provider response", message)
+        self.assertNotIn("private detail", message)
 
     def test_controlled_extraction_creates_reviewable_same_class_proposals(self) -> None:
         self.add_reader("graph_reader")
