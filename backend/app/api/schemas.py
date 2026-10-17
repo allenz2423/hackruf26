@@ -6,6 +6,7 @@ import math
 import re
 from datetime import UTC, datetime
 from datetime import date as calendar_date
+from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -542,16 +543,20 @@ class StudyMaterialCreate(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def instructions_only_apply_to_assessments(self) -> StudyMaterialCreate:
+    def generation_preferences_are_kind_scoped(self) -> StudyMaterialCreate:
         if self.title and self.kind != "study_guide":
             raise ValueError("A custom name is available only for study guides.")
         if (self.guide_style is not None or self.guide_styles is not None) and self.kind != "study_guide":
             raise ValueError("A guide style is available only for study guides.")
         if self.guide_style is not None and self.guide_styles is not None:
             raise ValueError("Use either guide_style or guide_styles, not both.")
-        if self.additional_instructions and self.kind not in {"quiz", "practice_exam"}:
+        if self.additional_instructions and self.kind not in {
+            "quiz",
+            "practice_exam",
+            "study_guide",
+        }:
             raise ValueError(
-                "Additional instructions are available only for quizzes and practice exams."
+                "Additional instructions are available only for quizzes, practice exams, and study guides."
             )
         if self.language != "en" and self.kind not in {"quiz", "practice_exam"}:
             raise ValueError("Question language is available only for quizzes and practice exams.")
@@ -1673,6 +1678,52 @@ class AIProviderTestResponse(BaseModel):
 
     success: bool
     message: str
+
+
+class AIUsageBalanceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    balance_usd: Decimal = Field(ge=0, le=1_000_000, max_digits=12, decimal_places=6)
+    note: str = Field(default="Current provider balance", min_length=1, max_length=160)
+
+
+class AIUsageLedgerEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str
+    entry_type: Literal["provider_call", "balance_adjustment"]
+    operation_id: str | None = None
+    operation_kind: str | None = None
+    operation_label: str | None = None
+    material_status: Literal["generating", "ready", "failed"] | None = None
+    provider_host: str | None = None
+    model: str | None = None
+    actual_model: str | None = None
+    attempt: int = Field(ge=1)
+    outcome: Literal[
+        "success", "http_error", "invalid_response", "timeout", "transport_error"
+    ] | None = None
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
+    reasoning_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    reported_cost_microusd: int | None = Field(default=None, ge=0)
+    balance_delta_microusd: int | None = None
+    adjustment_note: str | None = None
+    created_at: datetime
+
+
+class AIUsageLedgerResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    total_spend_microusd: int = Field(ge=0)
+    month_spend_microusd: int = Field(ge=0)
+    unpriced_calls: int = Field(ge=0)
+    unsuccessful_calls: int = Field(ge=0)
+    balance_known: bool
+    balance_microusd: int | None = None
+    entries: list[AIUsageLedgerEntry]
 
 
 class ProfileUpdate(BaseModel):

@@ -35,9 +35,16 @@ from app.services.guide_templates import (
     _simcir_truth_table,
     sampling_demo_result,
 )
+from app.services.study_guide_visual_preview import (
+    MAX_PREVIEW_PNG_BYTES,
+    SvgPreviewRenderError,
+    render_svg_preview_png,
+)
 
 _COMPILATION_LOCK = threading.Semaphore(1)
 _MAX_FILE_BYTES = 20 * 1024 * 1024
+_MAX_GUIDE_DIAGRAMS = 32
+_MAX_GUIDE_DIAGRAM_BYTES = 16 * 1024 * 1024
 _ESCAPES = {
     "\\": r"\textbackslash{}",
     "{": r"\{",
@@ -1091,7 +1098,11 @@ def _stress_cube_picture(block: StudyGuideBlock) -> str:
 
 
 def _render_guide_block(
-    block: StudyGuideBlock, render_math: bool, strict_math: bool = False
+    block: StudyGuideBlock,
+    render_math: bool,
+    strict_math: bool = False,
+    *,
+    svg_image: str | None = None,
 ) -> list[str]:
     def inline(value: str) -> str:
         return _inline(value, render_math, strict_math)
@@ -1447,12 +1458,25 @@ def _render_guide_block(
         )
         return lines
     if block.type == "svg_diagram":
-        return [
-            r"\paragraph{" + escape_latex(block.title or "Custom diagram") + "}",
-            r"\textit{The interactive SVG illustration is shown in the web guide.}",
-            body(block.fallback_text or block.alt_text or "Custom course diagram."),
-            inline("Text alternative: " + (block.alt_text or "Custom course diagram.")),
-        ]
+        lines = [r"\paragraph{" + escape_latex(block.title or "Custom diagram") + "}"]
+        if svg_image and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,80}\.png", svg_image):
+            lines.extend(
+                [
+                    r"\begin{center}\includegraphics[width=\linewidth,height=0.46\textheight,keepaspectratio]{"
+                    + svg_image
+                    + r"}\end{center}",
+                    inline("Text alternative: " + (block.alt_text or "Custom course diagram.")),
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    r"\textit{Interactive SVG diagram is available in the web guide.}",
+                    body(block.fallback_text or block.alt_text or "Custom course diagram."),
+                    inline("Text alternative: " + (block.alt_text or "Custom course diagram.")),
+                ]
+            )
+        return lines
     if block.type == "example_steps":
         lines = [
             r"\paragraph{" + escape_latex(block.title or "Worked example") + "}",
@@ -1485,6 +1509,7 @@ def render_guide_latex(
     original_text: str | None = None,
     render_math: bool = True,
     strict_math: bool = False,
+    svg_image_map: dict[tuple[int, int], str] | None = None,
 ) -> str:
     guide = (
         UploadDocumentContent if content.get("format") == "upload_document" else StudyGuideContent
@@ -1496,6 +1521,7 @@ def render_guide_latex(
         r"""\documentclass[11pt]{article}
 \usepackage[margin=1in]{geometry}
 \usepackage{amsmath,fontspec,unicode-math}
+\usepackage{graphicx}
 \setmainfont{DejaVuSerif.ttf}[BoldFont=DejaVuSerif-Bold.ttf,ItalicFont=DejaVuSerif-Italic.ttf,BoldItalicFont=DejaVuSerif-BoldItalic.ttf]
 \usepackage[hidelinks]{hyperref}
 \setlength{\parindent}{0pt}
@@ -1512,11 +1538,18 @@ def render_guide_latex(
         r"\tableofcontents",
         r"\newpage",
     ]
-    for section in guide.sections:
+    for section_index, section in enumerate(guide.sections):
         document.append(r"\section{" + escape_latex(section.heading) + "}")
         if isinstance(section, StudyGuideSectionV2) and section.blocks:
-            for block in section.blocks:
-                document.extend(_render_guide_block(block, render_math, strict_math))
+            for block_index, block in enumerate(section.blocks):
+                document.extend(
+                    _render_guide_block(
+                        block,
+                        render_math,
+                        strict_math,
+                        svg_image=(svg_image_map or {}).get((section_index, block_index)),
+                    )
+                )
         else:
             document.append(_body(section.body or "", render_math, strict_math))
         if section.key_terms:
@@ -1607,7 +1640,13 @@ def compiler_path(settings: Settings) -> str | None:
     return None
 
 
-def compile_guide_pdf(latex: str, settings: Settings, *, only_cached: bool = True) -> bytes:
+def compile_guide_pdf(
+    latex: str,
+    settings: Settings,
+    *,
+    assets: dict[str, bytes] | None = None,
+    only_cached: bool = True,
+) -> bytes:
     executable = compiler_path(settings)
     if not executable:
         raise StudyFileFailure("Install Tectonic to create study-guide PDFs.")
@@ -1616,6 +1655,16 @@ def compile_guide_pdf(latex: str, settings: Settings, *, only_cached: bool = Tru
         with tempfile.TemporaryDirectory(prefix="screen-tutor-guide-") as directory:
             source = Path(directory) / "guide.tex"
             source.write_text(latex, encoding="utf-8")
+            total_asset_bytes = 0
+            for name, data in (assets or {}).items():
+                if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,80}\.png", name):
+                    raise StudyFileFailure("Study-guide PDF contains an invalid diagram asset.")
+                if not data or len(data) > MAX_PREVIEW_PNG_BYTES:
+                    raise StudyFileFailure("Study-guide PDF diagram asset exceeds its size limit.")
+                total_asset_bytes += len(data)
+                if total_asset_bytes > _MAX_GUIDE_DIAGRAM_BYTES:
+                    raise StudyFileFailure("Study-guide PDF diagram assets exceed their combined size limit.")
+                (Path(directory) / name).write_bytes(data)
             command = [executable, "--untrusted", "--chatter", "minimal", "--outdir", directory]
             if only_cached:
                 command.append("--only-cached")
@@ -1646,13 +1695,57 @@ def compile_guide_pdf(latex: str, settings: Settings, *, only_cached: bool = Tru
 def create_guide_files(
     settings: Settings, *, strict_math: bool = False, **guide: object
 ) -> dict[str, bytes]:
-    latex = render_guide_latex(**guide, strict_math=strict_math)
+    svg_image_map: dict[tuple[int, int], str] = {}
+    assets: dict[str, bytes] = {}
     try:
-        pdf = compile_guide_pdf(latex, settings)
+        parsed = StudyGuideContent.model_validate(guide.get("content"))
+        if parsed.schema_version == 2:
+            total_asset_bytes = 0
+            for section_index, section in enumerate(parsed.sections):
+                if not isinstance(section, StudyGuideSectionV2):
+                    continue
+                for block_index, block in enumerate(section.blocks):
+                    if block.type != "svg_diagram" or len(assets) >= _MAX_GUIDE_DIAGRAMS:
+                        continue
+                    try:
+                        image = render_svg_preview_png(block.svg or "")
+                    except (SvgPreviewRenderError, ValueError):
+                        continue
+                    if total_asset_bytes + len(image) > _MAX_GUIDE_DIAGRAM_BYTES:
+                        break
+                    name = f"jot-guide-diagram-{len(assets) + 1:03d}.png"
+                    assets[name] = image
+                    svg_image_map[(section_index, block_index)] = name
+                    total_asset_bytes += len(image)
+    except Exception:
+        # If a document cannot be parsed for optional diagram rendering, the normal
+        # validator below still reports the invalid content and text export stays safe.
+        assets.clear()
+        svg_image_map.clear()
+
+    latex = render_guide_latex(**guide, strict_math=strict_math)
+    pdf_latex = render_guide_latex(
+        **guide,
+        strict_math=strict_math,
+        svg_image_map=svg_image_map,
+    )
+    try:
+        pdf = compile_guide_pdf(pdf_latex, settings, assets=assets)
     except StudyFileFailure:
         if strict_math:
             raise
         # A malformed model equation must not discard otherwise valid study content.
         latex = render_guide_latex(**guide, render_math=False)
-        pdf = compile_guide_pdf(latex, settings)
+        pdf_latex = render_guide_latex(
+            **guide,
+            render_math=False,
+            svg_image_map=svg_image_map,
+        )
+        try:
+            pdf = compile_guide_pdf(pdf_latex, settings, assets=assets)
+        except StudyFileFailure:
+            if not assets:
+                raise
+            # A broken or unsupported image must not make the entire guide unavailable.
+            pdf = compile_guide_pdf(latex, settings)
     return {"latex": latex.encode("utf-8"), "pdf": pdf}

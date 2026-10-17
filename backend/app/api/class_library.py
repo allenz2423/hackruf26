@@ -39,9 +39,9 @@ from app.api.schemas import (
     QuestionAttemptResult,
     QuestionBankGenerationRequest,
     ResourcePublicationUpdate,
+    StudyGuideContent,
     StudyMaterialCreate,
     StudyMaterialFlagCreate,
-    StudyGuideContent,
     SyllabusOutline,
     SyllabusOutlineUpdate,
     UploadDetail,
@@ -50,6 +50,7 @@ from app.api.schemas import (
 )
 from app.api.upload_documents import create_default_document, document_detail
 from app.config import Settings
+from app.services.ai_usage_ledger import bind_usage_context, reset_usage_context
 from app.services.class_access import (
     can_view_assessment_key,
     can_view_unreleased,
@@ -95,7 +96,7 @@ from app.services.study_files import StudyFileFailure, compiler_path, create_gui
 
 logger = logging.getLogger("screen_tutor.class_library")
 router = APIRouter(tags=["class-library"])
-STUDY_GUIDE_QUALITY_VERSION = 3
+STUDY_GUIDE_QUALITY_VERSION = 4
 
 
 def _provider_error_metadata(exc: Exception) -> tuple[int | None, str | None]:
@@ -270,6 +271,14 @@ def _material_item_count(content: object, kind: str, fallback: int = 0) -> int:
     key = "questions" if kind in {"quiz", "practice_exam"} else "sections" if kind == "study_guide" else "cards"
     items = data.get(key)
     return len(items) if isinstance(items, list) else fallback
+
+
+def _requested_guide_section_count(material: dict[str, Any]) -> int | None:
+    options = json_value(material.get("options"), {})
+    count = options.get("count") if isinstance(options, dict) else None
+    if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+        return count
+    return None
 
 
 def _material_summary(row: dict[str, Any]) -> MaterialSummary:
@@ -481,6 +490,7 @@ def _validate_and_export_study_guide(
     material_id: UUID,
     content: object,
     sources: list[dict],
+    requested_section_count: int | None = None,
 ) -> tuple[dict, dict[str, bytes]]:
     """Validate the authored structure and export it without a reviewer-model pass."""
     try:
@@ -499,6 +509,29 @@ def _validate_and_export_study_guide(
             # This operation assigns IDs, inherits citations, and derives fallback text;
             # it does not make a provider request or change authored claims.
             normalized = normalizer(normalized, sources)
+
+    # The requested count is part of the saved material contract. Validate it at
+    # the finalization boundary as well as during drafting so malformed or older
+    # generation paths cannot mark an overlong/short guide ready.
+    if (
+        isinstance(requested_section_count, int)
+        and not isinstance(requested_section_count, bool)
+        and requested_section_count > 0
+        and len(normalized.get("sections", [])) != requested_section_count
+    ):
+        raise ContentGenerationFailure(
+            "The study guide does not contain the requested number of sections.",
+            code="study_guide_quality_failed",
+            diagnostic_code="guide_section_count_mismatch",
+            validation_issues=[
+                {
+                    "location": "sections",
+                    "type": "section_count_mismatch",
+                    "expected": requested_section_count,
+                    "actual": len(normalized.get("sections", [])),
+                }
+            ],
+        )
 
     deterministic = review_study_guide_quality(normalized)
     size_issues = [
@@ -609,6 +642,7 @@ async def _ensure_study_guide_quality(
             material_id=material_id,
             content=content,
             sources=sources,
+            requested_section_count=_requested_guide_section_count(material),
         )
         async with database.acquire() as connection:
             async with connection.transaction():
@@ -2147,6 +2181,7 @@ async def _create_material_job(
     if database is None or service is None:
         return
     generation_stage = "load_sources"
+    usage_token = None
     try:
         material = await database.fetchrow(
             "SELECT m.id,m.class_id,m.origin_class_id,m.owner_id,m.created_by,m.resource_scope,"
@@ -2159,6 +2194,13 @@ async def _create_material_job(
         )
         if material is None:
             return
+        material_kind = str(material["kind"])
+        class_name = str(material.get("class_name") or "Personal study")
+        usage_token = bind_usage_context(
+            operation_id=str(material["id"]),
+            operation_kind=material_kind,
+            operation_label=f"{material_kind.replace('_', ' ').title()} · {class_name}",
+        )
         source_rows = await database.fetch(
             "SELECT COALESCE(n.id,s.source_note_id,s.note_id) AS id,"
             "COALESCE(n.title,s.source_title) AS title,COALESCE(n.kind,s.source_kind) AS kind,"
@@ -2176,6 +2218,9 @@ async def _create_material_job(
             material_id,
         )
         sources = []
+        storage: LocalPrivateStorage | None = getattr(
+            application.state, "private_storage", None
+        )
         actor_id = material.get("created_by") or material.get("owner_id")
         if actor_id is None:
             actor_class_id = material.get("class_id") or material.get("origin_class_id")
@@ -2201,11 +2246,20 @@ async def _create_material_job(
                 row, source_access, actor_id
             ):
                 continue
-            sources.append({key: value for key, value in row.items() if key not in {
+            source = {key: value for key, value in row.items() if key not in {
                 "class_id", "created_by", "publication_state", "release_at", "assessment_id",
                 "assessment_owner", "has_student_responses", "score_percent", "grading_result",
                 "answer_key_release_state", "answer_key_release_at",
-            }})
+                "_storage_key",
+            }}
+            if storage is not None and row.get("_storage_key"):
+                try:
+                    source["original_path"] = storage.path_for(str(row["_storage_key"]))
+                except ValueError:
+                    # Visual evidence is supplemental; inaccessible originals do not
+                    # invalidate otherwise usable extracted source text.
+                    pass
+            sources.append(source)
         if not sources or len(sources) != len(source_rows):
             raise RuntimeError("no generation sources remain accessible")
         if material["kind"] in {"quiz", "practice_exam"}:
@@ -2266,7 +2320,12 @@ async def _create_material_job(
                     logger.warning("study_guide_preview_persist_failed material_id=%s", material_id)
 
             guide_progress_callback = persist_guide_preview
-        for generation_attempt in range(2):
+        # Study-guide authoring already retries malformed batches and splits
+        # them to isolate bad sections. Preserve one whole-generation retry for
+        # unclassified empty/invalid responses, but don't repeat every batch
+        # after the service returns a precise failure from its bounded repairs.
+        generation_attempts = 2
+        for generation_attempt in range(generation_attempts):
             try:
                 generation_kwargs = {
                     "kind": material["kind"],
@@ -2295,9 +2354,15 @@ async def _create_material_job(
                             )
                 break
             except ContentGenerationFailure as exc:
+                retryable_failure = exc.code in {
+                    "empty_model_response",
+                    "invalid_model_response",
+                }
+                if material["kind"] == "study_guide" and exc.diagnostic_code is not None:
+                    retryable_failure = False
                 if (
-                    exc.code not in {"empty_model_response", "invalid_model_response"}
-                    or generation_attempt == 1
+                    not retryable_failure
+                    or generation_attempt + 1 >= generation_attempts
                 ):
                     raise
         files = {}
@@ -2313,6 +2378,7 @@ async def _create_material_job(
                 material_id=UUID(str(material_id)),
                 content=content,
                 sources=sources,
+                requested_section_count=_requested_guide_section_count(material),
             )
             quality_review_version = STUDY_GUIDE_QUALITY_VERSION
         generation_stage = "persist"
@@ -2365,6 +2431,9 @@ async def _create_material_job(
             material_id,
             failure_code,
         )
+    finally:
+        if usage_token is not None:
+            reset_usage_context(usage_token)
 
 
 @router.post("/api/classes/{class_id}/study-materials", status_code=202)

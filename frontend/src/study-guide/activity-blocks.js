@@ -370,17 +370,22 @@ function authoredSvgCard(block) {
   if (!markup) {
     return `<aside class="guide-activity-unavailable" role="note"><strong>${escapeHtml(block.title)}</strong><p>${mathHtml(block.fallback_text)}</p></aside>`;
   }
-  const controls = block.animated
-    ? `<div class="authored-svg-controls" role="group" aria-label="Animation controls">
-        <button class="btn btn-secondary btn-small" type="button" data-svg-play>Play</button>
-        <button class="btn btn-secondary btn-small" type="button" data-svg-pause>Pause</button>
-        <button class="btn btn-secondary btn-small" type="button" data-svg-restart>Restart</button>
-      </div>`
+  const animationControls = block.animated
+    ? `<button class="btn btn-secondary btn-small" type="button" data-svg-play>Play</button>
+       <button class="btn btn-secondary btn-small" type="button" data-svg-pause>Pause</button>
+       <button class="btn btn-secondary btn-small" type="button" data-svg-restart>Restart</button>`
     : "";
   return `<section class="study-interactive-model authored-svg-model" data-guide-activity="svg_diagram" data-activity-id="${id}" aria-labelledby="${id}-title">
     <div class="activity-heading"><h4 id="${id}-title">${mathHtml(block.title)}</h4></div>
-    <figure class="authored-svg-figure"><div class="authored-svg-frame" data-authored-svg>${markup}</div><figcaption>${escapeHtml(block.alt_text)}</figcaption></figure>
-    ${controls}<p class="activity-intro">${mathHtml(block.fallback_text)}</p>
+    <figure class="authored-svg-figure"><div id="${id}-frame" class="authored-svg-frame" data-authored-svg>${markup}</div><figcaption>${escapeHtml(block.alt_text)}</figcaption></figure>
+    <div class="authored-svg-controls" role="group" aria-label="Diagram and animation controls" aria-controls="${id}-frame">
+      ${animationControls}
+      <button class="btn btn-secondary btn-small" type="button" data-svg-zoom-out aria-label="Zoom out of diagram" title="Zoom out" disabled>−</button>
+      <output data-svg-zoom-status aria-live="polite">100%</output>
+      <button class="btn btn-secondary btn-small" type="button" data-svg-zoom-in aria-label="Zoom in on diagram" title="Zoom in">+</button>
+      <button class="btn btn-secondary btn-small" type="button" data-svg-zoom-reset>Reset view</button>
+    </div>
+    <p class="activity-intro">${mathHtml(block.fallback_text)}</p>
   </section>`;
 }
 
@@ -895,20 +900,45 @@ export function mountAdditionalGuideBlocks(root) {
 
 function mountAuthoredSvg(card) {
   const svg = card.querySelector("[data-authored-svg] svg");
-  if (!svg || typeof svg.pauseAnimations !== "function") {
-    card.querySelector(".authored-svg-controls")?.remove();
-    return;
-  }
   const controls = card.querySelector(".authored-svg-controls");
-  if (!controls) return;
-  const pause = () => svg.pauseAnimations();
-  const play = () => svg.unpauseAnimations();
-  const restart = () => {
-    svg.setCurrentTime(0);
-    svg.unpauseAnimations();
+  if (!svg || !controls) return;
+
+  const zoomStatus = controls.querySelector("[data-svg-zoom-status]");
+  const zoomOut = controls.querySelector("[data-svg-zoom-out]");
+  const zoomIn = controls.querySelector("[data-svg-zoom-in]");
+  let zoom = 1;
+  const setZoom = (value) => {
+    zoom = Math.max(1, Math.min(3, Math.round(value * 2) / 2));
+    svg.style.width = zoom > 1 ? `${zoom * 100}%` : "";
+    svg.style.maxWidth = zoom > 1 ? "none" : "";
+    svg.style.maxHeight = zoom > 1 ? "none" : "";
+    if (zoomStatus) zoomStatus.textContent = `${Math.round(zoom * 100)}%`;
+    if (zoomOut) zoomOut.disabled = zoom <= 1;
+    if (zoomIn) zoomIn.disabled = zoom >= 3;
   };
-  controls.querySelector("[data-svg-play]")?.addEventListener("click", play);
-  controls.querySelector("[data-svg-pause]")?.addEventListener("click", pause);
-  controls.querySelector("[data-svg-restart]")?.addEventListener("click", restart);
-  if (globalThis.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) pause();
+  zoomOut?.addEventListener("click", () => setZoom(zoom - 0.5));
+  zoomIn?.addEventListener("click", () => setZoom(zoom + 0.5));
+  controls.querySelector("[data-svg-zoom-reset]")?.addEventListener("click", () => setZoom(1));
+  setZoom(1);
+
+  const animatedSvg = typeof svg.pauseAnimations === "function";
+  const animationButtons = [
+    controls.querySelector("[data-svg-play]"),
+    controls.querySelector("[data-svg-pause]"),
+    controls.querySelector("[data-svg-restart]")
+  ];
+  if (!animatedSvg) {
+    animationButtons.forEach((button) => button?.remove());
+  } else {
+    const pause = () => svg.pauseAnimations();
+    const play = () => svg.unpauseAnimations();
+    const restart = () => {
+      svg.setCurrentTime(0);
+      svg.unpauseAnimations();
+    };
+    animationButtons[0]?.addEventListener("click", play);
+    animationButtons[1]?.addEventListener("click", pause);
+    animationButtons[2]?.addEventListener("click", restart);
+    if (globalThis.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) pause();
+  }
 }

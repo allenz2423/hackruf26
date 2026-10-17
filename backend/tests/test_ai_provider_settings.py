@@ -170,6 +170,49 @@ class AIProviderSettingsAPITests(unittest.TestCase):
         self.assertTrue(response.json()["success"])
         checker.assert_awaited_once()
 
+    def test_ai_usage_ledger_is_admin_only_and_subtracts_reported_spend(self) -> None:
+        self.assertEqual(self.client.get("/api/admin/ai-usage").status_code, 401)
+        self.login("Provider_Member")
+        self.assertEqual(self.client.get("/api/admin/ai-usage").status_code, 403)
+        self.client.post("/api/auth/logout")
+        self.login("Provider_Admin")
+
+        balance = self.client.put(
+            "/api/admin/ai-usage/balance",
+            json={"balance_usd": 63.86, "note": "Post-deposit balance"},
+        )
+        self.assertEqual(balance.status_code, 200, balance.text)
+        self.assertEqual(balance.json()["balance_microusd"], 63_860_000)
+
+        async def record_usage() -> None:
+            await self.client.app.state.ai_usage_ledger.record_async(
+                {
+                    "provider_host": "openrouter.ai",
+                    "model": "openai/gpt-6-luna",
+                    "actual_model": "openai/gpt-6-luna",
+                    "provider_request_id": "gen-ledger-test",
+                    "attempt": 1,
+                    "outcome": "success",
+                    "http_status": 200,
+                    "prompt_tokens": 120,
+                    "completion_tokens": 40,
+                    "reasoning_tokens": 8,
+                    "total_tokens": 160,
+                    "cost_microusd": 123,
+                }
+            )
+
+        self.client.portal.call(record_usage)
+        response = self.client.get("/api/admin/ai-usage")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store, private")
+        data = response.json()
+        self.assertEqual(data["total_spend_microusd"], 123)
+        self.assertEqual(data["balance_microusd"], 63_859_877)
+        self.assertEqual(data["unpriced_calls"], 0)
+        self.assertEqual(data["entries"][0]["model"], "openai/gpt-6-luna")
+        self.assertNotIn("prompt", data["entries"][0])
+
     def test_invalid_url_does_not_replace_valid_settings(self) -> None:
         self.login("Provider_Admin")
         invalid = self.client.put(

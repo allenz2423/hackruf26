@@ -9,6 +9,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
@@ -18,6 +19,10 @@ import httpx
 MAX_PROVIDER_RESPONSE_BYTES = 64 * 1024 * 1024
 MAX_TRANSIENT_STATUS_RETRIES = 3
 PROVIDER_REQUEST_TIMEOUT_SECONDS = 300.0
+# The HTTPX timeout above is an inactivity timeout. A provider or proxy that
+# periodically flushes a few bytes can otherwise keep a generation open forever.
+# Keep a separate end-to-end deadline for the whole request, including retries.
+PROVIDER_REQUEST_DEADLINE_SECONDS = 1_800.0
 _SAFE_STATUS = re.compile(r"^[A-Z0-9_]{1,48}$")
 
 
@@ -126,6 +131,14 @@ def _retry_after_seconds(response: httpx.Response, attempt: int) -> float:
     return min(float(2**attempt), 30.0)
 
 
+def _is_retryable_invalid_response(exc: OpenAICompatibleError) -> bool:
+    """Recognize transient malformed or empty successful provider responses."""
+    return exc.code == 502 and (
+        exc.status == "INVALID_PROVIDER_RESPONSE"
+        or exc.status.startswith("EMPTY_PROVIDER_RESPONSE_")
+    )
+
+
 def _declared_response_too_large(response: httpx.Response) -> bool:
     value = response.headers.get("content-length", "")
     if not value.isdigit():
@@ -194,11 +207,19 @@ def _parts_to_chat_content(parts: object) -> str | list[dict[str, Any]]:
     return content
 
 
-def _read_json_limited(response: httpx.Response) -> dict[str, Any]:
+def _raise_if_deadline_elapsed(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise httpx.ReadTimeout("provider request exceeded its wall-clock deadline")
+
+
+def _read_json_limited(
+    response: httpx.Response, *, deadline: float | None = None
+) -> dict[str, Any]:
     raw = bytearray()
     if _declared_response_too_large(response):
         raise OpenAICompatibleError(502, "RESPONSE_TOO_LARGE")
     for chunk in response.iter_bytes():
+        _raise_if_deadline_elapsed(deadline)
         raw.extend(chunk)
         if len(raw) > MAX_PROVIDER_RESPONSE_BYTES:
             raise OpenAICompatibleError(502, "RESPONSE_TOO_LARGE")
@@ -422,12 +443,85 @@ class OpenAICompatibleClient:
         *,
         sync_transport: httpx.BaseTransport | None = None,
         async_transport: httpx.AsyncBaseTransport | None = None,
+        usage_recorder: object | None = None,
     ) -> None:
         self.config = config
         self._sync_transport = sync_transport
         self._async_transport = async_transport
+        self._usage_recorder = usage_recorder
         self.models = _Models(self, asynchronous=False)
         self.aio = _AsyncNamespace(self)
+
+    @staticmethod
+    def _usage_event(
+        provider: ProviderConfig,
+        payload: object,
+        *,
+        outcome: str,
+        status_code: int | None,
+        attempt: int,
+    ) -> dict[str, object]:
+        hostname = urlsplit(provider.base_url).hostname or "unknown"
+        event: dict[str, object] = {
+            "provider_host": hostname[:253],
+            "model": provider.model,
+            "outcome": outcome,
+            "http_status": status_code,
+            "attempt": attempt,
+        }
+        if not isinstance(payload, dict):
+            return event
+        response_id = payload.get("id")
+        if isinstance(response_id, str) and 0 < len(response_id) <= 160:
+            event["provider_request_id"] = response_id
+        actual_model = payload.get("model")
+        if isinstance(actual_model, str) and 0 < len(actual_model) <= 200:
+            event["actual_model"] = actual_model
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            return event
+
+        for source, target in (
+            ("prompt_tokens", "prompt_tokens"),
+            ("completion_tokens", "completion_tokens"),
+            ("total_tokens", "total_tokens"),
+        ):
+            value = usage.get(source)
+            if type(value) is int and 0 <= value <= 2**53:
+                event[target] = value
+        completion_details = usage.get("completion_tokens_details")
+        reasoning_tokens = (
+            completion_details.get("reasoning_tokens")
+            if isinstance(completion_details, dict)
+            else usage.get("reasoning_tokens")
+        )
+        if type(reasoning_tokens) is int and 0 <= reasoning_tokens <= 2**53:
+            event["reasoning_tokens"] = reasoning_tokens
+        raw_cost = usage.get("cost")
+        if isinstance(raw_cost, (int, float, str)) and not isinstance(raw_cost, bool):
+            try:
+                decimal_cost = Decimal(str(raw_cost))
+                if decimal_cost.is_finite() and decimal_cost >= 0:
+                    event["cost_microusd"] = int(
+                        (decimal_cost * 1_000_000).quantize(
+                            Decimal("1"), rounding=ROUND_HALF_UP
+                        )
+                    )
+            except (InvalidOperation, ValueError, OverflowError):
+                pass
+        return event
+
+    def _record_usage_sync(self, event: dict[str, object]) -> None:
+        recorder = self._usage_recorder
+        callback = getattr(recorder, "record_sync", None)
+        if callable(callback):
+            callback(event)
+
+    async def _record_usage_async(self, event: dict[str, object]) -> None:
+        recorder = self._usage_recorder
+        callback = getattr(recorder, "record_async", None)
+        if callable(callback):
+            await callback(event)
 
     @staticmethod
     def _endpoint(base_url: str) -> str:
@@ -481,6 +575,11 @@ class OpenAICompatibleClient:
             and isinstance(response_schema, dict)
         )
         body = OpenAICompatibleClient._request_body(provider.model, contents, config)
+        is_openrouter = hostname == "openrouter.ai" or (
+            hostname is not None and hostname.endswith(".openrouter.ai")
+        )
+        if is_openrouter:
+            body["usage"] = {"include": True}
         if use_native_json_schema:
             body["response_format"] = {
                 "type": "json_schema",
@@ -559,46 +658,140 @@ class OpenAICompatibleClient:
                 follow_redirects=False,
                 transport=self._sync_transport,
             ) as client:
+                deadline = time.monotonic() + PROVIDER_REQUEST_DEADLINE_SECONDS
                 for attempt in range(MAX_TRANSIENT_STATUS_RETRIES + 1):
+                    _raise_if_deadline_elapsed(deadline)
                     retry_after = None
-                    with client.stream(
-                        "POST",
-                        self._endpoint(provider.base_url),
-                        headers={
-                            "Authorization": f"Bearer {provider.api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json=body,
-                    ) as response:
-                        payload = _read_json_limited(response)
-                        if response.status_code < 400:
-                            break
-                        if (
-                            response.status_code in {429, 502}
-                            and attempt < MAX_TRANSIENT_STATUS_RETRIES
-                        ):
-                            retry_after = _retry_after_seconds(response, attempt)
-                        else:
-                            fallback = (
-                                _fallback_request_body(body, payload)
-                                if response.status_code in {400, 404}
-                                and attempt < MAX_TRANSIENT_STATUS_RETRIES
-                                else None
+                    try:
+                        with client.stream(
+                            "POST",
+                            self._endpoint(provider.base_url),
+                            headers={
+                                "Authorization": f"Bearer {provider.api_key}",
+                                "Content-Type": "application/json",
+                            },
+                            json=body,
+                        ) as response:
+                            try:
+                                payload = _read_json_limited(response, deadline=deadline)
+                            except OpenAICompatibleError as exc:
+                                self._record_usage_sync(
+                                    self._usage_event(
+                                        provider,
+                                        None,
+                                        outcome="invalid_response",
+                                        status_code=response.status_code,
+                                        attempt=attempt + 1,
+                                    )
+                                )
+                                if (
+                                    response.status_code < 400
+                                    and _is_retryable_invalid_response(exc)
+                                    and attempt < MAX_TRANSIENT_STATUS_RETRIES
+                                ):
+                                    retry_after = min(float(2**attempt), 30.0)
+                                else:
+                                    raise
+                            else:
+                                if response.status_code >= 400:
+                                    self._record_usage_sync(
+                                        self._usage_event(
+                                            provider,
+                                            payload,
+                                            outcome="http_error",
+                                            status_code=response.status_code,
+                                            attempt=attempt + 1,
+                                        )
+                                    )
+                                    if (
+                                        response.status_code in {429, 502}
+                                        and attempt < MAX_TRANSIENT_STATUS_RETRIES
+                                    ):
+                                        retry_after = _retry_after_seconds(response, attempt)
+                                    else:
+                                        fallback = (
+                                            _fallback_request_body(body, payload)
+                                            if response.status_code in {400, 404}
+                                            and attempt < MAX_TRANSIENT_STATUS_RETRIES
+                                            else None
+                                        )
+                                        if fallback is None:
+                                            raise _provider_error(response.status_code, payload)
+                                        body = fallback
+                                else:
+                                    try:
+                                        text, finish_reason = _extract_text(payload)
+                                    except OpenAICompatibleError as exc:
+                                        self._record_usage_sync(
+                                            self._usage_event(
+                                                provider,
+                                                payload,
+                                                outcome="invalid_response",
+                                                status_code=response.status_code,
+                                                attempt=attempt + 1,
+                                            )
+                                        )
+                                        if (
+                                            _is_retryable_invalid_response(exc)
+                                            and attempt < MAX_TRANSIENT_STATUS_RETRIES
+                                        ):
+                                            retry_after = min(float(2**attempt), 30.0)
+                                        else:
+                                            raise
+                                    else:
+                                        self._record_usage_sync(
+                                            self._usage_event(
+                                                provider,
+                                                payload,
+                                                outcome="success",
+                                                status_code=response.status_code,
+                                                attempt=attempt + 1,
+                                            )
+                                        )
+                                        candidate_reason = (
+                                            "MAX_TOKENS"
+                                            if _is_token_limit_finish_reason(finish_reason)
+                                            else finish_reason
+                                        )
+                                        return _Response(
+                                            text, [_Candidate(candidate_reason)]
+                                        )
+                    except httpx.TimeoutException:
+                        self._record_usage_sync(
+                            self._usage_event(
+                                provider,
+                                None,
+                                outcome="timeout",
+                                status_code=None,
+                                attempt=attempt + 1,
                             )
-                            if fallback is None:
-                                raise _provider_error(response.status_code, payload)
-                            body = fallback
+                        )
+                        if attempt >= MAX_TRANSIENT_STATUS_RETRIES:
+                            raise
+                        retry_after = min(float(2**attempt), 30.0)
+                    except httpx.TransportError:
+                        self._record_usage_sync(
+                            self._usage_event(
+                                provider,
+                                None,
+                                outcome="transport_error",
+                                status_code=None,
+                                attempt=attempt + 1,
+                            )
+                        )
+                        if attempt >= MAX_TRANSIENT_STATUS_RETRIES:
+                            raise
+                        retry_after = min(float(2**attempt), 30.0)
                     if retry_after is not None:
-                        time.sleep(retry_after)
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            _raise_if_deadline_elapsed(deadline)
+                        time.sleep(min(retry_after, remaining))
         except httpx.TimeoutException:
             raise OpenAICompatibleError(504, "PROVIDER_TIMEOUT") from None
         except httpx.HTTPError:
             raise OpenAICompatibleError(502, "PROVIDER_CONNECTION_FAILED") from None
-        text, finish_reason = _extract_text(payload)
-        candidate_reason = (
-            "MAX_TOKENS" if _is_token_limit_finish_reason(finish_reason) else finish_reason
-        )
-        return _Response(text, [_Candidate(candidate_reason)])
+        raise OpenAICompatibleError(502, "PROVIDER_RETRIES_EXHAUSTED")
 
     async def generate_content_async(
         self, *, model: str, contents: object, config: object
@@ -612,46 +805,142 @@ class OpenAICompatibleClient:
                 follow_redirects=False,
                 transport=self._async_transport,
             ) as client:
+                deadline = time.monotonic() + PROVIDER_REQUEST_DEADLINE_SECONDS
                 for attempt in range(MAX_TRANSIENT_STATUS_RETRIES + 1):
+                    _raise_if_deadline_elapsed(deadline)
                     retry_after = None
-                    async with client.stream(
-                        "POST",
-                        self._endpoint(provider.base_url),
-                        headers={
-                            "Authorization": f"Bearer {provider.api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json=body,
-                    ) as response:
-                        payload = await _read_json_limited_async(response)
-                        if response.status_code < 400:
-                            break
-                        if (
-                            response.status_code in {429, 502}
-                            and attempt < MAX_TRANSIENT_STATUS_RETRIES
-                        ):
-                            retry_after = _retry_after_seconds(response, attempt)
-                        else:
-                            fallback = (
-                                _fallback_request_body(body, payload)
-                                if response.status_code in {400, 404}
-                                and attempt < MAX_TRANSIENT_STATUS_RETRIES
-                                else None
+                    try:
+                        async with client.stream(
+                            "POST",
+                            self._endpoint(provider.base_url),
+                            headers={
+                                "Authorization": f"Bearer {provider.api_key}",
+                                "Content-Type": "application/json",
+                            },
+                            json=body,
+                        ) as response:
+                            try:
+                                payload = await _read_json_limited_async(
+                                    response, deadline=deadline
+                                )
+                            except OpenAICompatibleError as exc:
+                                await self._record_usage_async(
+                                    self._usage_event(
+                                        provider,
+                                        None,
+                                        outcome="invalid_response",
+                                        status_code=response.status_code,
+                                        attempt=attempt + 1,
+                                    )
+                                )
+                                if (
+                                    response.status_code < 400
+                                    and _is_retryable_invalid_response(exc)
+                                    and attempt < MAX_TRANSIENT_STATUS_RETRIES
+                                ):
+                                    retry_after = min(float(2**attempt), 30.0)
+                                else:
+                                    raise
+                            else:
+                                if response.status_code >= 400:
+                                    await self._record_usage_async(
+                                        self._usage_event(
+                                            provider,
+                                            payload,
+                                            outcome="http_error",
+                                            status_code=response.status_code,
+                                            attempt=attempt + 1,
+                                        )
+                                    )
+                                    if (
+                                        response.status_code in {429, 502}
+                                        and attempt < MAX_TRANSIENT_STATUS_RETRIES
+                                    ):
+                                        retry_after = _retry_after_seconds(response, attempt)
+                                    else:
+                                        fallback = (
+                                            _fallback_request_body(body, payload)
+                                            if response.status_code in {400, 404}
+                                            and attempt < MAX_TRANSIENT_STATUS_RETRIES
+                                            else None
+                                        )
+                                        if fallback is None:
+                                            raise _provider_error(response.status_code, payload)
+                                        body = fallback
+                                else:
+                                    try:
+                                        text, finish_reason = _extract_text(payload)
+                                    except OpenAICompatibleError as exc:
+                                        await self._record_usage_async(
+                                            self._usage_event(
+                                                provider,
+                                                payload,
+                                                outcome="invalid_response",
+                                                status_code=response.status_code,
+                                                attempt=attempt + 1,
+                                            )
+                                        )
+                                        if (
+                                            _is_retryable_invalid_response(exc)
+                                            and attempt < MAX_TRANSIENT_STATUS_RETRIES
+                                        ):
+                                            retry_after = min(float(2**attempt), 30.0)
+                                        else:
+                                            raise
+                                    else:
+                                        await self._record_usage_async(
+                                            self._usage_event(
+                                                provider,
+                                                payload,
+                                                outcome="success",
+                                                status_code=response.status_code,
+                                                attempt=attempt + 1,
+                                            )
+                                        )
+                                        candidate_reason = (
+                                            "MAX_TOKENS"
+                                            if _is_token_limit_finish_reason(finish_reason)
+                                            else finish_reason
+                                        )
+                                        return _Response(
+                                            text, [_Candidate(candidate_reason)]
+                                        )
+                    except httpx.TimeoutException:
+                        await self._record_usage_async(
+                            self._usage_event(
+                                provider,
+                                None,
+                                outcome="timeout",
+                                status_code=None,
+                                attempt=attempt + 1,
                             )
-                            if fallback is None:
-                                raise _provider_error(response.status_code, payload)
-                            body = fallback
+                        )
+                        if attempt >= MAX_TRANSIENT_STATUS_RETRIES:
+                            raise
+                        retry_after = min(float(2**attempt), 30.0)
+                    except httpx.TransportError:
+                        await self._record_usage_async(
+                            self._usage_event(
+                                provider,
+                                None,
+                                outcome="transport_error",
+                                status_code=None,
+                                attempt=attempt + 1,
+                            )
+                        )
+                        if attempt >= MAX_TRANSIENT_STATUS_RETRIES:
+                            raise
+                        retry_after = min(float(2**attempt), 30.0)
                     if retry_after is not None:
-                        await asyncio.sleep(retry_after)
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            _raise_if_deadline_elapsed(deadline)
+                        await asyncio.sleep(min(retry_after, remaining))
         except httpx.TimeoutException:
             raise OpenAICompatibleError(504, "PROVIDER_TIMEOUT") from None
         except httpx.HTTPError:
             raise OpenAICompatibleError(502, "PROVIDER_CONNECTION_FAILED") from None
-        text, finish_reason = _extract_text(payload)
-        candidate_reason = (
-            "MAX_TOKENS" if _is_token_limit_finish_reason(finish_reason) else finish_reason
-        )
-        return _Response(text, [_Candidate(candidate_reason)])
+        raise OpenAICompatibleError(502, "PROVIDER_RETRIES_EXHAUSTED")
 
     async def test_connection(self) -> None:
         response = await self.generate_content_async(
@@ -678,11 +967,14 @@ def _provider_error(status_code: int, payload: dict[str, Any]) -> OpenAICompatib
     return OpenAICompatibleError(status_code, _safe_provider_status(status))
 
 
-async def _read_json_limited_async(response: httpx.Response) -> dict[str, Any]:
+async def _read_json_limited_async(
+    response: httpx.Response, *, deadline: float | None = None
+) -> dict[str, Any]:
     raw = bytearray()
     if _declared_response_too_large(response):
         raise OpenAICompatibleError(502, "RESPONSE_TOO_LARGE")
     async for chunk in response.aiter_bytes():
+        _raise_if_deadline_elapsed(deadline)
         raw.extend(chunk)
         if len(raw) > MAX_PROVIDER_RESPONSE_BYTES:
             raise OpenAICompatibleError(502, "RESPONSE_TOO_LARGE")

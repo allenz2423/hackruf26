@@ -189,6 +189,46 @@ class StudyGuideToolAccessTests(unittest.TestCase):
         revision_prompt = self.service._generate_json.call_args_list[1].args[0]
         self.assertNotIn("Requested activity-tool instructions", revision_prompt)
 
+    def test_tool_in_draft_gets_exact_instructions_even_without_a_self_request(self) -> None:
+        draft = _StudyGuideSectionBatch(
+            format="study_guide",
+            sections=[
+                StudyGuideSectionV2.model_validate(
+                    {
+                        "heading": "Cell structure",
+                        "sources": [{"upload_id": self.upload_id}],
+                        "blocks": [
+                            {
+                                "type": "labeled_diagram",
+                                "title": "Animal cell",
+                                "template_id": "animal_cell_map_v1",
+                                "parameters": {"focus_ids": ["nucleus"]},
+                                "sources": [{"upload_id": self.upload_id}],
+                            },
+                            {
+                                "type": "paragraph",
+                                "text": "The nucleus stores genetic information.",
+                            },
+                        ],
+                    }
+                )
+            ],
+        )
+        self.service._generate_json = Mock(
+            side_effect=[draft, batch(self.upload_id, text="The revised cell explanation.")]
+        )
+
+        self.service._generate_study_guide_sections(
+            base_prompt="Create a guide from the supplied biology source.",
+            count=1,
+            system_instruction="Use the given source only.",
+            allowed_source_ids={self.upload_id},
+        )
+
+        revision_prompt = self.service._generate_json.call_args_list[1].args[0]
+        self.assertIn("animal_cell_map_v1", revision_prompt)
+        self.assertIn("Do not add model-authored labels", revision_prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

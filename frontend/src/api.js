@@ -77,6 +77,17 @@ export function testAIProviderSettingsApi() {
   });
 }
 
+export function getAIUsageLedgerApi() {
+  return apiFetch("/api/admin/ai-usage");
+}
+
+export function setAIUsageBalanceApi(balanceUsd, note = "Current provider balance") {
+  return apiFetch("/api/admin/ai-usage/balance", {
+    method: "PUT",
+    body: JSON.stringify({ balance_usd: balanceUsd, note })
+  });
+}
+
 export function approveSignupRequestApi(requestId) {
   return apiFetch(`/api/admin/signup-requests/${encodeURIComponent(requestId)}/approve`, {
     method: "POST",

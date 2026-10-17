@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import io
+import shutil
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from google.genai import types
@@ -409,6 +410,72 @@ class MajorGuideActivityFallbackAndExportTests(unittest.TestCase):
             ],
             {str(self.source_id)},
         )
+
+    def svg_guide(self) -> dict:
+        return {
+            "title": "Biology lesson",
+            "class_name": "BIO170",
+            "material_id": uuid4(),
+            "content": {
+                "format": "study_guide",
+                "schema_version": 2,
+                "sections": [
+                    {
+                        "heading": "Membrane transport",
+                        "blocks": [
+                            {
+                                "type": "svg_diagram",
+                                "title": "Diffusion across a membrane",
+                                "svg": (
+                                    '<svg xmlns="http://www.w3.org/2000/svg" '
+                                    'viewBox="0 0 240 120"><rect x="10" y="10" '
+                                    'width="220" height="100" fill="#eef"/>'
+                                    '<text x="30" y="65">Diffusion</text></svg>'
+                                ),
+                                "alt_text": "Particles move from high to low concentration.",
+                                "fallback_text": "Diffusion moves particles down a gradient.",
+                            }
+                        ],
+                    }
+                ],
+            },
+            "sources": [],
+        }
+
+    def test_pdf_variant_embeds_svg_snapshot_and_standalone_latex_keeps_text_fallback(self) -> None:
+        compiler_inputs: dict = {}
+
+        def capture_compile(latex: str, _settings, *, assets=None, **_kwargs) -> bytes:
+            compiler_inputs["latex"] = latex
+            compiler_inputs["assets"] = assets
+            return b"%PDF-test"
+
+        with (
+            patch("app.services.study_files.render_svg_preview_png", return_value=b"png-bytes"),
+            patch("app.services.study_files.compile_guide_pdf", side_effect=capture_compile),
+        ):
+            files = create_guide_files(settings(), **self.svg_guide())
+
+        self.assertIn(r"\includegraphics", compiler_inputs["latex"])
+        self.assertIn("Text alternative: Particles move from high to low concentration.", compiler_inputs["latex"])
+        self.assertEqual(compiler_inputs["assets"], {"jot-guide-diagram-001.png": b"png-bytes"})
+        standalone_latex = files["latex"].decode("utf-8")
+        self.assertNotIn(r"\includegraphics", standalone_latex)
+        self.assertIn("Diffusion moves particles down a gradient.", standalone_latex)
+        self.assertTrue(files["pdf"].startswith(b"%PDF-"))
+
+    @unittest.skipUnless(
+        compiler_path(settings()) and shutil.which("rsvg-convert"),
+        "Tectonic and librsvg are required for image-export integration coverage",
+    )
+    def test_real_pdf_contains_svg_image_and_accessible_text_alternative(self) -> None:
+        files = create_guide_files(settings(), **self.svg_guide())
+        reader = PdfReader(io.BytesIO(files["pdf"]))
+        page = next(page for page in reader.pages if page.images)
+        self.assertGreaterEqual(len(page.images), 1)
+        extracted = " ".join(page.extract_text().split())
+        self.assertIn("Particles move from high to low concentration.", extracted)
+        self.assertIn("Diffusion across a membrane", extracted)
 
     def test_fallback_and_alt_text_are_deterministic_and_numeric(self) -> None:
         content = self.normalized_content()

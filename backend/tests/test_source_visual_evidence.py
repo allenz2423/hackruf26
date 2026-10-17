@@ -13,10 +13,47 @@ from pypdf import PdfWriter
 from app.services.source_visual_evidence import (
     VisualEvidenceUnavailableError,
     extract_cited_source_visuals,
+    select_generation_visual_excerpts,
 )
 
 
 class SourceVisualEvidenceTests(unittest.TestCase):
+    def test_generation_visual_selection_is_scope_aware_and_source_balanced(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            first = Path(directory) / "biology.pdf"
+            second = Path(directory) / "lecture.pptx"
+            first.touch()
+            second.touch()
+
+            selected = select_generation_visual_excerpts(
+                [
+                    {
+                        "id": "biology-upload",
+                        "title": "Biology",
+                        "original_path": first,
+                        "extracted_text": (
+                            "[Page 1]\nCourse overview.\n"
+                            "[Page 2]\nMitochondria ATP diagram and cellular respiration."
+                        ),
+                    },
+                    {
+                        "id": "lecture-upload",
+                        "title": "Lecture slides",
+                        "original_path": second,
+                        "extracted_text": "[Slide 1]\nOverview chart for the lecture.",
+                    },
+                ],
+                scope="mitochondria ATP",
+                limit=2,
+            )
+
+        self.assertEqual(
+            [item["upload_id"] for item in selected],
+            ["biology-upload", "lecture-upload"],
+        )
+        self.assertEqual(selected[0]["locator"], {"page": 2})
+        self.assertEqual(selected[1]["locator"], {"slide": 1})
+
     def test_render_failure_is_tagged_with_safe_source_locator(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pdf_path = Path(directory) / "source.pdf"

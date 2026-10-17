@@ -21,6 +21,7 @@ from app.api.errors import ApiError
 from app.config import Settings
 from app.services.auth import SESSION_COOKIE, create_session, create_user
 from app.services.database import create_database
+from app.services.gemini_content import ContentGenerationFailure
 from app.services.study_files import StudyFileFailure
 
 
@@ -89,6 +90,20 @@ class QualityGateService:
         return deepcopy(content)
 
 
+class FailingGuideGenerationService(QualityGateService):
+    def __init__(self, upload_id: UUID) -> None:
+        super().__init__(upload_id)
+        self.generation_calls = 0
+
+    def generate_material(self, **_kwargs):
+        self.generation_calls += 1
+        raise ContentGenerationFailure(
+            "A section failed structured validation.",
+            code="invalid_model_response",
+            diagnostic_code="schema_validation_failed",
+        )
+
+
 class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.settings = settings()
@@ -138,19 +153,24 @@ class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def add_material(
-        self, *, status: str = "generating", content: dict | None = None
+        self,
+        *,
+        status: str = "generating",
+        content: dict | None = None,
+        options: dict | None = None,
     ) -> None:
         await self.db.execute(
             "INSERT INTO study_materials (id, class_id, origin_class_id, resource_scope, "
             "created_by, "
-            "publication_state, kind, title, status, content) "
+            "publication_state, kind, title, status, content, options) "
             "VALUES (?1, ?2, ?2, 'class_owned', ?3, 'published', 'study_guide', 'Vector guide', "
-            "?4, ?5)",
+            "?4, ?5, ?6)",
             self.material_id,
             self.class_id,
             self.user["id"],
             status,
             json.dumps(content) if content is not None else None,
+            json.dumps(options or {}),
         )
         await self.db.execute(
             "INSERT INTO study_material_sources (material_id, source_class_id, source_note_id, "
@@ -186,7 +206,7 @@ class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
             "SELECT status, quality_review_version, content FROM study_materials WHERE id=?1",
             self.material_id,
         )
-        self.assertEqual((row["status"], row["quality_review_version"]), ("ready", 3))
+        self.assertEqual((row["status"], row["quality_review_version"]), ("ready", 4))
         saved_guide = json.loads(row["content"])
         self.assertEqual(saved_guide["sections"][0]["heading"], "Vectors")
         self.assertEqual(
@@ -205,6 +225,19 @@ class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service.repair_calls, [])
         self.assertFalse(render.call_args.kwargs["strict_math"])
         validate.assert_called_once()
+
+    async def test_invalid_study_guide_does_not_restart_the_entire_generation(self) -> None:
+        self.service = FailingGuideGenerationService(self.upload_id)
+        self.application.state.gemini_content_service = self.service
+        await self.add_material()
+
+        await _create_material_job(self.application, self.material_id)
+
+        self.assertEqual(self.service.generation_calls, 1)
+        row = await self.db.fetchrow(
+            "SELECT status, failure_code FROM study_materials WHERE id=?1", self.material_id
+        )
+        self.assertEqual((row["status"], row["failure_code"]), ("failed", "invalid_model_response"))
 
     async def test_oversized_guide_fails_deterministically_without_reviewer_or_repair(self) -> None:
         verbose_text = "A source-supported mechanics explanation. " * 100
@@ -254,7 +287,7 @@ class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
             "SELECT status, quality_review_version, content FROM study_materials WHERE id=?1",
             self.material_id,
         )
-        self.assertEqual((saved["status"], saved["quality_review_version"]), ("ready", 3))
+        self.assertEqual((saved["status"], saved["quality_review_version"]), ("ready", 4))
         self.assertEqual(
             json.loads(saved["content"])["sections"][0]["heading"], "1 of 1: Vector components"
         )
@@ -276,7 +309,7 @@ class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
             "SELECT status, quality_review_version, content FROM study_materials WHERE id=?1",
             self.material_id,
         )
-        self.assertEqual((saved["status"], saved["quality_review_version"]), ("ready", 3))
+        self.assertEqual((saved["status"], saved["quality_review_version"]), ("ready", 4))
         saved_sections = json.loads(saved["content"])["sections"]
         self.assertEqual(
             [(section["heading"], section["blocks"][0]["text"]) for section in saved_sections],
@@ -298,7 +331,7 @@ class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
             "SELECT status, content, quality_review_version FROM study_materials WHERE id=?1",
             self.material_id,
         )
-        self.assertEqual((row["status"], row["quality_review_version"]), ("ready", 3))
+        self.assertEqual((row["status"], row["quality_review_version"]), ("ready", 4))
         self.assertIn(r"\\input", json.loads(row["content"])["sections"][0]["blocks"][0]["text"])
         self.assertEqual(self.service.review_calls, [])
         self.assertEqual(self.service.repair_calls, [])
@@ -318,7 +351,42 @@ class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
         saved = await self.db.fetchrow(
             "SELECT quality_review_version FROM study_materials WHERE id=?1", self.material_id
         )
-        self.assertEqual(saved["quality_review_version"], 3)
+        self.assertEqual(saved["quality_review_version"], 4)
+
+    async def test_requested_section_count_mismatch_cannot_be_marked_ready(self) -> None:
+        extra = guide(self.upload_id, heading="Stress components")["sections"][0]
+        initial = guide(self.upload_id)
+        initial["sections"].append(extra)
+        self.service.initial = initial
+        await self.add_material(options={"count": 1})
+
+        with self.export_patch() as render, patch("app.api.class_library._validate_guide_pdf"):
+            await _create_material_job(self.application, self.material_id)
+
+        saved = await self.db.fetchrow(
+            "SELECT status, failure_code, quality_review_version FROM study_materials WHERE id=?1",
+            self.material_id,
+        )
+        self.assertEqual(
+            (saved["status"], saved["failure_code"], saved["quality_review_version"]),
+            ("failed", "study_guide_quality_failed", 0),
+        )
+        render.assert_not_called()
+
+    async def test_legacy_count_mismatch_stays_readable_but_withholds_exports(self) -> None:
+        extra = guide(self.upload_id, heading="Stress components")["sections"][0]
+        legacy = guide(self.upload_id)
+        legacy["sections"].append(extra)
+        await self.add_material(status="ready", content=legacy, options={"count": 1})
+        await self.insert_cached_exports()
+
+        with self.export_patch() as render, patch("app.api.class_library._validate_guide_pdf"):
+            detail = await get_study_material(self.material_id, self.request(), Response())
+
+        self.assertEqual(detail.status, "ready")
+        self.assertEqual(len(detail.content["sections"]), 2)
+        self.assertEqual(detail.download_urls, {})
+        render.assert_not_called()
 
     async def test_prior_quality_version_is_deterministically_reexported(self) -> None:
         await self.add_material(status="ready", content=guide(self.upload_id))
@@ -338,7 +406,7 @@ class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT quality_review_version FROM study_materials WHERE id=?1",
                 self.material_id,
             ),
-            3,
+            4,
         )
 
     async def test_legacy_download_replaces_cached_export_without_model_review(self) -> None:

@@ -13,12 +13,15 @@ from app.api.schemas import (
     AIProviderSettingsSummary,
     AIProviderSettingsUpdate,
     AIProviderTestResponse,
+    AIUsageBalanceUpdate,
+    AIUsageLedgerResponse,
     SignupRequestDecision,
     SignupRequestsResponse,
     SignupRequestSummary,
 )
 from app.services import auth as accounts
 from app.services.ai_provider_settings import clear_provider_config, save_provider_config
+from app.services.ai_usage_ledger import MICRO_USD, set_tracked_balance, usage_ledger_snapshot
 from app.services.openai_compatible import OpenAICompatibleClient, OpenAICompatibleError
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -158,6 +161,30 @@ async def test_ai_provider(request: Request, response: Response) -> AIProviderTe
         ) from None
     _no_store(response)
     return AIProviderTestResponse(success=True, message="Provider connection succeeded.")
+
+
+@router.get("/ai-usage", response_model=AIUsageLedgerResponse)
+async def get_ai_usage_ledger(request: Request, response: Response) -> AIUsageLedgerResponse:
+    """Show content-free request usage and reported provider charges to admins."""
+    await _require_admin(request)
+    snapshot = await usage_ledger_snapshot(database(request))
+    _no_store(response)
+    return AIUsageLedgerResponse(**snapshot)
+
+
+@router.put("/ai-usage/balance", response_model=AIUsageLedgerResponse)
+async def set_ai_usage_balance(
+    payload: AIUsageBalanceUpdate, request: Request, response: Response
+) -> AIUsageLedgerResponse:
+    """Record a manual provider-balance snapshot for the spend ledger."""
+    await _require_admin(request)
+    balance_microusd = int(payload.balance_usd * MICRO_USD)
+    await set_tracked_balance(
+        database(request), balance_microusd, payload.note
+    )
+    snapshot = await usage_ledger_snapshot(database(request))
+    _no_store(response)
+    return AIUsageLedgerResponse(**snapshot)
 
 
 @router.get("/signup-requests", response_model=SignupRequestsResponse)

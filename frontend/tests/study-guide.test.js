@@ -71,7 +71,8 @@ test("failed guide viewer labels provisional content and offers no exports", () 
   globalThis.document = { createElement: () => new FakeDialog(), body: { append() {} } };
   try {
     const material = {
-      id: "guide-1", title: "Study Guide: asa", type: "Study guide", status: "failed",
+      id: "guide-1", title: "BIO_170_Full-Course_Study_Guide", scope: "BIO_170_Comprehensive_Master_Study_Guide.pdf",
+      type: "Study guide", status: "failed",
       isRemote: true, previewContent: {
         sections: [{ heading: "Stress tensor", body: "Provisional section text." }]
       }
@@ -79,6 +80,12 @@ test("failed guide viewer labels provisional content and offers no exports", () 
     const viewer = openMaterialViewer(material);
     assert.equal(viewer.isOpen, true);
     assert.match(viewer.dialog.className, /material-dialog-resizable/);
+    assert.equal(viewer.dialog.title.textContent, "BIO_170_Full-Course_Study_Guide");
+    assert.equal(viewer.dialog.title.innerHTML, "");
+    assert.equal(
+      viewer.dialog.meta.textContent,
+      "BIO_170_Comprehensive_Master_Study_Guide.pdf - 0 items - Generation failed"
+    );
     assert.match(viewer.dialog.root.innerHTML, /Generation stopped before the guide was saved/);
     assert.match(viewer.dialog.root.innerHTML, /partial preview is not saved or export-checked/);
     assert.match(viewer.dialog.root.innerHTML, /Provisional section text/);
@@ -281,6 +288,16 @@ test("malicious labels and descriptions are escaped in HTML and SVG contexts", (
   assert.doesNotMatch(html, /<script\b|<img\b|<svg\s+onload=/i);
 });
 
+test("authored SVG control template exposes accessible zoom controls", async () => {
+  const source = await readFile(new URL("../src/study-guide/activity-blocks.js", import.meta.url), "utf8");
+  assert.match(source, /class="authored-svg-frame"[^>]*data-authored-svg/);
+  assert.match(source, /aria-label="Diagram and animation controls"/);
+  assert.match(source, /data-svg-zoom-out aria-label="Zoom out of diagram"/);
+  assert.match(source, /data-svg-zoom-status aria-live="polite"/);
+  assert.match(source, /data-svg-zoom-in aria-label="Zoom in on diagram"/);
+  assert.match(source, /data-svg-zoom-reset/);
+});
+
 class FakeElement {
   constructor({ dataset = {}, type = "", value = "", min = "", max = "", textContent = "" } = {}) {
     this.dataset = dataset;
@@ -368,6 +385,66 @@ test("paired activity inputs stay synchronized, clamp values, and reset to autho
     assert.deepEqual(controls.map((input) => input.value), ["1", "1", "0", "0"]);
     assert.equal(slopeReadout.textContent, "1");
     assert.equal(interceptReadout.textContent, "0");
+  } finally {
+    if (priorDocument === undefined) delete globalThis.document;
+    else globalThis.document = priorDocument;
+  }
+});
+
+test("custom SVG zoom controls scale and reset the drawing inside its scroll frame", () => {
+  const priorDocument = globalThis.document;
+  globalThis.document = { activeElement: null };
+  try {
+    const svg = new FakeElement();
+    svg.style = {};
+    const status = new FakeElement({ textContent: "100%" });
+    const zoomOut = new FakeElement();
+    const zoomIn = new FakeElement();
+    const reset = new FakeElement();
+    const controlMap = new Map([
+      ["[data-svg-zoom-status]", status],
+      ["[data-svg-zoom-out]", zoomOut],
+      ["[data-svg-zoom-in]", zoomIn],
+      ["[data-svg-zoom-reset]", reset],
+      ["[data-svg-play]", null],
+      ["[data-svg-pause]", null],
+      ["[data-svg-restart]", null]
+    ]);
+    const controls = new FakeElement();
+    controls.querySelector = (selector) => controlMap.get(selector) || null;
+    const card = {
+      dataset: { guideActivity: "svg_diagram" },
+      querySelector(selector) {
+        if (selector === "[data-authored-svg] svg") return svg;
+        if (selector === ".authored-svg-controls") return controls;
+        return null;
+      }
+    };
+
+    mountAdditionalGuideBlocks({ querySelectorAll: () => [card] });
+    assert.equal(zoomOut.disabled, true);
+    zoomIn.dispatch("click");
+    assert.equal(svg.style.width, "150%");
+    assert.equal(svg.style.maxHeight, "none");
+    assert.equal(status.textContent, "150%");
+    assert.equal(zoomOut.disabled, false);
+
+    zoomIn.dispatch("click");
+    zoomIn.dispatch("click");
+    zoomIn.dispatch("click");
+    assert.equal(svg.style.width, "300%");
+    assert.equal(status.textContent, "300%");
+    assert.equal(zoomIn.disabled, true);
+
+    zoomOut.dispatch("click");
+    assert.equal(status.textContent, "250%");
+    reset.dispatch("click");
+    assert.equal(svg.style.width, "");
+    assert.equal(svg.style.maxWidth, "");
+    assert.equal(svg.style.maxHeight, "");
+    assert.equal(status.textContent, "100%");
+    assert.equal(zoomOut.disabled, true);
+    assert.equal(zoomIn.disabled, false);
   } finally {
     if (priorDocument === undefined) delete globalThis.document;
     else globalThis.document = priorDocument;

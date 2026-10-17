@@ -35,6 +35,7 @@ from app.middleware.request_context import RequestContextMiddleware
 from app.middleware.request_size import RequestSizeLimitMiddleware
 from app.security.rate_limit import InMemoryRateLimiter
 from app.services.ai_provider_settings import load_provider_config
+from app.services.ai_usage_ledger import UsageLedgerRecorder
 from app.services.concept_graph import (
     enqueue_missing_concept_extractions,
     process_queued_concept_extractions,
@@ -211,7 +212,13 @@ def create_app(
         application.state.ai_provider_config = await load_provider_config(
             application.state.database, settings
         )
-        openai_client = OpenAICompatibleClient(application.state.ai_provider_config)
+        application.state.ai_usage_ledger = UsageLedgerRecorder(
+            application.state.database, asyncio.get_running_loop()
+        )
+        openai_client = OpenAICompatibleClient(
+            application.state.ai_provider_config,
+            usage_recorder=application.state.ai_usage_ledger,
+        )
         application.state.openai_compatible_client = openai_client
         await recover_interrupted_jobs(application.state.database)
         await recover_learning_calibration_jobs(application.state.database)

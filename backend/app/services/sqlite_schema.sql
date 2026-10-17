@@ -16,6 +16,47 @@ CREATE TABLE IF NOT EXISTS ai_provider_settings (
     updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+-- Content-free request accounting for the configured text provider. Material
+-- references intentionally are not foreign keys so deleting a guide does not
+-- erase its spend history.
+CREATE TABLE IF NOT EXISTS ai_usage_ledger_entries (
+    id                      TEXT PRIMARY KEY,
+    entry_type              TEXT NOT NULL DEFAULT 'provider_call'
+        CHECK (entry_type IN ('provider_call','balance_adjustment')),
+    operation_id            TEXT,
+    operation_kind          TEXT,
+    operation_label         TEXT,
+    provider_host           TEXT,
+    model                   TEXT,
+    actual_model            TEXT,
+    provider_request_id     TEXT,
+    attempt                 INTEGER NOT NULL DEFAULT 1 CHECK (attempt >= 1),
+    outcome                 TEXT CHECK (outcome IS NULL OR outcome IN
+        ('success','http_error','invalid_response','timeout','transport_error')),
+    http_status             INTEGER CHECK (http_status IS NULL OR http_status BETWEEN 100 AND 599),
+    prompt_tokens           INTEGER CHECK (prompt_tokens IS NULL OR prompt_tokens >= 0),
+    completion_tokens       INTEGER CHECK (completion_tokens IS NULL OR completion_tokens >= 0),
+    reasoning_tokens        INTEGER CHECK (reasoning_tokens IS NULL OR reasoning_tokens >= 0),
+    total_tokens            INTEGER CHECK (total_tokens IS NULL OR total_tokens >= 0),
+    reported_cost_microusd  INTEGER CHECK
+        (reported_cost_microusd IS NULL OR reported_cost_microusd >= 0),
+    balance_delta_microusd  INTEGER,
+    adjustment_note         TEXT CHECK (adjustment_note IS NULL OR length(adjustment_note) <= 160),
+    created_at              TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    CHECK (
+        (entry_type='provider_call' AND provider_host IS NOT NULL AND model IS NOT NULL
+            AND operation_kind IS NOT NULL AND operation_label IS NOT NULL)
+        OR
+        (entry_type='balance_adjustment' AND reported_cost_microusd IS NULL
+            AND adjustment_note IS NOT NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS ai_usage_ledger_created_idx
+    ON ai_usage_ledger_entries (created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS ai_usage_ledger_operation_idx
+    ON ai_usage_ledger_entries (operation_id, created_at DESC)
+    WHERE operation_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS course_classes (
     id          TEXT PRIMARY KEY,
     owner_id    TEXT NOT NULL,

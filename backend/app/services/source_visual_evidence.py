@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import re
 import shutil
 import subprocess
 import tempfile
@@ -20,6 +21,100 @@ MAX_VISUAL_IMAGE_DIMENSION = 1800
 MAX_VISUAL_SOURCE_PIXELS = 60_000_000
 MAX_RENDERED_PAGE_BYTES = 32 * 1024 * 1024
 RENDER_TIMEOUT_SECONDS = 45
+MAX_GENERATION_VISUAL_IMAGES = 6
+
+_PAGE_MARKER = re.compile(r"^\[(Page|Slide)\s+(\d+)\]\s*$", re.IGNORECASE | re.MULTILINE)
+_VISUAL_CUE = re.compile(
+    r"\b(?:diagram|figure|fig\.?|graph|plot|chart|table|schematic|illustration|"
+    r"cross.section|free.body|molecule|circuit|flowchart|pathway)\b",
+    re.IGNORECASE,
+)
+_WORD = re.compile(r"[\w]+", re.UNICODE)
+
+
+def select_generation_visual_excerpts(
+    sources: list[dict], *, scope: object = None, limit: int = MAX_GENERATION_VISUAL_IMAGES
+) -> list[dict]:
+    """Choose a small, scope-aware and source-balanced set of original visuals.
+
+    This is supplemental evidence for authoring. A missing renderer or selected
+    visual must not make otherwise readable source text unusable.
+    """
+    limit = max(0, min(int(limit), MAX_GENERATION_VISUAL_IMAGES))
+    scope_words = {
+        token.casefold()
+        for token in _WORD.findall(str(scope or ""))
+        if len(token) > 2
+    }
+    per_source: list[list[tuple[float, dict]]] = []
+    for source in sources:
+        upload_id = str(source.get("id") or "")
+        path_value = source.get("original_path")
+        if not upload_id or not isinstance(path_value, (Path, str)):
+            continue
+        path = Path(path_value)
+        if path.suffix.casefold() in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".docx"}:
+            per_source.append(
+                [
+                    (
+                        0.0,
+                        {
+                            "upload_id": upload_id,
+                            "title": str(source.get("title") or "Course source"),
+                            "locator": None,
+                        },
+                    )
+                ]
+            )
+            continue
+        if path.suffix.casefold() not in {".pdf", ".pptx"}:
+            continue
+
+        marker_matches = list(_PAGE_MARKER.finditer(str(source.get("extracted_text") or "")))
+        candidates: list[tuple[float, dict]] = []
+        for index, match in enumerate(marker_matches):
+            marker_kind = match.group(1).casefold()
+            locator_index = int(match.group(2))
+            body_start = match.end()
+            body_end = (
+                marker_matches[index + 1].start()
+                if index + 1 < len(marker_matches)
+                else len(str(source.get("extracted_text") or ""))
+            )
+            body = str(source.get("extracted_text") or "")[body_start:body_end]
+            body_words = {token.casefold() for token in _WORD.findall(body) if len(token) > 2}
+            overlap = len(scope_words & body_words)
+            cues = len(_VISUAL_CUE.findall(body))
+            equation_marks = sum(body.count(symbol) for symbol in ("=", "∑", "∫", "→", "Δ"))
+            score = overlap * 4 + min(cues, 4) * 3 + min(equation_marks, 4) + min(len(body) // 1200, 2)
+            candidates.append(
+                (
+                    float(score),
+                    {
+                        "upload_id": upload_id,
+                        "title": str(source.get("title") or "Course source"),
+                        "locator": {"slide" if marker_kind == "slide" else "page": locator_index},
+                    },
+                )
+            )
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        if candidates:
+            per_source.append(candidates)
+
+    selected: list[dict] = []
+    depth = 0
+    while len(selected) < limit:
+        added = False
+        for candidates in per_source:
+            if depth < len(candidates):
+                selected.append(candidates[depth][1])
+                added = True
+                if len(selected) >= limit:
+                    break
+        if not added:
+            break
+        depth += 1
+    return selected
 
 
 @dataclass(frozen=True)
@@ -29,6 +124,8 @@ class SourceVisualEvidence:
     label: str
     mime_type: str
     data: bytes
+    upload_id: str | None = None
+    locator: dict[str, int] | None = None
 
 
 class VisualEvidenceLimitError(ValueError):
@@ -160,6 +257,14 @@ def extract_cited_source_visuals(
                     ),
                     mime_type=mime_type,
                     data=normalized_data,
+                    upload_id=upload_id,
+                    locator=(
+                        {"slide": slide}
+                        if type(slide) is int
+                        else {"page": page}
+                        if type(page) is int
+                        else None
+                    ),
                 )
             )
             total_bytes += len(normalized_data)

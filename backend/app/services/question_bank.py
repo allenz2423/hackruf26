@@ -778,8 +778,21 @@ async def create_validated_private_assessment(
         "assignments": assignments,
         "source_chunks": public_sources,
     }
+    visual_builder = getattr(service, "_generation_source_visuals", None)
+    source_visuals = []
+    if callable(visual_builder):
+        visual_scope = " ".join(
+            str(assignment.get("concept_description") or assignment.get("label") or "")
+            for assignment in assignments
+        )
+        source_visuals = await asyncio.to_thread(visual_builder, source_rows, visual_scope)
+    visual_kwargs = {"source_visuals": source_visuals} if source_visuals else {}
     for validation_attempt in range(PRIVATE_ASSESSMENT_VALIDATION_ATTEMPTS):
-        generated = await asyncio.to_thread(service.generate_question_bank, generation_context)
+        generated = await asyncio.to_thread(
+            service.generate_question_bank,
+            generation_context,
+            **visual_kwargs,
+        )
         reviewed = await asyncio.to_thread(
             service.validate_question_bank,
             {
@@ -789,6 +802,7 @@ async def create_validated_private_assessment(
                 "candidates": [item.model_dump(mode="json") for item in generated.questions],
                 "prior_validated_items": [],
             },
+            **visual_kwargs,
         )
         try:
             validated = _validate_ai_items(

@@ -51,6 +51,8 @@ import {
   updateAIProviderSettingsApi,
   resetAIProviderSettingsApi,
   testAIProviderSettingsApi,
+  getAIUsageLedgerApi,
+  setAIUsageBalanceApi,
   approveSignupRequestApi,
   rejectSignupRequestApi,
   createClassInvitationApi,
@@ -2007,6 +2009,7 @@ function renderAdmin() {
         </div>
         <a class="btn btn-secondary" href="#/classes">${icon("book", { size: 18 })} Your classes</a>
       </div>
+      <div class="admin-top-grid">
       <section class="panel ai-provider-panel" aria-labelledby="ai-provider-title">
         <div class="ai-provider-heading">
           <div>
@@ -2035,6 +2038,30 @@ function renderAdmin() {
           <p id="ai-provider-message" class="muted" role="status" aria-live="polite"></p>
         </form>
       </section>
+      <section class="panel ai-usage-panel" aria-labelledby="ai-usage-title">
+        <div class="ai-usage-heading">
+          <div>
+            <h2 id="ai-usage-title">AI spend ledger</h2>
+            <p class="muted">Jot provider calls and reported charges.</p>
+          </div>
+          <button class="btn btn-secondary" type="button" data-refresh-ai-usage>Refresh</button>
+        </div>
+        <div id="ai-usage-summary" class="ai-usage-summary" aria-live="polite">
+          <p class="muted">Loading usage…</p>
+        </div>
+        <form id="ai-balance-form" class="ai-balance-form">
+          <label>Current provider balance (USD)
+            <input name="balance_usd" type="number" min="0" max="1000000" step="0.000001" value="63.86" required>
+          </label>
+          <button class="btn btn-primary" type="submit">Set balance</button>
+          <p class="muted">Starts from the $63.86 balance you reported. After an outside deposit or balance change, update this snapshot; Jot will subtract charges it can verify.</p>
+        </form>
+        <p id="ai-usage-message" class="muted" role="status" aria-live="polite"></p>
+        <div id="ai-usage-entries" class="ai-usage-entries" aria-live="polite" aria-busy="true">
+          <p class="muted">Loading recent activity…</p>
+        </div>
+      </section>
+      </div>
       <section class="section-stack" aria-labelledby="signup-requests-title">
         <div>
           <h2 id="signup-requests-title">Signup requests</h2>
@@ -2150,6 +2177,136 @@ function renderAdmin() {
     if (event.currentTarget.checked) providerForm.elements.api_key.value = "";
   });
 
+  const usageSummary = document.querySelector("#ai-usage-summary");
+  const usageEntries = document.querySelector("#ai-usage-entries");
+  const usageMessage = document.querySelector("#ai-usage-message");
+  const balanceForm = document.querySelector("#ai-balance-form");
+  const formatUsd = (microusd) => {
+    if (!Number.isFinite(Number(microusd))) return "Not set";
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: "USD",
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 6
+    }).format(Number(microusd) / 1_000_000);
+  };
+  const formatDate = (value) => {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "Date unavailable" : date.toLocaleString();
+  };
+  const renderUsageLedger = (snapshot) => {
+    const balance = snapshot.balance_known
+      ? formatUsd(snapshot.balance_microusd)
+      : "Set balance";
+    usageSummary.innerHTML = `
+      <div class="ai-usage-stat"><span>Tracked balance</span><strong>${escapeHtml(balance)}</strong></div>
+      <div class="ai-usage-stat"><span>Reported spend</span><strong>${escapeHtml(formatUsd(snapshot.total_spend_microusd))}</strong></div>
+      <div class="ai-usage-stat"><span>Last 30 days</span><strong>${escapeHtml(formatUsd(snapshot.month_spend_microusd))}</strong></div>
+      <p class="ai-usage-caption">${snapshot.unpriced_calls || snapshot.unsuccessful_calls
+        ? `${escapeHtml(String(snapshot.unpriced_calls || 0))} calls have no reported cost; ${escapeHtml(String(snapshot.unsuccessful_calls || 0))} returned an error or invalid response.`
+        : "Charges are recorded from provider usage responses."}</p>`;
+    if (snapshot.balance_known && Number.isFinite(Number(snapshot.balance_microusd))) {
+      balanceForm.elements.balance_usd.value = (Number(snapshot.balance_microusd) / 1_000_000).toFixed(6);
+    }
+
+    const grouped = new Map();
+    for (const entry of snapshot.entries || []) {
+      if (entry.entry_type === "balance_adjustment") {
+        grouped.set(`adjustment:${entry.id}`, { adjustment: entry });
+        continue;
+      }
+      const key = entry.operation_id || `request:${entry.id}`;
+      let group = grouped.get(key);
+      if (!group) {
+        group = {
+          label: entry.operation_label || "AI request",
+          model: entry.actual_model || entry.model || "Unknown model",
+          latest: entry.created_at,
+          calls: 0,
+          errors: 0,
+          unpriced: 0,
+          cost: 0,
+          hasCost: false,
+          tokens: 0,
+          status: entry.material_status || null
+        };
+        grouped.set(key, group);
+      }
+      group.calls += 1;
+      if (entry.outcome !== "success") group.errors += 1;
+      if (entry.reported_cost_microusd == null) group.unpriced += 1;
+      else {
+        group.hasCost = true;
+        group.cost += Number(entry.reported_cost_microusd) || 0;
+      }
+      group.tokens += Number(entry.total_tokens) || 0;
+      if (entry.material_status) group.status = entry.material_status;
+      if (new Date(entry.created_at) > new Date(group.latest)) {
+        group.latest = entry.created_at;
+        group.model = entry.actual_model || entry.model || group.model;
+      }
+    }
+    const rows = [...grouped.values()];
+    if (!rows.length) {
+      usageEntries.setAttribute("aria-busy", "false");
+      usageEntries.innerHTML = `<p class="muted">No provider calls recorded yet.</p>`;
+      return;
+    }
+    usageEntries.setAttribute("aria-busy", "false");
+    usageEntries.innerHTML = `
+      <h3>Recent activity</h3>
+      <ul>${rows.slice(0, 14).map((item) => {
+        if (item.adjustment) {
+          const entry = item.adjustment;
+          const delta = Number(entry.balance_delta_microusd) || 0;
+          const signed = `${delta > 0 ? "+" : ""}${formatUsd(delta)}`;
+          return `<li class="ai-usage-entry ai-usage-adjustment">
+            <div><strong>${escapeHtml(entry.adjustment_note || "Balance adjustment")}</strong><small>${escapeHtml(formatDate(entry.created_at))}</small></div>
+            <span>${escapeHtml(signed)}</span>
+          </li>`;
+        }
+        const cost = item.hasCost ? formatUsd(item.cost) : "Unreported";
+        const extra = item.unpriced ? ` · ${item.unpriced} unpriced` : "";
+        return `<li class="ai-usage-entry">
+          <div><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(formatDate(item.latest))}${item.status ? ` · ${escapeHtml(item.status)}` : ""} · ${item.calls} request${item.calls === 1 ? "" : "s"} · ${item.tokens.toLocaleString()} tokens · ${escapeHtml(item.model)}${extra}${item.errors ? ` · ${item.errors} error${item.errors === 1 ? "" : "s"}` : ""}</small></div>
+          <span>${escapeHtml(cost)}</span>
+        </li>`;
+      }).join("")}</ul>
+      <p class="ai-usage-caption">Only Jot requests appear here. Requests without provider-reported cost are not deducted from the tracked balance.</p>`;
+  };
+  const loadUsageLedger = async () => {
+    usageEntries.setAttribute("aria-busy", "true");
+    usageMessage.textContent = "";
+    try {
+      const snapshot = await getAIUsageLedgerApi();
+      renderUsageLedger(snapshot);
+    } catch (error) {
+      usageEntries.setAttribute("aria-busy", "false");
+      usageEntries.innerHTML = `<div class="empty-state"><strong>Could not load the ledger</strong><span>${escapeHtml(error.message || "Please try again.")}</span></div>`;
+    }
+  };
+  balanceForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = balanceForm.querySelector("button[type=submit]");
+    button.disabled = true;
+    button.textContent = "Saving…";
+    usageMessage.textContent = "";
+    try {
+      const snapshot = await setAIUsageBalanceApi(
+        balanceForm.elements.balance_usd.value,
+        "Current provider balance"
+      );
+      renderUsageLedger(snapshot);
+      usageMessage.textContent = "Balance snapshot saved. New reported Jot charges will reduce it.";
+    } catch (error) {
+      usageMessage.textContent = error.message || "Could not update the tracked balance.";
+    } finally {
+      button.disabled = false;
+      button.textContent = "Set balance";
+    }
+  });
+  document.querySelector("[data-refresh-ai-usage]").addEventListener("click", loadUsageLedger);
+
   const list = document.querySelector("#signup-requests");
   const renderRequests = (requests) => {
     list.setAttribute("aria-busy", "false");
@@ -2222,6 +2379,7 @@ function renderAdmin() {
   });
 
   loadProviderSettings();
+  loadUsageLedger();
   load();
 }
 

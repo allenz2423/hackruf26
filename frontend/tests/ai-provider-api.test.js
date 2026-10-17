@@ -5,7 +5,9 @@ import {
   getAIProviderSettingsApi,
   updateAIProviderSettingsApi,
   resetAIProviderSettingsApi,
-  testAIProviderSettingsApi
+  testAIProviderSettingsApi,
+  getAIUsageLedgerApi,
+  setAIUsageBalanceApi
 } from "../src/api.js";
 
 test("AI provider settings use same-origin admin routes and write-only key payloads", async (t) => {
@@ -29,12 +31,16 @@ test("AI provider settings use same-origin admin routes and write-only key paylo
   });
   await testAIProviderSettingsApi();
   await resetAIProviderSettingsApi();
+  await getAIUsageLedgerApi();
+  await setAIUsageBalanceApi(63.86, "post deposit");
 
   assert.deepEqual(requests.map(({ path, method }) => [path, method]), [
     ["/api/admin/ai-provider", "GET"],
     ["/api/admin/ai-provider", "PUT"],
     ["/api/admin/ai-provider/test", "POST"],
-    ["/api/admin/ai-provider", "DELETE"]
+    ["/api/admin/ai-provider", "DELETE"],
+    ["/api/admin/ai-usage", "GET"],
+    ["/api/admin/ai-usage/balance", "PUT"]
   ]);
   assert.deepEqual(requests[1].body, {
     base_url: "https://api.example.test/v1",
@@ -42,4 +48,5 @@ test("AI provider settings use same-origin admin routes and write-only key paylo
     api_key: "secret-key",
     clear_api_key: false
   });
+  assert.deepEqual(requests[5].body, { balance_usd: 63.86, note: "post deposit" });
 });

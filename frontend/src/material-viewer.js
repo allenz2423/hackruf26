@@ -441,11 +441,9 @@ export function openMaterialViewer(material, { onRetry = null } = {}) {
       ? `${previewSectionCount}${count ? ` of ${count}` : ""} sections`
       : `${count} ${count === 1 ? "item" : "items"}`;
     const title = dialog.querySelector("#material-dialog-title");
-    title.innerHTML = mathHtml(nextMaterial.title || nextMaterial.type || "Study material");
-    void typesetMath(title);
+    title.textContent = nextMaterial.title || nextMaterial.type || "Study material";
     const meta = dialog.querySelector("#material-dialog-meta");
-    meta.innerHTML = mathHtml(`${nextMaterial.scope || "Class review"} - ${countLabel} - ${label}`);
-    void typesetMath(meta);
+    meta.textContent = `${nextMaterial.scope || "Class review"} - ${countLabel} - ${label}`;
 
     const fullscreenButton = dialog.querySelector("[data-fullscreen]");
     if (fullscreenButton) fullscreenButton.hidden = nextMaterial.type !== "Study guide";

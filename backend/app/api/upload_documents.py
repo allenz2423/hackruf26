@@ -156,7 +156,7 @@ async def _create_upload_document_job(
     try:
         row = await db.fetchrow(
             "SELECT d.original_text, d.source_updated_at, n.title, c.name AS "
-            "class_name FROM upload_documents d "
+            "class_name,n.storage_key,n.mime_type FROM upload_documents d "
             "JOIN course_notes n ON n.id = d.note_id AND n.updated_at = "
             "d.source_updated_at AND n.status = 'ready' "
             "JOIN course_classes c ON c.id = n.class_id "
@@ -171,6 +171,49 @@ async def _create_upload_document_job(
         text = row["original_text"]
         # Process every chunk. Never silently discard a long document's later pages.
         chunks = source_chunks(text)
+        service = application.state.gemini_content_service
+        source_visuals: list[object] = []
+        storage = getattr(application.state, "private_storage", None)
+        if storage is not None and row.get("storage_key"):
+            try:
+                original_path = storage.path_for(str(row["storage_key"]))
+                source_visuals = await asyncio.to_thread(
+                    service._generation_source_visuals,
+                    [
+                        {
+                            "id": str(upload_id),
+                            "title": str(row["title"]),
+                            "kind": str(row.get("mime_type") or ""),
+                            "mime_type": str(row.get("mime_type") or ""),
+                            "original_path": original_path,
+                            "extracted_text": text,
+                        }
+                    ],
+                    row["title"],
+                )
+            except ValueError:
+                # A missing original file must not block the extracted-text companion.
+                source_visuals = []
+        visuals_by_chunk: list[list[object]] = [[] for _ in chunks]
+        for visual_index, visual in enumerate(source_visuals):
+            label = str(getattr(visual, "label", ""))
+            locator = re.search(r"\b(page|slide)\s+(\d+)\b", label, re.IGNORECASE)
+            matching_chunk = None
+            if locator:
+                marker = re.compile(
+                    rf"^\[{locator.group(1)}\s+{int(locator.group(2))}\]\s*$",
+                    re.IGNORECASE | re.MULTILINE,
+                )
+                matching_chunk = next(
+                    (index for index, chunk in enumerate(chunks) if marker.search(chunk)),
+                    None,
+                )
+            target_chunk = (
+                matching_chunk
+                if matching_chunk is not None
+                else visual_index % len(chunks)
+            )
+            visuals_by_chunk[target_chunk].append(visual)
         sections = []
         generation_stage = "draft_and_revision"
         for part, chunk in enumerate(chunks, 1):
@@ -183,6 +226,7 @@ async def _create_upload_document_job(
                     detail_level=level,
                     part=part,
                     total_parts=len(chunks),
+                    source_visuals=visuals_by_chunk[part - 1],
                 )
             )
             progress = await db.execute(

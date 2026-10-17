@@ -12,8 +12,15 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from app.api.schemas import StudyGuideContent
 from app.services.study_files import _safe_math
 
-MAX_SERIALIZED_BYTES = 256_000
-MAX_TEXT_CHARACTERS = 100_000
+# Long, visual study guides include authored SVG markup as well as prose and
+# citations. A 256 KB ceiling dropped late cumulative previews for valid guides
+# before all requested sections could be shown. Keep the payload bounded while
+# allowing a full-course guide with its diagrams to fit.
+MAX_SERIALIZED_BYTES = 512_000
+# SVG source, captions, formulas, and prose all count toward this total. A
+# full-course guide with roughly 8,000 words plus inline diagrams needs more
+# headroom than the old 100,000-character ceiling, while this remains bounded.
+MAX_TEXT_CHARACTERS = 400_000
 MAX_REPORTED_ISSUES = 100
 MAX_JSON_DEPTH = 64
 

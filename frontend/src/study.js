@@ -445,7 +445,7 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
               </div>
             </div>
             <div class="field-block" id="generation-instructions-block">
-              <label for="generation-instructions">Additional instructions (optional)</label>
+              <label id="generation-instructions-label" for="generation-instructions">Additional instructions (optional)</label>
               <textarea id="generation-instructions" name="additional_instructions" rows="6" maxlength="2000" aria-describedby="generation-instructions-help" placeholder="Focus on chapters 3–5. Emphasize application questions rather than definitions."></textarea>
               <p class="field-hint" id="generation-instructions-help">Guide quiz or exam topics and style. Generated questions remain grounded in the selected course materials.</p>
             </div>
@@ -488,23 +488,51 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
     const sourcePicker = root.querySelector("#study-source-picker");
     const sourceCount = root.querySelector("#source-selection-count");
     const instructionsBlock = root.querySelector("#generation-instructions-block");
+    const instructionsLabel = root.querySelector("#generation-instructions-label");
+    const instructionsHelp = root.querySelector("#generation-instructions-help");
+    const instructionsInput = root.querySelector("#generation-instructions");
     const languageBlock = root.querySelector("#generation-language-block");
     const guideTitleBlock = root.querySelector("#study-guide-title-block");
     const guideStyleBlock = root.querySelector("#study-guide-style-block");
     let generating = false;
+    let activeMaterialType = "Quiz";
+    const instructionDrafts = new Map();
     const liveGuidePreviews = new Map();
     function updateTypeFields(uiType) {
       const isAssessment = ["Quiz", "Practice test"].includes(uiType);
+      const isGuide = uiType === "Study guide";
       guideTitleBlock.hidden = uiType !== "Study guide";
       guideStyleBlock.hidden = uiType !== "Study guide";
       root.querySelector("#generate-count-label").textContent = uiType === "Study guide"
         ? "Section count" : uiType === "Flashcards" ? "Card count" : "Question count";
-      instructionsBlock.hidden = !isAssessment;
+      instructionsBlock.hidden = !isAssessment && !isGuide;
+      if (instructionsLabel) {
+        instructionsLabel.textContent = isGuide
+          ? "Guide instructions (optional)"
+          : "Additional instructions (optional)";
+      }
+      if (instructionsInput) {
+        instructionsInput.placeholder = isGuide
+          ? "Cover each chapter in order. Emphasize cellular organization, replication, and worked examples."
+          : "Focus on chapters 3–5. Emphasize application questions rather than definitions.";
+      }
+      if (instructionsHelp) {
+        instructionsHelp.textContent = isGuide
+          ? "Guide coverage, topic order, examples, or visual emphasis. Jot will keep the guide grounded in the selected course materials."
+          : "Guide quiz or exam topics and style. Generated questions remain grounded in the selected course materials.";
+      }
       languageBlock.hidden = !isAssessment;
     }
     updateTypeFields("Quiz");
     form.addEventListener("change", (event) => {
       if (event.target.name === "type") {
+        if (instructionsInput) {
+          instructionDrafts.set(activeMaterialType, instructionsInput.value || "");
+        }
+        activeMaterialType = event.target.value;
+        if (instructionsInput) {
+          instructionsInput.value = instructionDrafts.get(activeMaterialType) || "";
+        }
         updateTypeFields(event.target.value);
         return;
       }
@@ -696,7 +724,7 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
         return;
       }
       const difficulty = data.get("difficulty") || "mixed";
-      const additionalInstructions = ["Quiz", "Practice test"].includes(uiType)
+      const additionalInstructions = ["Quiz", "Practice test", "Study guide"].includes(uiType)
         ? String(data.get("additional_instructions") || "").trim()
         : "";
       const studyGuideTitle = uiType === "Study guide"

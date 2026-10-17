@@ -13,6 +13,7 @@ from google.genai import types
 from app.services.gemini_content import _provider_response_schema, _StudyGuideSectionBatch
 from app.services.openai_compatible import (
     MAX_PROVIDER_RESPONSE_BYTES,
+    PROVIDER_REQUEST_DEADLINE_SECONDS,
     PROVIDER_REQUEST_TIMEOUT_SECONDS,
     OpenAICompatibleClient,
     OpenAICompatibleError,
@@ -21,6 +22,8 @@ from app.services.openai_compatible import (
     ProviderNotConfiguredError,
     _extract_text,
     _fallback_request_body,
+    _read_json_limited,
+    _read_json_limited_async,
     validate_base_url,
 )
 from app.services.quiz_reasoning import QuizReasoningService
@@ -40,6 +43,27 @@ def configured_client(handler, *, asynchronous: bool = False) -> OpenAICompatibl
 
 
 class OpenAICompatibleClientTests(unittest.TestCase):
+    def test_provider_request_has_a_finite_wall_clock_deadline(self) -> None:
+        self.assertGreater(PROVIDER_REQUEST_DEADLINE_SECONDS, PROVIDER_REQUEST_TIMEOUT_SECONDS)
+        self.assertLessEqual(PROVIDER_REQUEST_DEADLINE_SECONDS, 30 * 60)
+
+    def test_sync_reader_stops_when_trickling_response_exceeds_deadline(self) -> None:
+        payload = json.dumps(
+            {"choices": [{"message": {"content": "ready"}, "finish_reason": "stop"}]}
+        ).encode()
+
+        class OneChunkStream(httpx.SyncByteStream):
+            def __iter__(self):
+                yield payload
+
+            def close(self) -> None:
+                return None
+
+        response = httpx.Response(200, stream=OneChunkStream())
+        with patch("app.services.openai_compatible.time.monotonic", return_value=2.0):
+            with self.assertRaises(httpx.ReadTimeout):
+                _read_json_limited(response, deadline=1.0)
+
     def test_sync_provider_request_has_a_bounded_timeout(self) -> None:
         observed = {}
 
@@ -370,6 +394,21 @@ class OpenAICompatibleClientTests(unittest.TestCase):
             OpenAICompatibleClient._provider_request_body(other_provider, "prompt", config),
         )
 
+    def test_luna_guide_completion_budget_is_sent_without_changing_reasoning(self) -> None:
+        provider = ProviderConfig(
+            "https://openrouter.ai/api/v1", "openai/gpt-6-luna", "secret"
+        )
+        config = SimpleNamespace(
+            max_output_tokens=96_000,
+            system_instruction="You are Screen Tutor's course study-guide author.",
+        )
+
+        body = OpenAICompatibleClient._provider_request_body(provider, "draft guide", config)
+
+        self.assertEqual(body["max_completion_tokens"], 96_000)
+        self.assertNotIn("max_tokens", body)
+        self.assertNotIn("reasoning_effort", body)
+
     def test_study_guide_field_edits_disable_reasoning_tokens(self) -> None:
         provider = ProviderConfig(
             "https://openrouter.ai/api/v1", "deepseek/deepseek-v4.1-flash", "secret"
@@ -505,6 +544,51 @@ class OpenAICompatibleClientTests(unittest.TestCase):
         self.assertEqual(result.text, "ready")
         self.assertEqual(request_count, 2)
         sleep.assert_called_once_with(1.0)
+
+    def test_openrouter_usage_is_requested_and_reported_cost_is_captured(self) -> None:
+        request_bodies = []
+        usage_events = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            request_bodies.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "gen-test-123",
+                    "model": "openai/gpt-6-luna",
+                    "choices": [
+                        {"message": {"content": "ready"}, "finish_reason": "stop"}
+                    ],
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 25,
+                        "total_tokens": 125,
+                        "completion_tokens_details": {"reasoning_tokens": 8},
+                        "cost": 0.0001234,
+                    },
+                },
+            )
+
+        manager = ProviderConfigManager(
+            ProviderConfig("https://openrouter.ai/api/v1", "openai/gpt-6-luna", "test-key")
+        )
+        client = OpenAICompatibleClient(
+            manager,
+            sync_transport=httpx.MockTransport(handler),
+            usage_recorder=SimpleNamespace(record_sync=usage_events.append),
+        )
+        result = client.models.generate_content(
+            model="ignored", contents="prompt", config=SimpleNamespace()
+        )
+
+        self.assertEqual(result.text, "ready")
+        self.assertEqual(request_bodies[0]["usage"], {"include": True})
+        self.assertEqual(len(usage_events), 1)
+        self.assertEqual(usage_events[0]["outcome"], "success")
+        self.assertEqual(usage_events[0]["provider_request_id"], "gen-test-123")
+        self.assertEqual(usage_events[0]["prompt_tokens"], 100)
+        self.assertEqual(usage_events[0]["reasoning_tokens"], 8)
+        self.assertEqual(usage_events[0]["cost_microusd"], 123)
 
     def test_empty_reasoning_response_preserves_token_limit_signal(self) -> None:
         def handler(_request: httpx.Request) -> httpx.Response:
@@ -644,6 +728,23 @@ class OpenAICompatibleClientTests(unittest.TestCase):
 
 
 class AsyncOpenAICompatibleClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_async_reader_stops_when_trickling_response_exceeds_deadline(self) -> None:
+        payload = json.dumps(
+            {"choices": [{"message": {"content": "ready"}, "finish_reason": "stop"}]}
+        ).encode()
+
+        class OneChunkStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield payload
+
+            async def aclose(self) -> None:
+                return None
+
+        response = httpx.Response(200, stream=OneChunkStream())
+        with patch("app.services.openai_compatible.time.monotonic", return_value=2.0):
+            with self.assertRaises(httpx.ReadTimeout):
+                await _read_json_limited_async(response, deadline=1.0)
+
     async def test_async_provider_request_has_a_bounded_timeout(self) -> None:
         observed = {}
 

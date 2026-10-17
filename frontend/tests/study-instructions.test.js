@@ -13,7 +13,7 @@ function globals(t, values) {
   }
 }
 
-test("study-material API sends nonblank assessment preferences and omits empty ones", async (t) => {
+test("study-material API sends nonblank guide and assessment preferences", async (t) => {
   const requests = [];
   globals(t, {
     fetch: async (path, options) => {
@@ -35,7 +35,8 @@ test("study-material API sends nonblank assessment preferences and omits empty o
   await createStudyMaterialApi("class-id", {
     kind: "study_guide",
     title: "  Membrane Transport  ",
-    guideStyle: "visual"
+    guideStyle: "visual",
+    additionalInstructions: "Cover every chapter in order."
   });
 
   assert.equal(requests[0].body.additional_instructions, "Focus on applications.");
@@ -47,6 +48,7 @@ test("study-material API sends nonblank assessment preferences and omits empty o
   assert.equal(Object.hasOwn(requests[1].body, "operation_id"), false);
   assert.equal(requests[2].body.title, "Membrane Transport");
   assert.equal(requests[2].body.guide_style, "visual");
+  assert.equal(requests[2].body.additional_instructions, "Cover every chapter in order.");
 });
 
 test("generation operation IDs are stable for retries without persisting request text", async (t) => {
@@ -103,6 +105,9 @@ function studyTabElements() {
     ["#generate-form", form], ["#material-list", list], ["#generate-btn", new FakeElement()],
     ["#generation-status", new FakeElement()], ["#study-source-picker", picker],
     ["#source-selection-count", new FakeElement()], ["#generation-instructions-block", new FakeElement()],
+    ["#generation-instructions-label", new FakeElement()],
+    ["#generation-instructions-help", new FakeElement()],
+    ["#generation-instructions", new FakeElement()],
     ["#generation-language-block", new FakeElement()], ["#study-guide-title-block", new FakeElement()],
     ["#study-guide-style-block", new FakeElement()], ["#generate-count-label", new FakeElement()]
   ]);
@@ -166,7 +171,7 @@ test("a class study tab only includes personal guides originating in that class"
   assert.doesNotMatch(localView.list.innerHTML, /Computer Science Source Study Guide|Economics Source Study Guide/);
 });
 
-test("additional-instructions control appears only for quizzes and practice tests", async () => {
+test("additional-instructions control supports guides and assessments", async () => {
   const form = new FakeElement();
   const list = new FakeElement();
   const generateButton = new FakeElement();
@@ -174,6 +179,9 @@ test("additional-instructions control appears only for quizzes and practice test
   const picker = new FakeElement();
   const selectionCount = new FakeElement();
   const instructions = new FakeElement();
+  const instructionsLabel = new FakeElement();
+  const instructionsHelp = new FakeElement();
+  const instructionsInput = new FakeElement();
   const language = new FakeElement();
   const guideTitle = new FakeElement();
   const guideStyle = new FakeElement();
@@ -194,6 +202,9 @@ test("additional-instructions control appears only for quizzes and practice test
     ["#study-source-picker", picker],
     ["#source-selection-count", selectionCount],
     ["#generation-instructions-block", instructions],
+    ["#generation-instructions-label", instructionsLabel],
+    ["#generation-instructions-help", instructionsHelp],
+    ["#generation-instructions", instructionsInput],
     ["#generation-language-block", language],
     ["#study-guide-title-block", guideTitle],
     ["#study-guide-style-block", guideStyle],
@@ -231,13 +242,21 @@ test("additional-instructions control appears only for quizzes and practice test
 
   const change = form.listeners.get("change");
   change({ target: { name: "type", value: "Study guide" } });
-  assert.equal(instructions.hidden, true);
+  assert.equal(instructions.hidden, false);
+  assert.equal(instructionsLabel.textContent, "Guide instructions (optional)");
+  assert.match(instructionsHelp.textContent, /course materials/);
+  assert.match(instructionsInput.placeholder, /each chapter in order/);
+  instructionsInput.value = "Cover chapter 4 in depth.";
   assert.equal(language.hidden, true);
   assert.equal(guideTitle.hidden, false);
   assert.equal(guideStyle.hidden, false);
   change({ target: { name: "type", value: "Practice test" } });
   assert.equal(instructions.hidden, false);
+  assert.equal(instructionsLabel.textContent, "Additional instructions (optional)");
   assert.equal(language.hidden, false);
+  assert.equal(instructionsInput.value, "");
+  change({ target: { name: "type", value: "Study guide" } });
+  assert.equal(instructionsInput.value, "Cover chapter 4 in depth.");
   change({ target: { name: "type", value: "Flashcards" } });
   assert.equal(instructions.hidden, true);
   assert.equal(language.hidden, true);
