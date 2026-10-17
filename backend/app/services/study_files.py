@@ -161,7 +161,14 @@ _MATH_DELIMITER_PAIRS = {
     "|": "|",
     ".": ".",
     "langle": "rangle",
+    "lbrace": "rbrace",
+    "lbrack": "rbrack",
+    "lceil": "rceil",
+    "lfloor": "rfloor",
+    "lgroup": "rgroup",
+    "lmoustache": "rmoustache",
     "lvert": "rvert",
+    "lVert": "rVert",
     "vert": "vert",
     "Vert": "Vert",
 }
@@ -244,9 +251,9 @@ def _safe_math(value: str) -> bool:
                     delimiter_index += 1
                 else:
                     return False
-                if delimiter not in _MATH_DELIMITER_PAIRS:
-                    return False
                 if command == "left":
+                    if delimiter not in _MATH_DELIMITER_PAIRS:
+                        return False
                     delimiters.append(_MATH_DELIMITER_PAIRS[delimiter])
                     if len(delimiters) > 20:
                         return False

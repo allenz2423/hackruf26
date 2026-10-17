@@ -87,6 +87,28 @@ class StudyDocumentQualityTests(unittest.TestCase):
             "sections[0].blocks[1].expression", [issue.location for issue in result.issues]
         )
 
+    def test_standard_algorithm_notation_passes_the_math_quality_gate(self) -> None:
+        content = guide()
+        content["sections"][0]["blocks"] = [
+            {
+                "type": "formula",
+                "expression": (
+                    r"\operatorname{parent}(i)=\left\lfloor\frac{i-1}{2}\right\rfloor"
+                ),
+            },
+            {
+                "type": "formula",
+                "expression": (
+                    r"T(n)=O(n)+\sum_{k=0}^{n-1}"
+                    r"\left(O(1)+k\cdot O(1)\right)=O(n^2)"
+                ),
+            },
+        ]
+
+        result = review_study_guide_quality(content)
+
+        self.assertEqual(result.status, "clean")
+
     def test_pre_numbered_heading_is_flagged(self) -> None:
         result = review_study_guide_quality(guide(heading="1 of 10: Vector components"))
 

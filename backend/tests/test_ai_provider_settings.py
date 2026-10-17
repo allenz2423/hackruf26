@@ -203,6 +203,12 @@ class AIProviderSettingsAPITests(unittest.TestCase):
             )
 
         self.client.portal.call(record_usage)
+        async def make_timestamp_tie() -> None:
+            await self.client.app.state.database.execute(
+                "UPDATE ai_usage_ledger_entries SET created_at='2026-10-17T00:00:00.000Z'"
+            )
+
+        self.client.portal.call(make_timestamp_tie)
         response = self.client.get("/api/admin/ai-usage")
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers["cache-control"], "no-store, private")

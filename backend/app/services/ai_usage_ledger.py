@@ -175,7 +175,9 @@ async def usage_ledger_snapshot(database: SQLiteDatabase, *, limit: int = 500) -
         "e.completion_tokens,e.reasoning_tokens,e.total_tokens,e.reported_cost_microusd,"
         "e.balance_delta_microusd,e.adjustment_note,e.created_at,m.status AS material_status "
         "FROM ai_usage_ledger_entries e LEFT JOIN study_materials m ON m.id=e.operation_id "
-        "ORDER BY e.created_at DESC,e.id DESC LIMIT ?1",
+        # Multiple entries can be inserted within the same millisecond; rowid gives
+        # an insertion-order tie break instead of sorting random UUIDs lexically.
+        "ORDER BY e.created_at DESC,e.rowid DESC LIMIT ?1",
         limit,
     )
     return {

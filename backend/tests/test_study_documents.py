@@ -19,6 +19,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from app.api.class_library import (
+    STUDY_GUIDE_QUALITY_VERSION,
     _create_material_job,
     _process_upload_job,
     _public_material_content,
@@ -2582,7 +2583,7 @@ class SavedDocumentTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT quality_review_version FROM study_materials WHERE id=?1",
                 self.material_id,
             ),
-            4,
+            STUDY_GUIDE_QUALITY_VERSION,
         )
 
     async def test_file_download_checks_owner_and_ready_status(self) -> None:

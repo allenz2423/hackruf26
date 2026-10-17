@@ -13,6 +13,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from app.api.class_library import (
+    STUDY_GUIDE_QUALITY_VERSION,
     _create_material_job,
     download_study_file,
     get_study_material,
@@ -206,7 +207,10 @@ class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
             "SELECT status, quality_review_version, content FROM study_materials WHERE id=?1",
             self.material_id,
         )
-        self.assertEqual((row["status"], row["quality_review_version"]), ("ready", 4))
+        self.assertEqual(
+            (row["status"], row["quality_review_version"]),
+            ("ready", STUDY_GUIDE_QUALITY_VERSION),
+        )
         saved_guide = json.loads(row["content"])
         self.assertEqual(saved_guide["sections"][0]["heading"], "Vectors")
         self.assertEqual(
@@ -291,7 +295,10 @@ class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
             "SELECT status, quality_review_version, content FROM study_materials WHERE id=?1",
             self.material_id,
         )
-        self.assertEqual((saved["status"], saved["quality_review_version"]), ("ready", 4))
+        self.assertEqual(
+            (saved["status"], saved["quality_review_version"]),
+            ("ready", STUDY_GUIDE_QUALITY_VERSION),
+        )
         self.assertEqual(
             json.loads(saved["content"])["sections"][0]["heading"], "1 of 1: Vector components"
         )
@@ -313,7 +320,10 @@ class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
             "SELECT status, quality_review_version, content FROM study_materials WHERE id=?1",
             self.material_id,
         )
-        self.assertEqual((saved["status"], saved["quality_review_version"]), ("ready", 4))
+        self.assertEqual(
+            (saved["status"], saved["quality_review_version"]),
+            ("ready", STUDY_GUIDE_QUALITY_VERSION),
+        )
         saved_sections = json.loads(saved["content"])["sections"]
         self.assertEqual(
             [(section["heading"], section["blocks"][0]["text"]) for section in saved_sections],
@@ -335,7 +345,10 @@ class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
             "SELECT status, content, quality_review_version FROM study_materials WHERE id=?1",
             self.material_id,
         )
-        self.assertEqual((row["status"], row["quality_review_version"]), ("ready", 4))
+        self.assertEqual(
+            (row["status"], row["quality_review_version"]),
+            ("ready", STUDY_GUIDE_QUALITY_VERSION),
+        )
         self.assertIn(r"\\input", json.loads(row["content"])["sections"][0]["blocks"][0]["text"])
         self.assertEqual(self.service.review_calls, [])
         self.assertEqual(self.service.repair_calls, [])
@@ -355,7 +368,7 @@ class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
         saved = await self.db.fetchrow(
             "SELECT quality_review_version FROM study_materials WHERE id=?1", self.material_id
         )
-        self.assertEqual(saved["quality_review_version"], 4)
+        self.assertEqual(saved["quality_review_version"], STUDY_GUIDE_QUALITY_VERSION)
 
     async def test_requested_section_count_mismatch_cannot_be_marked_ready(self) -> None:
         extra = guide(self.upload_id, heading="Stress components")["sections"][0]
@@ -410,7 +423,7 @@ class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT quality_review_version FROM study_materials WHERE id=?1",
                 self.material_id,
             ),
-            4,
+            STUDY_GUIDE_QUALITY_VERSION,
         )
 
     async def test_legacy_download_replaces_cached_export_without_model_review(self) -> None:

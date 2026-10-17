@@ -215,6 +215,30 @@ class StrictStudyFileTests(unittest.TestCase):
             with self.subTest(expression=expression):
                 self.assertFalse(_safe_math(expression))
 
+    def test_standard_left_right_delimiter_pairs_are_safe_and_balanced(self) -> None:
+        for expression in (
+            r"\left(x+1\right)",
+            r"\left\lfloor\frac{n-1}{2}\right\rfloor",
+            r"\left\lceil\frac{n}{2}\right\rceil",
+            r"\left\langle u,v\right\rangle",
+            r"\left\lvert x\right\rvert",
+            r"\left\lVert v\right\rVert",
+            r"\left(\left\lfloor\frac{n-1}{2}\right\rfloor\right)",
+        ):
+            with self.subTest(expression=expression):
+                self.assertTrue(_safe_math(expression))
+
+    def test_left_right_delimiter_closers_must_match_the_opening_pair(self) -> None:
+        for expression in (
+            r"\right)",
+            r"\left(x+1\right]",
+            r"\left\lfloor x\right\rceil",
+            r"\left(\left[x\right)",
+            r"\left(x+1",
+        ):
+            with self.subTest(expression=expression):
+                self.assertFalse(_safe_math(expression))
+
     def test_strict_mode_rejects_unsafe_math_before_compilation(self) -> None:
         with patch("app.services.study_files.compile_guide_pdf") as compile_pdf:
             with self.assertRaises(StudyFileFailure):
