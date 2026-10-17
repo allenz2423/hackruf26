@@ -455,28 +455,24 @@ async function renderGuestWorkspace() {
 }
 
 let classMenuAbort = null;
+let classOverviewRenderId = 0;
+
+function classMetaMarkup({ uploads, materials }) {
+  return uploads || materials
+    ? `<span>${uploads} ${uploads === 1 ? "upload" : "uploads"}</span>`
+      + `<span>${materials} study ${materials === 1 ? "set" : "sets"}</span>`
+    : "<span>No materials yet</span>";
+}
 
 async function renderClasses() {
   if (!currentUser) {
     window.location.hash = "#/study";
     return;
   }
+  const renderId = ++classOverviewRenderId;
   const classes = getClasses();
+  const hasBackendClasses = classes.some((klass) => getBackendClassId(klass));
   const personalMaterialCounts = new Map();
-  if (classes.some((klass) => getBackendClassId(klass))) {
-    try {
-      const personalMaterials = await getMyStudyMaterialsApi();
-      for (const material of personalMaterials) {
-        const originClassId = String(material.origin_class_id || "");
-        if (originClassId) {
-          personalMaterialCounts.set(originClassId, (personalMaterialCounts.get(originClassId) || 0) + 1);
-        }
-      }
-    } catch {
-      // The class overview can still render with server class counts if personal
-      // material counts are temporarily unavailable.
-    }
-  }
   const classCounts = classes.map((klass) =>
     getClassDisplayCounts(klass, getBackendClassId(klass), personalMaterialCounts)
   );
@@ -534,10 +530,7 @@ async function renderClasses() {
           <span class="class-name">${escapeHtml(klass.name)}</span>
           ${klass.focus ? `<span class="class-focus">${escapeHtml(klass.focus)}</span>` : ""}
           <span class="class-meta">
-            ${uploads || materials ? `
-              <span>${uploads} ${uploads === 1 ? "upload" : "uploads"}</span>
-              <span>${materials} study ${materials === 1 ? "set" : "sets"}</span>`
-              : `<span>No materials yet</span>`}
+            ${classMetaMarkup({ uploads, materials })}
           </span>
           ${klass.nextExam ? `<span class="class-next">${icon("syllabus", { size: 15 })}${escapeHtml(klass.nextExam)}</span>` : ""}
         </span>
@@ -670,6 +663,35 @@ async function renderClasses() {
       }
     }
   });
+
+  if (hasBackendClasses) {
+    getMyStudyMaterialsApi().then((personalMaterials) => {
+      if (renderId !== classOverviewRenderId || window.location.hash !== "#/classes") return;
+      for (const material of personalMaterials) {
+        const originClassId = String(material.origin_class_id || "");
+        if (originClassId) {
+          personalMaterialCounts.set(originClassId, (personalMaterialCounts.get(originClassId) || 0) + 1);
+        }
+      }
+
+      const updatedCounts = classes.map((klass) =>
+        getClassDisplayCounts(klass, getBackendClassId(klass), personalMaterialCounts)
+      );
+      const summary = document.querySelector(".desk-summary");
+      if (summary) {
+        const totalUploads = updatedCounts.reduce((sum, counts) => sum + counts.uploads, 0);
+        const totalMaterials = updatedCounts.reduce((sum, counts) => sum + counts.materials, 0);
+        summary.textContent = `${classes.length} ${classes.length === 1 ? "class" : "classes"} · ${totalUploads} ${totalUploads === 1 ? "upload" : "uploads"} · ${totalMaterials} study ${totalMaterials === 1 ? "set" : "sets"}`;
+      }
+      const cards = grid.querySelectorAll(".class-card");
+      cards.forEach((card, index) => {
+        const meta = card.querySelector(".class-meta");
+        if (meta && updatedCounts[index]) meta.innerHTML = classMetaMarkup(updatedCounts[index]);
+      });
+    }).catch(() => {
+      // Shared counts are already visible if personal material counts are unavailable.
+    });
+  }
 }
 
 const CLASS_TABS = [
