@@ -36,7 +36,10 @@ GUIDE_TOOLS: tuple[GuideTool, ...] = (
     GuideTool(
         id="custom_svg",
         name="Custom SVG illustration and animation",
-        purpose="Draw an original labeled diagram, plot, schematic, spatial model, or animation for any subject.",
+        purpose=(
+            "Draw an original labeled diagram, plot, schematic, spatial model, or animation "
+            "for any subject."
+        ),
         instructions=(
             "This is a general drawing capability, not a fixed template. Use a `svg_diagram` "
             "block with `title`, `alt_text`, `fallback_text`, and a complete standalone SVG "
@@ -54,16 +57,26 @@ GUIDE_TOOLS: tuple[GuideTool, ...] = (
             "as a precise graph edge: connect the intended source and destination, label every "
             "branch outcome, and trace each route from start to finish so a branch is not mistaken "
             "for a sequential step. Put markers on the exact point, endpoint, intersection, or "
-            "extremum they describe. The external `alt_text` briefly describes the visible structure; "
+            "extremum they describe. The external `alt_text` briefly describes the visible "
+            "structure; "
             "`fallback_text` explains the concept or what the learner should notice, stays within "
             "one or two sentences (about 20–35 words), and must not repeat the alt text. You may "
             "use native SMIL `animate`, `animateTransform`, `animateMotion`, or `set` for a "
-            "conceptually meaningful animation; use a clear still state at time zero, fixed labels, "
-            "and one moving relationship or object at a time. For simple motion, use native SMIL "
-            "on the object itself, e.g. `<circle cx=\"80\" cy=\"80\" r=\"12\"><animate "
-            "attributeName=\"cx\" begin=\"0s\" dur=\"4s\" values=\"80;260;80\" "
-            "repeatCount=\"indefinite\"/></circle>`. Animate only an allowed geometry or "
-            "appearance attribute; never animate labels."
+            "conceptually meaningful animation; use a clear still state at time zero, fixed "
+            "labels, and one moving relationship or object at a time. Every `animate` or "
+            "`animateTransform` "
+            "must have a safe target attribute, explicit `dur`, and at least two valid `values` "
+            "or a valid `from`/`to` pair. When `values` has multiple phases, give `keyTimes` with "
+            "the same number of semicolon-separated values, starting at 0 and ending at 1. A "
+            "finite "
+            "one-cycle process must set `repeatCount=\"1\"` and `fill=\"freeze\"` so its final "
+            "state remains visible; an intentional periodic process may use "
+            "`repeatCount=\"indefinite\"` only when its last value returns cleanly to its first. "
+            "For simple motion, use native SMIL on the object itself, e.g. "
+            "`<circle cx=\"80\" cy=\"80\" r=\"12\"><animate attributeName=\"cx\" "
+            "begin=\"0s\" dur=\"4s\" values=\"80;260\" keyTimes=\"0;1\" "
+            "repeatCount=\"1\" fill=\"freeze\"/></circle>`. Animate only an allowed "
+            "geometry or appearance attribute; never animate labels. "
             "The reader starts paused at time zero and adds play, pause, and restart controls; "
             "print exports use the static frame. "
             "SVG is declarative drawing data, not executable code: never include `script`, "
@@ -77,7 +90,9 @@ GUIDE_TOOLS: tuple[GuideTool, ...] = (
     GuideTool(
         id="math_graph",
         name="JSXGraph function plot",
-        purpose="Plot and explore a source-supported mathematical relationship with bounded controls.",
+        purpose=(
+            "Plot and explore a source-supported mathematical relationship with bounded controls."
+        ),
         instructions=(
             "The reader renders this fixed linear-function template with JSXGraph. Use one "
             "`interactive_model` block with template_id `linear_graph_v1` and parameters "
@@ -184,7 +199,8 @@ GUIDE_TOOLS: tuple[GuideTool, ...] = (
         instructions=(
             "Use one `interactive_model` block with template_id `sampling_demo_v1` and parameters "
             "`{method, sample_size, seed, random_assignment}`. `method` is `simple_random`, "
-            "`stratified`, or `front_row_convenience`; sample_size is an even integer from 4 to 12; "
+            "`stratified`, or `front_row_convenience`; sample_size is an even integer from 4 to "
+            "12; "
             "seed is an integer from 1 to 9999; random_assignment is true or false. The app owns "
             "a fixed synthetic population of 24 fictional students and practice-problem counts. "
             "These values are an app-authored illustration, not source data. Explain that random "
@@ -213,7 +229,10 @@ GUIDE_TOOLS: tuple[GuideTool, ...] = (
     GuideTool(
         id="stress_cube_3d",
         name="Three-dimensional stress cube",
-        purpose="Inspect principal stresses and the absolute maximum-shear plane for a symmetric tensor.",
+        purpose=(
+            "Inspect principal stresses and the absolute maximum-shear plane for a symmetric "
+            "tensor."
+        ),
         instructions=(
             "Use one `interactive_model` block with template_id `stress_cube_3d_v1` and "
             "parameters `{stress_mpa:[[xx,xy,xz],[yx,yy,yz],[zx,zy,zz]]}`. Values are finite "

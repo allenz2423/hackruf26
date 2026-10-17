@@ -377,6 +377,25 @@ def _bounded_numeric_tokens(value: str, limit: float = 1_000_000) -> bool:
     )
 
 
+def _parse_key_times(value: str, expected_count: int | None = None) -> list[float] | None:
+    """Parse the semicolon-delimited SMIL keyTimes list and check its range/order."""
+    parts = [item.strip() for item in value.split(";")]
+    if len(parts) < 2 or (expected_count is not None and len(parts) != expected_count):
+        return None
+    try:
+        values = [float(item) for item in parts]
+    except ValueError:
+        return None
+    if (
+        not all(math.isfinite(item) and 0 <= item <= 1 for item in values)
+        or values[0] != 0
+        or values[-1] != 1
+        or any(left > right for left, right in zip(values, values[1:], strict=False))
+    ):
+        return None
+    return values
+
+
 def _local_name(qualified_name: str) -> tuple[str | None, str]:
     if qualified_name.startswith("{"):
         namespace, local_name = qualified_name[1:].split("}", 1)
@@ -396,7 +415,9 @@ def _safe_attribute_value(name: str, value: str, element: str) -> bool:
             and bool(_PATH_DATA.fullmatch(value))
             and _bounded_numeric_tokens(value)
         )
-    if name == "points" or name in {"viewBox", "keyTimes", "keySplines", "tableValues", "rotate"}:
+    if name == "keyTimes":
+        return _parse_key_times(value) is not None
+    if name == "points" or name in {"viewBox", "keySplines", "tableValues", "rotate"}:
         return bool(_NUMBER_LIST.fullmatch(value)) and _bounded_numeric_tokens(value)
     if name == "transform" or name in {"gradientTransform", "patternTransform"}:
         valid_transform = bool(
@@ -516,6 +537,130 @@ def _safe_attribute_value(name: str, value: str, element: str) -> bool:
     return False
 
 
+def _animation_is_complete(source: ET.Element, tag: str) -> bool:
+    """Drop animation nodes that cannot produce a bounded transition."""
+    attribute = source.get("attributeName", "").strip()
+    if tag == "set":
+        value = source.get("to", "")
+        return attribute in _SAFE_ANIMATED_ATTRIBUTES and _animation_value_is_valid(
+            attribute, value, tag, source
+        )
+
+    if tag == "animateMotion":
+        duration = source.get("dur", "")
+        path = source.get("path", "")
+        has_path = bool(path and _safe_attribute_value("path", path, tag)) or any(
+            _local_name(child.tag)[1] == "mpath"
+            and _safe_attribute_value(
+                "href", child.get("href") or child.get(f"{{{XLINK_NAMESPACE}}}href", ""), "mpath"
+            )
+            for child in list(source)
+        )
+        return bool(duration and _safe_attribute_value("dur", duration, tag) and has_path)
+
+    if attribute not in _SAFE_ANIMATED_ATTRIBUTES:
+        return False
+    duration = source.get("dur", "")
+    if not duration or not _safe_attribute_value("dur", duration, tag):
+        return False
+
+    raw_values = source.get("values")
+    if tag == "animateTransform":
+        if attribute != "transform" or source.get("type") not in {
+            "translate", "scale", "rotate", "skewX", "skewY",
+        }:
+            return False
+        expected_lengths = {
+            "translate": {1, 2}, "scale": {1, 2}, "rotate": {1, 3},
+            "skewX": {1}, "skewY": {1},
+        }
+        expected = expected_lengths[source.get("type", "")]
+
+        def valid_transform_value(value: str) -> bool:
+            return (
+                bool(_NUMBER_LIST.fullmatch(value.strip()))
+                and len(_NUMBER_RE.findall(value)) in expected
+                and _bounded_numeric_tokens(value)
+            )
+
+        if raw_values:
+            values = raw_values.split(";")
+            return len(values) >= 2 and all(valid_transform_value(item) for item in values)
+        from_value = source.get("from", "")
+        to_value = source.get("to", "")
+        return bool(
+            from_value
+            and to_value
+            and valid_transform_value(from_value)
+            and valid_transform_value(to_value)
+        )
+
+    if raw_values:
+        values = raw_values.split(";")
+        return len(values) >= 2 and all(
+            _animation_value_is_valid(attribute, value, tag, source) for value in values
+        )
+    from_value = source.get("from", "")
+    to_value = source.get("to", "")
+    by_value = source.get("by", "")
+    candidates = (
+        (from_value, to_value),
+        (from_value, by_value),
+        (to_value, by_value),
+        (by_value, by_value) if by_value and not from_value and not to_value else ("", ""),
+    )
+    return any(
+        left
+        and right
+        and _animation_value_is_valid(attribute, left, tag, source)
+        and _animation_value_is_valid(attribute, right, tag, source)
+        for left, right in candidates
+    )
+
+
+def _animation_value_is_valid(attribute: str, value: str, tag: str, source: ET.Element) -> bool:
+    value = value.strip()
+    if attribute in {"fill", "stroke"}:
+        return bool(
+            _COLOR.fullmatch(value)
+            or re.fullmatch(r"url\(\s*#[A-Za-z_][\w.:-]*\s*\)", value)
+        )
+    if attribute == "transform":
+        if tag == "animateTransform":
+            transform_type = source.get("type", "")
+            allowed_lengths = {
+                "translate": {1, 2}, "scale": {1, 2}, "rotate": {1, 3},
+                "skewX": {1}, "skewY": {1},
+            }.get(transform_type, set())
+            return bool(
+                _NUMBER_LIST.fullmatch(value)
+                and len(_NUMBER_RE.findall(value)) in allowed_lengths
+                and _bounded_numeric_tokens(value)
+            )
+        return _safe_attribute_value("transform", value, tag)
+    if attribute == "d":
+        return bool(_PATH_DATA.fullmatch(value) and _bounded_numeric_tokens(value))
+    return bool(_NUMBER_LIST.fullmatch(value) and _bounded_numeric_tokens(value))
+
+
+def _canonicalize_animation(target: ET.Element, source: ET.Element) -> None:
+    """Make value timing explicit and retain a finite animation's final frame."""
+    raw_values = source.get("values")
+    if raw_values:
+        count = len(raw_values.split(";"))
+        if _parse_key_times(target.get("keyTimes", ""), count) is None:
+            target.set(
+                "keyTimes",
+                ";".join(f"{index / (count - 1):g}" for index in range(count)),
+            )
+    if (
+        target.get("fill") is None
+        and source.get("repeatCount") != "indefinite"
+        and source.get("repeatDur") != "indefinite"
+    ):
+        target.set("fill", "freeze")
+
+
 def sanitize_svg(markup: str) -> str:
     """Return a safe, self-contained SVG string or raise ``ValueError``.
 
@@ -545,6 +690,9 @@ def sanitize_svg(markup: str) -> str:
             raise ValueError("SVG nesting exceeds the supported limit.")
         source_namespace, tag = _local_name(source.tag)
         if source_namespace not in {None, "", SVG_NAMESPACE} or tag not in _SVG_TAGS:
+            return None
+        is_animation = tag in {"animate", "animateTransform", "animateMotion", "set"}
+        if is_animation and not _animation_is_complete(source, tag):
             return None
         counters["elements"] += 1
         if counters["elements"] > MAX_SVG_ELEMENTS:
@@ -588,6 +736,18 @@ def sanitize_svg(markup: str) -> str:
                         or re.fullmatch(r"url\(\s*#[A-Za-z_][\w.:-]*\s*\)", item.strip())
                         for item in animation_values
                     )
+                elif tag == "animateTransform":
+                    transform_type = source.get("type", "")
+                    allowed_lengths = {
+                        "translate": {1, 2}, "scale": {1, 2}, "rotate": {1, 3},
+                        "skewX": {1}, "skewY": {1},
+                    }.get(transform_type, set())
+                    valid_animation = all(
+                        _NUMBER_LIST.fullmatch(item.strip())
+                        and len(_NUMBER_RE.findall(item)) in allowed_lengths
+                        and _bounded_numeric_tokens(item)
+                        for item in animation_values
+                    )
                 elif animated_attribute == "transform":
                     valid_animation = all(
                         _safe_attribute_value("transform", item, tag) for item in animation_values
@@ -609,6 +769,9 @@ def sanitize_svg(markup: str) -> str:
                     continue
                 id_map[value] = value
             target.set(name, value)
+
+        if tag in {"animate", "animateTransform", "animateMotion", "set"}:
+            _canonicalize_animation(target, source)
 
         if tag in {"title", "desc", "text", "tspan"}:
             text = source.text or ""

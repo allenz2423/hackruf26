@@ -47,6 +47,8 @@ The 32-question mixed-format quiz was regenerated with `openai/gpt-6-luna` on 20
 
 Local guide contact sheets included one 360-pixel-wide render for each saved custom SVG and a thumbnail of every page in each saved study-guide PDF. These are structural and visual checks, not factual verification. The author's visual self-preview now renders at the same phone-card scale before accepting a diagram edit, instead of presenting only a large desktop-like raster to the author. The interactive-style prompt now explicitly requires four meaningful actions across a long guide when the sources support them, including at least two that change a value or select a stage and show a concept-specific result.
 
+The SVG runtime contract now accepts SMIL `keyTimes` as a semicolon-delimited sequence, fills evenly spaced timing points when a multi-value animation omits them, and holds the last frame of a finite animation. It discards animation elements that lack a bounded duration or usable movement values, preventing playback controls from appearing on a static drawing. A Firefox browser check covers finite motion, preserved key times, indefinite loops, incomplete transforms, and numeric `animateTransform` values.
+
 This audit describes stored structure, not factual correctness or what a student actually sees in a browser. A later iteration must render the saved content at desktop and phone sizes and compare the PDF to the browser presentation.
 
 ### Volume II and saved practice material checked on 2026-10-17

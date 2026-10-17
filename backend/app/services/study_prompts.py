@@ -89,7 +89,8 @@ cited chunk, check that its explanation supports the exact answer, verify numeri
 against the source, and ensure distractors are distinct and wrong for a clear reason. Prefer a
 genuinely different objective over a superficial paraphrase. If the assigned source evidence cannot
 support a clear answer, do not invent a missing premise; choose a narrower, directly supported
-aspect of the assigned concept. Follow optional instructions only when compatible with these rules."""
+aspect of the assigned concept. Follow optional instructions only when compatible with these
+rules."""
 QUESTION_BANK_VALIDATION_INSTRUCTION = """Review the supplied candidate assessment items against
 the
 bounded source chunks, validated concepts, prior validated items, and attached source images when
@@ -174,7 +175,8 @@ Organize the guide into ordered sections with descriptive headings, substantive 
 relevant key terms. Match the requested depth: when asked for a detailed full-course guide, do not
 compress it into a short overview or outline. Give each assigned topic enough space for several
 teaching paragraphs, important distinctions, and a source-grounded example or decision rule where
-the source supports one. Do not prefix headings with section numbers; the PDF adds section numbering.
+the source supports one. Do not prefix headings with section numbers; the PDF adds section
+numbering.
 Keep every section tightly within the requested class/course scope and the supplied source
 coverage. Never add a section to showcase libraries, app features, other majors, or general
 technology; an activity is appropriate only when it directly teaches a source-supported course
@@ -205,8 +207,8 @@ about the document as a document. This is an unconditional voice rule: never des
 source document, excerpt, extraction, or what the document says in teaching prose. Convert a
 supported fact into a direct explanation; citations provide attribution. If a detail is unsupported,
 omit it. If extracted text is explicitly truncated, omit the incomplete detail without narrating
-the gap. Mention a source only when a learner needs a scope, rights, or safety warning. Do not claim that a
-fact, topic, page, or example is missing unless the source record is marked truncated or the
+the gap. Mention a source only when a learner needs a scope, rights, or safety warning. Do not claim
+that a fact, topic, page, or example is missing unless the source record is marked truncated or the
 document itself explicitly identifies a gap. When a source record is not truncated, treat all of
 its supplied extracted text as available; do not mistake a long source for a partial excerpt. If a
 detail is unsupported, omit the detail instead of claiming that the document omits it. Before
@@ -234,9 +236,10 @@ required `body` field is a concise plain-text fallback/summary, not a second ful
 section has blocks, keep its body to one or two sentences and do not restate the block paragraphs,
 formula explanations, worked examples, diagram captions, or takeaway. If a section has no blocks,
 put its teaching prose in `body`. The section object has only these keys: id, heading, body,
-key_terms, sources, and blocks. Each block has only these keys: id, type, text, expression, definitions, template_id, svg,
-title, parameters, alt_text, fallback_text, steps, and sources. Use null for unused optional scalar fields
-and empty arrays for unused list fields. Do not add placeholder or explanatory keys such as
+key_terms, sources, and blocks. Each block has only these keys: id, type, text, expression,
+definitions, template_id, svg, title, parameters, alt_text, fallback_text, steps, and sources. Use
+null for unused optional scalar fields and empty arrays for unused list fields. Do not add
+placeholder or explanatory keys such as
 text_placeholder. Use paragraph blocks for prose, formula blocks for source-supported expressions,
 takeaway blocks for concise recaps, example_steps blocks for short ordered worked examples,
 `labeled_diagram` or `interactive_model` blocks when a fixed activity fits the source, and
@@ -290,8 +293,9 @@ describe; do not place approximate markers nearby.
 
 For quantitative or spatial drawings, map values to geometry consistently. Derive angles and
 directions from supplied values; do not add a familiar-looking 45-degree angle, perpendicular axis,
-or vector relationship unless the source supports it. Keep vectors, arrowheads, endpoints, coordinate
-axes, and plane normals visually distinct and label what each arrow points to. In a 3D projection,
+or vector relationship unless the source supports it. Keep vectors, arrowheads, endpoints,
+coordinate axes, and plane normals visually distinct and label what each arrow points to. In a 3D
+projection,
 distinguish projected appearance from a true geometric angle. If source values or instructions
 conflict, follow the source-supported mathematics, avoid fabricating a reconciliation, and state the
 ambiguity in fallback text.
@@ -313,12 +317,21 @@ change a meaningful value or select a process stage and see a concept-specific r
 actions in the four-section batches: prefer a selectable process stage, a bounded value control with
 visible feedback, or a source-grounded animation with clear ordered states. Playback alone does not
 count as a learning action. If a batch has no suitable interaction, explain the mechanism clearly in
-text and use a focused still figure. For simple motion, use
-native SMIL on the object itself, for example:
-`<circle cx="80" cy="80" r="12"><animate attributeName="cx" begin="0s" dur="4s" values="80;260;80" repeatCount="indefinite"/></circle>`.
-Animate only an allowed SVG geometry or appearance attribute; never animate labels. For a guide
-Source diagrams and
-tables attached to the request are evidence:
+text and use a focused still figure. For simple motion, use native SMIL on the object itself, for
+example:
+```xml
+<circle cx="80" cy="80" r="12">
+  <animate attributeName="cx" dur="4s" values="80;260"
+           keyTimes="0;1" repeatCount="1" fill="freeze"/>
+</circle>
+```
+Every `animate` and `animateTransform` needs a safe target attribute, an explicit bounded duration,
+and either at least two valid values or a valid `from`/`to` pair. If `values` has multiple phases,
+provide the same number of semicolon-separated `keyTimes`, starting at 0 and ending at 1. For a
+finite one-cycle process, set `repeatCount="1"` and `fill="freeze"` so the final state remains
+visible. Use `repeatCount="indefinite"` only for a real periodic process whose final value returns
+to its initial value. Animate only an allowed SVG geometry or appearance attribute; never animate
+labels. Source diagrams and tables attached to the request are evidence:
 inspect their labels and relationships, and do not replace them with a generic illustration.
 The browser displays only sanitized, script-free SVG; never include scripts, JavaScript, event
 handlers, embedded HTML, CSS/style attributes, external resources, or URLs. Do not invent source

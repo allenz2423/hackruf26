@@ -19,7 +19,8 @@ class SafeSvgTests(unittest.TestCase):
             </linearGradient>
           </defs>
           <circle id="ball" cx="10" cy="80" r="5" fill="url(#sky)">
-            <animate attributeName="cx" begin="0s" dur="4s" values="80;260;80" repeatCount="indefinite"/>
+            <animate attributeName="cx" begin="0s" dur="4s" values="80;260;80"
+                     repeatCount="indefinite"/>
           </circle>
         </svg>"""
 
@@ -33,6 +34,64 @@ class SafeSvgTests(unittest.TestCase):
         self.assertEqual(circle.get("fill"), "url(#sky)")
         self.assertIsNotNone(circle.find(f"{{{SVG_NAMESPACE}}}animate"))
         self.assertNotIn("onload", sanitized)
+
+    def test_finite_animation_gets_explicit_key_times_and_holds_its_end_state(self) -> None:
+        svg = f"""<svg xmlns="{SVG_NAMESPACE}" viewBox="0 0 100 100">
+          <circle cx="10" cy="50" r="5">
+            <animate attributeName="cx" dur="2s" values="10;70;90" repeatCount="1"/>
+          </circle>
+        </svg>"""
+
+        circle = ET.fromstring(sanitize_svg(svg)).find(f"{{{SVG_NAMESPACE}}}circle")
+        animation = circle.find(f"{{{SVG_NAMESPACE}}}animate")
+
+        self.assertIsNotNone(animation)
+        self.assertEqual(animation.get("keyTimes"), "0;0.5;1")
+        self.assertEqual(animation.get("fill"), "freeze")
+
+    def test_preserves_valid_semicolon_key_times_and_indefinite_loops(self) -> None:
+        svg = f"""<svg xmlns="{SVG_NAMESPACE}" viewBox="0 0 100 100">
+          <circle cx="10" cy="50" r="5">
+            <animate attributeName="cx" dur="2s" values="10;70;10"
+                     keyTimes="0;0.8;1" repeatCount="indefinite"/>
+          </circle>
+        </svg>"""
+
+        circle = ET.fromstring(sanitize_svg(svg)).find(f"{{{SVG_NAMESPACE}}}circle")
+        animation = circle.find(f"{{{SVG_NAMESPACE}}}animate")
+
+        self.assertIsNotNone(animation)
+        self.assertEqual(animation.get("keyTimes"), "0;0.8;1")
+        self.assertEqual(animation.get("repeatCount"), "indefinite")
+        self.assertIsNone(animation.get("fill"))
+
+    def test_drops_incomplete_animation_but_keeps_subject_geometry(self) -> None:
+        svg = f"""<svg xmlns="{SVG_NAMESPACE}" viewBox="0 0 100 100">
+          <rect x="10" y="10" width="20" height="20">
+            <animateTransform attributeName="transform" type="rotate" dur="3s"/>
+          </rect>
+        </svg>"""
+
+        rect = ET.fromstring(sanitize_svg(svg)).find(f"{{{SVG_NAMESPACE}}}rect")
+
+        self.assertIsNotNone(rect)
+        self.assertIsNone(rect.find(f"{{{SVG_NAMESPACE}}}animateTransform"))
+
+    def test_keeps_numeric_animate_transform_and_canonicalizes_it(self) -> None:
+        svg = f"""<svg xmlns="{SVG_NAMESPACE}" viewBox="0 0 100 100">
+          <rect x="10" y="10" width="20" height="20">
+            <animateTransform attributeName="transform" type="rotate" dur="3s"
+                              values="0 20 20;90 20 20"/>
+          </rect>
+        </svg>"""
+
+        rect = ET.fromstring(sanitize_svg(svg)).find(f"{{{SVG_NAMESPACE}}}rect")
+        animation = rect.find(f"{{{SVG_NAMESPACE}}}animateTransform")
+
+        self.assertIsNotNone(animation)
+        self.assertEqual(animation.get("values"), "0 20 20;90 20 20")
+        self.assertEqual(animation.get("keyTimes"), "0;1")
+        self.assertEqual(animation.get("fill"), "freeze")
 
     def test_drops_executable_markup_events_styles_and_external_references(self) -> None:
         svg = f"""<svg xmlns="{SVG_NAMESPACE}" viewBox="0 0 100 100">

@@ -248,6 +248,9 @@ MAX_STUDY_GUIDE_REVIEW_SOURCE_CHARS = 30_000
 STUDY_GUIDE_REVIEW_SECTION_BATCH_SIZE = 1
 MAX_ASSESSMENT_TEXT_CHARS = 250_000
 MAX_PDF_FILE_BYTES = 50 * 1024 * 1024
+MIN_NATIVE_PDF_TEXT_CHARS = 100
+MIN_NATIVE_PDF_PAGE_TEXT_CHARS = 20
+MIN_NATIVE_PDF_TEXT_PAGE_RATIO = 0.8
 SUPPORTED_SLIDE_IMAGE_MIME_TYPES = frozenset({"image/png", "image/jpeg"})
 STUDY_GUIDE_BATCH_OUTPUT_TOKENS = 12_000
 STUDY_GUIDE_RETRY_OUTPUT_TOKENS = 24_000
@@ -4626,16 +4629,30 @@ class GeminiContentService:
         if suffix == ".pdf":
             reader = PdfReader(str(path))
             page_texts = [page.extract_text() or "" for page in reader.pages]
-            pages = [
-                f"[Page {index}]\n{page_text}"
-                for index, page_text in enumerate(page_texts, start=1)
-            ]
-            text = "\n\n".join(pages).strip()
-            # Labels are not document text; a readable cover must not hide scanned pages.
-            if sum(len(page_text.strip()) for page_text in page_texts) >= 100 and all(
-                len(page_text.strip()) >= 20 for page_text in page_texts
+            native_text_chars = sum(len(page_text.strip()) for page_text in page_texts)
+            readable_page_count = sum(
+                len(page_text.strip()) >= MIN_NATIVE_PDF_PAGE_TEXT_CHARS
+                for page_text in page_texts
+            )
+            readable_page_ratio = readable_page_count / len(page_texts) if page_texts else 0.0
+            if (
+                native_text_chars >= MIN_NATIVE_PDF_TEXT_CHARS
+                and readable_page_ratio >= MIN_NATIVE_PDF_TEXT_PAGE_RATIO
             ):
-                return text
+                pages = []
+                for index, page_text in enumerate(page_texts, start=1):
+                    page_content = page_text.strip()
+                    if len(page_content) < MIN_NATIVE_PDF_PAGE_TEXT_CHARS:
+                        page_content = (
+                            "[No native text extracted; inspect the original page image "
+                            "as needed.]"
+                            if not page_content
+                            else page_content
+                            + "\n[Page may contain visual content; inspect the original "
+                            "page image as needed.]"
+                        )
+                    pages.append(f"[Page {index}]\n{page_content}")
+                return "\n\n".join(pages).strip()
             if path.stat().st_size > MAX_PDF_FILE_BYTES:
                 raise ContentGenerationFailure("Scanned PDFs must be 50 MiB or smaller.")
             return self._generate_from_file(

@@ -122,6 +122,27 @@ class PdfExtractionTests(unittest.TestCase):
         self.assertTrue(text.startswith("[Page 1]\nDetailed original facts"))
         vision.assert_not_called()
 
+    def test_mostly_readable_pdf_keeps_native_text_and_marks_sparse_pages(self):
+        pages = [
+            Mock(extract_text=Mock(return_value=f"Readable course page {index}. " * 8))
+            for index in range(1, 5)
+        ] + [Mock(extract_text=Mock(return_value=""))]
+        with (
+            patch(
+                "app.services.gemini_content.PdfReader", return_value=SimpleNamespace(pages=pages)
+            ),
+            patch.object(self.service, "_generate_from_file") as vision,
+        ):
+            text = self.service._extract_text(self.path, "notes", "application/pdf")
+
+        self.assertIn("[Page 1]\nReadable course page 1.", text)
+        self.assertIn(
+            "[Page 5]\n[No native text extracted; inspect the original page image "
+            "as needed.]",
+            text,
+        )
+        vision.assert_not_called()
+
 
 class PowerPointImageExtractionTests(unittest.TestCase):
     def setUp(self):

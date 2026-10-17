@@ -117,7 +117,8 @@ function safeAttribute(name, value, tag) {
   if (text.length > 20_000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(text)) return false;
   if (name === "id" || name === "result") return /^[A-Za-z_][A-Za-z\d_.:-]{0,95}$/.test(text);
   if (name === "d" || name === "path") return text.length <= 20_000 && PATH.test(text) && boundedNumericTokens(text);
-  if (["points", "viewBox", "keyTimes", "keySplines", "tableValues", "rotate"].includes(name)) return NUMBER_LIST.test(text) && boundedNumericTokens(text);
+  if (name === "keyTimes") return parseKeyTimes(text) !== null;
+  if (["points", "viewBox", "keySplines", "tableValues", "rotate"].includes(name)) return NUMBER_LIST.test(text) && boundedNumericTokens(text);
   if (["transform", "gradientTransform", "patternTransform"].includes(name)) return safeTransform(text);
   if (LENGTH_ATTRS.has(name)) return numericLength(text, name);
   if (["fill", "stroke", "stop-color", "flood-color", "color"].includes(name)) {
@@ -158,9 +159,81 @@ function safeAnimationValues(source, name, value) {
   if (["fill", "stroke"].includes(attribute)) {
     return values.every((item) => COLOR.test(item.trim()) || /^url\(\s*#[A-Za-z_][\w.:-]*\s*\)$/.test(item.trim()));
   }
+  if (source.localName === "animateTransform") {
+    const expectedLengths = {
+      translate: new Set([1, 2]), scale: new Set([1, 2]), rotate: new Set([1, 3]),
+      skewX: new Set([1]), skewY: new Set([1])
+    }[source.getAttribute("type")];
+    return Boolean(expectedLengths && values.every((item) => {
+      const trimmed = item.trim();
+      const count = trimmed.match(new RegExp(NUMBER, "g"))?.length || 0;
+      return NUMBER_LIST.test(trimmed) && expectedLengths.has(count) && boundedNumericTokens(trimmed);
+    }));
+  }
   if (attribute === "transform") return values.every(safeTransform);
   if (attribute === "d") return values.every((item) => PATH.test(item.trim()) && boundedNumericTokens(item.trim()));
   return values.every((item) => NUMBER_LIST.test(item.trim()) && boundedNumericTokens(item.trim()));
+}
+
+function parseKeyTimes(value, expectedCount = null) {
+  const parts = String(value).split(";");
+  if (parts.length < 2 || (expectedCount !== null && parts.length !== expectedCount)) return null;
+  const times = parts.map((item) => Number(item.trim()));
+  if (!times.every((item) => Number.isFinite(item) && item >= 0 && item <= 1)
+    || times[0] !== 0 || times.at(-1) !== 1
+    || times.some((item, index) => index > 0 && times[index - 1] > item)) return null;
+  return times;
+}
+
+function animationIsComplete(source) {
+  const tag = source.localName;
+  const attribute = source.getAttribute("attributeName") || "";
+  const values = source.getAttribute("values");
+  if (tag === "set") {
+    const targetValue = source.getAttribute("to") || "";
+    return SAFE_ANIMATED.has(attribute) && safeAnimationValues(source, "to", targetValue);
+  }
+  if (tag === "animateMotion") {
+    const duration = source.getAttribute("dur") || "";
+    const path = source.getAttribute("path") || "";
+    const linkedPath = source.querySelector("mpath[href]");
+    return safeAttribute("dur", duration, tag)
+      && ((path && safeAttribute("path", path, tag)) || (linkedPath && safeAttribute("href", linkedPath.getAttribute("href"), "mpath")));
+  }
+  if (!SAFE_ANIMATED.has(attribute) || !safeAttribute("dur", source.getAttribute("dur") || "", tag)) return false;
+  if (tag === "animateTransform") {
+    if (attribute !== "transform") return false;
+    if (values) return values.split(";").length >= 2 && safeAnimationValues(source, "values", values);
+    const from = source.getAttribute("from") || "";
+    const to = source.getAttribute("to") || "";
+    return Boolean(from && to && safeAnimationValues(source, "from", from) && safeAnimationValues(source, "to", to));
+  }
+  if (values) return values.split(";").length >= 2 && safeAnimationValues(source, "values", values);
+  const from = source.getAttribute("from") || "";
+  const to = source.getAttribute("to") || "";
+  const by = source.getAttribute("by") || "";
+  return Boolean(
+    (from && to && safeAnimationValues(source, "from", from) && safeAnimationValues(source, "to", to))
+    || (from && by && safeAnimationValues(source, "from", from) && safeAnimationValues(source, "by", by))
+    || (to && by && safeAnimationValues(source, "to", to) && safeAnimationValues(source, "by", by))
+    || (by && !from && !to && safeAnimationValues(source, "by", by))
+  );
+}
+
+function canonicalizeAnimation(source, output) {
+  const values = source.getAttribute("values");
+  if (values) {
+    const count = values.split(";").length;
+    const keyTimes = parseKeyTimes(output.getAttribute("keyTimes") || "", count);
+    if (!keyTimes) {
+      output.setAttribute("keyTimes", Array.from({ length: count }, (_, index) => (index / (count - 1)).toString()).join(";"));
+    }
+  }
+  if (!output.hasAttribute("fill")
+    && source.getAttribute("repeatCount") !== "indefinite"
+    && source.getAttribute("repeatDur") !== "indefinite") {
+    output.setAttribute("fill", "freeze");
+  }
 }
 
 function prefixReferences(value, idMap) {
@@ -211,6 +284,7 @@ export function sanitizeSvgMarkup(markup, { idPrefix = "guide-svg", altText = ""
       if (child.nodeType !== 1 || (child.namespaceURI !== SVG_NS && child.namespaceURI)) continue;
       const tag = child.localName;
       if (!ALLOWED_TAGS.has(tag)) continue;
+      if (ANIMATION_TAGS.has(tag) && !animationIsComplete(child)) continue;
       nodeCount += 1;
       if (nodeCount > MAX_ELEMENTS) return;
       const safeChild = outputDoc.createElementNS(SVG_NS, tag);
@@ -239,6 +313,7 @@ export function sanitizeSvgMarkup(markup, { idPrefix = "guide-svg", altText = ""
         }
         safeChild.setAttribute(name, prefixReferences(value, ids));
       }
+      if (ANIMATION_TAGS.has(tag)) canonicalizeAnimation(child, safeChild);
       output.appendChild(safeChild);
       cloneNode(child, safeChild, depth + 1);
     }
