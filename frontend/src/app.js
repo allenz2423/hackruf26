@@ -38,9 +38,11 @@ import { renderGuestStudy } from "./guest-study.js";
 import { clearUploadedFiles, deleteUploadedFile, deleteUploadedFiles } from "./file-store.js";
 import { escapeHtml, openDialog, toast } from "./ui.js";
 import { classBadge, classColor, classInitial, openClassEditor } from "./class-style.js";
+import { getClassDisplayCounts } from "./class-counts.js";
 import {
   getCurrentUser,
   getStudyMaterialDetailApi,
+  getMyStudyMaterialsApi,
   getUploadsApi,
   getAuthOptions,
   signIn,
@@ -460,8 +462,26 @@ async function renderClasses() {
     return;
   }
   const classes = getClasses();
-  const totalUploads = classes.reduce((sum, klass) => sum + (klass.uploads?.length || 0), 0);
-  const totalMaterials = classes.reduce((sum, klass) => sum + (klass.materials?.length || 0), 0);
+  const personalMaterialCounts = new Map();
+  if (classes.some((klass) => getBackendClassId(klass))) {
+    try {
+      const personalMaterials = await getMyStudyMaterialsApi();
+      for (const material of personalMaterials) {
+        const originClassId = String(material.origin_class_id || "");
+        if (originClassId) {
+          personalMaterialCounts.set(originClassId, (personalMaterialCounts.get(originClassId) || 0) + 1);
+        }
+      }
+    } catch {
+      // The class overview can still render with server class counts if personal
+      // material counts are temporarily unavailable.
+    }
+  }
+  const classCounts = classes.map((klass) =>
+    getClassDisplayCounts(klass, getBackendClassId(klass), personalMaterialCounts)
+  );
+  const totalUploads = classCounts.reduce((sum, counts) => sum + counts.uploads, 0);
+  const totalMaterials = classCounts.reduce((sum, counts) => sum + counts.materials, 0);
 
   shell(`
     <section>
@@ -503,8 +523,7 @@ async function renderClasses() {
         <button class="btn btn-primary" type="button" data-new-class>${icon("plus", { size: 18 })} Create your first class</button>
       </div>`;
   } else grid.innerHTML = classes.map((klass, index) => {
-    const uploads = klass.uploads?.length || 0;
-    const materials = klass.materials?.length || 0;
+    const { uploads, materials } = classCounts[index];
     return `
     <article class="class-card" style="--class-color: ${escapeHtml(classColor(klass))}">
       <a href="#/classes/${encodeURIComponent(klass.id)}/library" class="class-card-main">

@@ -6616,6 +6616,7 @@ p {
   justify-items: center;
   gap: var(--space-5);
   width: min(440px, 100%);
+  min-width: 0;
 }
 
 .auth-screen .brand {
@@ -6629,7 +6630,18 @@ p {
 }
 
 .auth-screen .login-card {
+  grid-template-columns: minmax(0, 1fr);
   width: 100%;
+  min-width: 0;
+}
+
+.auth-screen .login-form {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+.auth-screen .password-row {
+  min-width: 0;
 }
 
 .auth-back {
