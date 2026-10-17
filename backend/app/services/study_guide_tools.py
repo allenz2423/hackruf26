@@ -45,10 +45,27 @@ GUIDE_TOOLS: tuple[GuideTool, ...] = (
             "viewBox, and draw with paths, shapes, lines, text, groups, reusable local defs, "
             "gradients, markers, clipping, masks, and bounded filters as useful. Include a "
             "`title` and `desc` inside the SVG, label axes/parts/vectors clearly, and keep "
-            "critical labels readable at normal page width. You may use native SMIL `animate`, "
-            "`animateTransform`, `animateMotion`, or `set` for a conceptually meaningful "
-            "animation; use time-based starts and a clear static starting frame. The reader "
-            "adds play, pause, and restart controls, and print exports use the static frame. "
+            "critical labels readable in a 360 CSS-pixel-wide card. Prefer a 360-unit-wide "
+            "viewBox: use about 18–22 units for primary labels and 15–18 for secondary labels. "
+            "If the viewBox is 720 units wide, double those sizes. Use concise callouts instead "
+            "of paragraphs, simplify crowded compositions, and avoid an extra page border inside "
+            "the card. Use the smallest practical viewBox with about 5–10% margins; crop unused "
+            "vertical space instead of making a simple diagram fill a tall card. Treat each arrow "
+            "as a precise graph edge: connect the intended source and destination, label every "
+            "branch outcome, and trace each route from start to finish so a branch is not mistaken "
+            "for a sequential step. Put markers on the exact point, endpoint, intersection, or "
+            "extremum they describe. The external `alt_text` briefly describes the visible structure; "
+            "`fallback_text` explains the concept or what the learner should notice, stays within "
+            "one or two sentences (about 20–35 words), and must not repeat the alt text. You may "
+            "use native SMIL `animate`, `animateTransform`, `animateMotion`, or `set` for a "
+            "conceptually meaningful animation; use a clear still state at time zero, fixed labels, "
+            "and one moving relationship or object at a time. For simple motion, use native SMIL "
+            "on the object itself, e.g. `<circle cx=\"80\" cy=\"80\" r=\"12\"><animate "
+            "attributeName=\"cx\" begin=\"0s\" dur=\"4s\" values=\"80;260;80\" "
+            "repeatCount=\"indefinite\"/></circle>`. Animate only an allowed geometry or "
+            "appearance attribute; never animate labels."
+            "The reader starts paused at time zero and adds play, pause, and restart controls; "
+            "print exports use the static frame. "
             "SVG is declarative drawing data, not executable code: never include `script`, "
             "event-handler attributes, `foreignObject`, `image`, links, `<style>`, a `style` "
             "attribute, external resources, JavaScript, or URLs. Local `url(#id)` references "
@@ -251,10 +268,31 @@ GUIDE_TOOLS: tuple[GuideTool, ...] = (
 
 _BY_ID = {tool.id: tool for tool in GUIDE_TOOLS}
 
+_SUBJECT_HINTS: dict[GuideToolId, str] = {
+    "custom_svg": "any subject",
+    "math_graph": "mathematics, statistics, economics, physics",
+    "vector_components": "physics, mechanical and civil engineering",
+    "response_plot": "physics and engineering time responses",
+    "molecule_diagram": "chemistry and biochemistry",
+    "cell_biology": "biology, anatomy, and cell biology",
+    "process_pathway": "biology, chemistry, medicine, and ordered processes",
+    "circuit_divider": "electrical engineering circuits",
+    "algorithm_trace": "computer science search algorithms",
+    "sampling_basics": "statistics, biology, psychology, and public health",
+    "graph_traversal": "computer science and network concepts",
+    "stress_cube_3d": "mechanical, civil, and materials engineering",
+    "molecule_3d": "chemistry and molecular geometry",
+    "python_algorithm": "computer science programming concepts",
+    "simcir_circuit": "electrical engineering and digital logic",
+}
+
 
 def guide_tool_catalog_prompt() -> str:
     """Return the short always-on catalog; full usage details stay opt-in to save context."""
-    lines = [f"- {tool.id}: {tool.purpose}" for tool in GUIDE_TOOLS]
+    lines = [
+        f"- {tool.id}: {tool.name} (fits {_SUBJECT_HINTS[tool.id]}): {tool.purpose}"
+        for tool in GUIDE_TOOLS
+    ]
     return "Available activity tools (brief catalog):\n" + "\n".join(lines)
 
 

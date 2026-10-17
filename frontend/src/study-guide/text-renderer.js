@@ -37,22 +37,51 @@ export function renderStudyGuideText(value) {
   const lines = String(value ?? "").split(/\r?\n/u);
   const output = [];
   let paragraph = [];
+  let listTag = "";
+
+  const inlineMarkdown = (text) => {
+    const replacements = [];
+    const token = (markup) => {
+      const placeholder = `JOTINLINE${replacements.length}TOKEN`;
+      replacements.push([placeholder, markup]);
+      return placeholder;
+    };
+
+    // Protect code before parsing emphasis so operators such as `**` stay literal.
+    let source = String(text).replace(/(?<!`)`([^`\n]+)`(?!`)/gu, (_match, code) =>
+      token(`<code class="guide-inline-code">${escapeHtml(code)}</code>`)
+    );
+    source = source.replace(/\*\*(.+?)\*\*/gu, (_match, content) =>
+      token(`<strong>${mathHtml(content)}</strong>`)
+    );
+
+    let rendered = mathHtml(source);
+    for (const [placeholder, markup] of [...replacements].reverse()) {
+      rendered = rendered.replaceAll(placeholder, markup);
+    }
+    return rendered;
+  };
 
   const flushParagraph = () => {
-    const content = paragraph.join("\n").trim();
+    const content = paragraph.join(" ").trim();
     paragraph = [];
-    if (content) output.push(`<p>${mathHtml(content).replace(/\n/g, "<br>")}</p>`);
+    if (content) output.push(`<p>${inlineMarkdown(content)}</p>`);
+  };
+
+  const closeList = () => {
+    if (!listTag) return;
+    output.push(`</${listTag}>`);
+    listTag = "";
   };
 
   for (let index = 0; index < lines.length; index += 1) {
     const fence = openingFence(lines[index]);
     if (fence) {
       flushParagraph();
+      closeList();
       const codeLines = [];
-      let foundClosingFence = false;
       while (++index < lines.length) {
         if (isClosingFence(lines[index], fence)) {
-          foundClosingFence = true;
           break;
         }
         codeLines.push(lines[index]);
@@ -64,14 +93,31 @@ export function renderStudyGuideText(value) {
       } else {
         output.push(renderCodeBlock(code, language));
       }
-      if (!foundClosingFence) break;
+    } else if (/^\s*(?:[-*+] |\d+[.)] )/u.test(lines[index])) {
+      flushParagraph();
+      const ordered = /^\s*\d+[.)] /u.test(lines[index]);
+      const nextTag = ordered ? "ol" : "ul";
+      if (listTag !== nextTag) {
+        closeList();
+        listTag = nextTag;
+        output.push(`<${listTag}>`);
+      }
+      const item = lines[index].replace(/^\s*(?:[-*+] |\d+[.)] )/u, "");
+      output.push(`<li>${inlineMarkdown(item)}</li>`);
+    } else if (/^\s*#{1,4}\s+\S/u.test(lines[index])) {
+      flushParagraph();
+      closeList();
+      const heading = lines[index].trim().replace(/^#{1,4}\s+/u, "").replace(/\s+#+$/u, "");
+      output.push(`<h4 class="guide-inline-heading">${inlineMarkdown(heading)}</h4>`);
     } else if (!lines[index].trim()) {
       flushParagraph();
+      closeList();
     } else {
       paragraph.push(lines[index]);
     }
   }
 
   flushParagraph();
+  closeList();
   return output.join("");
 }

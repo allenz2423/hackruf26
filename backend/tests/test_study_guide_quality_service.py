@@ -2040,7 +2040,10 @@ class StudyGuideQualityServiceTests(unittest.TestCase):
         self.assertEqual(result["sections"][0]["blocks"][1]["parameters"]["slope"], 2.0)
 
     def test_oversized_guide_repairs_in_small_batches_with_size_limits(self) -> None:
-        verbose = "Detailed source-supported explanation. " * 180
+        # Keep each field under its schema limit while the whole guide exceeds
+        # the current 400,000-character limit, making the reduction measurable.
+        verbose = ("Detailed source-supported explanation. " * 220)[:9_500]
+        section_count = 50
         candidate = {
             "format": "study_guide",
             "schema_version": 2,
@@ -2050,7 +2053,7 @@ class StudyGuideQualityServiceTests(unittest.TestCase):
                     heading=f"Topic {index + 1}",
                     text=verbose,
                 ).model_dump(mode="json", exclude_none=True)
-                for index in range(20)
+                for index in range(section_count)
             ],
         }
         responses = [
@@ -2064,7 +2067,7 @@ class StudyGuideQualityServiceTests(unittest.TestCase):
                     )
                 ]
             )
-            for index in range(20)
+            for index in range(section_count)
         ]
         self.service._generate_json = Mock(side_effect=responses)
 
@@ -2080,12 +2083,14 @@ class StudyGuideQualityServiceTests(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(len(result["sections"]), 20)
-        self.assertEqual(self.service._generate_json.call_count, 20)
+        self.assertEqual(len(result["sections"]), section_count)
+        self.assertEqual(self.service._generate_json.call_count, section_count)
         for call in self.service._generate_json.call_args_list:
             prompt = call.args[0]
-            self.assertIn("100,000 text characters", prompt)
+            self.assertIn("400,000 text characters", prompt)
+            self.assertIn("512,000 serialized JSON bytes", prompt)
             self.assertIn("reduce about", prompt)
+            self.assertNotIn("reduce about 0 characters", prompt)
             self.assertIn("text_size_exceeded", prompt)
             self.assertNotIn('"sections":', prompt)
 

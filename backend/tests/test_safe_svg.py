@@ -19,7 +19,7 @@ class SafeSvgTests(unittest.TestCase):
             </linearGradient>
           </defs>
           <circle id="ball" cx="10" cy="80" r="5" fill="url(#sky)">
-            <animate attributeName="cx" from="10" to="190" dur="2s" repeatCount="indefinite"/>
+            <animate attributeName="cx" begin="0s" dur="4s" values="80;260;80" repeatCount="indefinite"/>
           </circle>
         </svg>"""
 

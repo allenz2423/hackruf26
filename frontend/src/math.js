@@ -399,6 +399,13 @@ function findBareEquationEnd(text, start) {
     break;
   }
   const candidate = text.slice(start, index).trim().replace(/[.,;:]+$/, "");
+  // Short words followed by hyphens can look like equation prefixes when the
+  // scanner stops at the next prose word ("six-carbon", "non-reducing"). A
+  // bare operator needs a right-hand operand; multi-letter hyphenated words
+  // are prose unless explicitly marked as math.
+  if (!candidate
+    || (/[=+\-−*/×÷<>≤≥≠≈≡∝]$/u.test(candidate) && !/\^\s*[+\-]$/u.test(candidate))
+    || /^[\p{L}]{2,}(?:-[\p{L}]{2,})+$/u.test(candidate)) return -1;
   if (!hasOperator || !hasValue || candidate.length < 3) return -1;
   return start + candidate.length;
 }

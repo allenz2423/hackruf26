@@ -585,7 +585,10 @@ class MajorGuideActivityFallbackAndExportTests(unittest.TestCase):
         for marker in (
             "Majoractivityexamples",
             "stress_cube_3d_v1",
-            "142.09 MPa",
+            # Tectonic extracts math-mode unit letters with Unicode math fonts
+            # and spacing (``142.09𝑀 𝑃 𝑎``); the source-level test above checks
+            # the full value/unit expression in generated LaTeX.
+            "142.09",
             "AND",
             "SUM",
             "CARRY",

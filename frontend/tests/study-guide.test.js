@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { normalizeGuideBlocks } from "../src/study-guide/normalize.js";
 import { mountAdditionalGuideBlocks } from "../src/study-guide/activity-blocks.js";
 import { mountStudyGuideBlocks, renderStudyGuideBlock } from "../src/study-guide/force-components.js";
+import { renderStudyGuideText } from "../src/study-guide/text-renderer.js";
 import { formatRemoteMaterial } from "../src/study.js";
 import { openMaterialViewer, parseGuideSections } from "../src/material-viewer.js";
 
@@ -100,6 +101,20 @@ test("failed guide viewer labels provisional content and offers no exports", () 
   }
 });
 
+test("a source filename is human-readable in material metadata while citation names stay exact", () => {
+  const originalName = "BIO_170_Comprehensive_Master_Study_Guide.pdf";
+  const material = formatRemoteMaterial({
+    id: "guide-1",
+    kind: "study_guide",
+    status: "ready",
+    scope: { kind: "uploads", upload_ids: ["upload-1"] },
+    content: { format: "study_guide", schema_version: 2, sections: [] }
+  }, "class-1", "Study guide", [{ id: "upload-1", isRemote: true, name: originalName }]);
+
+  assert.equal(material.scope, "BIO 170 Comprehensive Master Study Guide.pdf");
+  assert.equal(material.sources[0], originalName);
+});
+
 test("malformed and oversized structured sections fall back to their body", () => {
   for (const blocks of [
     [{ type: "paragraph", text: "valid" }, { type: "unknown", text: "bad" }],
@@ -135,6 +150,144 @@ test("labeled Markdown math fences still render as math blocks", () => {
   assert.match(html, /class="guide-fenced-math"/);
   assert.match(html, /class="tex-math is-display"/);
   assert.doesNotMatch(html, /guide-code-window/);
+});
+
+test("study guide Markdown creates readable structure without interpreting code as formatting", () => {
+  const html = renderStudyGuideText([
+    "### Core idea",
+    "",
+    "Use **bold emphasis** and keep this wrapped",
+    "onto a natural next line. The expression **$H_2O$** stays emphasized.",
+    "",
+    "1. Compare the cases",
+    "2. Identify `mask = a ** b` literally",
+    "",
+    "- First comparison",
+    "- Second comparison",
+    "",
+    "Do not render <img src=x onerror=alert(1)> as HTML."
+  ].join("\n"));
+
+  assert.match(html, /<h4 class="guide-inline-heading">Core idea<\/h4>/);
+  assert.match(html, /<strong>bold emphasis<\/strong>/);
+  assert.match(html, /<strong><span class="tex-math/);
+  assert.match(html, /<ol><li>Compare the cases<\/li><li>Identify <code class="guide-inline-code">mask = a \*\* b<\/code> literally<\/li><\/ol>/);
+  assert.match(html, /<ul><li>First comparison<\/li><li>Second comparison<\/li><\/ul>/);
+  assert.match(html, /wrapped onto a natural next line/);
+  assert.doesNotMatch(html, /<br>/);
+  assert.doesNotMatch(html, /<img src=/);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+});
+
+test("an unterminated code fence remains visible instead of hiding the rest of a guide block", () => {
+  const html = renderStudyGuideText("```js\nconst result = 1;\n// final line");
+  assert.match(html, /class="guide-code-window"/);
+  assert.match(html, /const result = 1;/);
+  assert.match(html, /\/\/ final line/);
+});
+
+test("long study guides render a section contents navigator with matching targets", () => {
+  class FakeElement {
+    constructor() { this.textContent = ""; this.innerHTML = ""; this.scrollTop = 0; }
+    addEventListener() {}
+    querySelectorAll() { return []; }
+    querySelector() { return null; }
+  }
+  class FakeDialog extends FakeElement {
+    constructor() {
+      super();
+      this.open = false;
+      this.root = new FakeElement();
+      this.title = new FakeElement();
+      this.meta = new FakeElement();
+      this.closeButton = new FakeElement();
+    }
+    setAttribute() {}
+    showModal() { this.open = true; }
+    remove() {}
+    querySelector(selector) {
+      return {
+        "#material-session": this.root,
+        "#material-dialog-title": this.title,
+        "#material-dialog-meta": this.meta,
+        "[data-close]": this.closeButton
+      }[selector] || null;
+    }
+  }
+
+  const priorDocument = globalThis.document;
+  globalThis.document = {
+    createElement: () => new FakeDialog(),
+    body: { append() {} },
+    addEventListener() {},
+    removeEventListener() {}
+  };
+  try {
+    const sections = Array.from({ length: 6 }, (_, index) => ({
+      heading: `Section ${index + 1}`,
+      body: `Content ${index + 1}.`,
+      sources: []
+    }));
+    const viewer = openMaterialViewer({
+      id: "guide:bio/1",
+      title: "BIO Guide",
+      scope: "BIO 170",
+      type: "Study guide",
+      status: "ready",
+      sections,
+      isRemote: false
+    });
+    assert.match(viewer.dialog.root.innerHTML, /<nav class="guide-toc"/);
+    assert.match(viewer.dialog.root.innerHTML, /aria-label="Study guide sections"/);
+    for (let index = 1; index <= sections.length; index += 1) {
+      const target = `guide-guide-bio-1-section-${index}`;
+      assert.match(viewer.dialog.root.innerHTML, new RegExp(`href="#${target}"`));
+      assert.match(viewer.dialog.root.innerHTML, new RegExp(`id="${target}"`));
+    }
+  } finally {
+    if (priorDocument === undefined) delete globalThis.document;
+    else globalThis.document = priorDocument;
+  }
+});
+
+test("custom SVG animations start at time zero and wait for the learner to play", () => {
+  const events = [];
+  const svg = {
+    style: {},
+    pauseAnimations() { events.push("pause"); },
+    unpauseAnimations() { events.push("play"); },
+    setCurrentTime(time) { events.push(`time:${time}`); }
+  };
+  const makeButton = () => ({
+    disabled: false,
+    listeners: {},
+    addEventListener(event, callback) { this.listeners[event] = callback; },
+    click() { this.listeners.click?.(); }
+  });
+  const buttons = {
+    "[data-svg-play]": makeButton(),
+    "[data-svg-pause]": makeButton(),
+    "[data-svg-restart]": makeButton(),
+    "[data-svg-zoom-out]": makeButton(),
+    "[data-svg-zoom-in]": makeButton(),
+    "[data-svg-zoom-reset]": makeButton(),
+    "[data-svg-zoom-status]": { textContent: "" }
+  };
+  const controls = { querySelector: (selector) => buttons[selector] || null };
+  const card = {
+    dataset: { guideActivity: "svg_diagram" },
+    querySelector(selector) {
+      if (selector === "[data-authored-svg] svg") return svg;
+      if (selector === ".authored-svg-controls") return controls;
+      return null;
+    }
+  };
+  mountAdditionalGuideBlocks({ querySelectorAll: () => [card] });
+  assert.deepEqual(events, ["pause", "time:0"]);
+  buttons["[data-svg-play]"].click();
+  buttons["[data-svg-pause]"].click();
+  buttons["[data-svg-restart]"].click();
+  assert.deepEqual(events, ["pause", "time:0", "play", "pause", "time:0", "play"]);
 });
 
 test("all fixed visual templates normalize and render without generated markup", () => {
@@ -585,6 +738,8 @@ test("force model updates its vector components and prediction feedback locally"
 
 test("interactive layouts collapse to one column on narrow screens", async () => {
   const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
-  assert.match(css, /@media \(max-width: 700px\)\s*\{\s*\.activity-layout\s*\{\s*grid-template-columns:\s*minmax\(0, 1fr\);/);
+  const layoutRule = css.indexOf(".activity-layout {\n    grid-template-columns: minmax(0, 1fr);");
+  assert.notEqual(layoutRule, -1);
+  assert.notEqual(css.lastIndexOf("@media (max-width: 700px)", layoutRule), -1);
   assert.match(css, /@media \(max-width: 700px\)\s*\{[\s\S]*?\.force-model-layout\s*\{\s*grid-template-columns:\s*minmax\(0, 1fr\);/);
 });

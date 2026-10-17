@@ -184,6 +184,7 @@ function guideSectionSources(section, blocks) {
 
 function renderGuide(root, material, onRetry = null) {
   const sections = parseGuideSections(material);
+  const anchorPrefix = `guide-${String(material.id || "local").replace(/[^a-zA-Z0-9_-]/gu, "-")}`;
   const flashcardsAvailable = normalizeCards(material).length > 0;
   const questionsAvailable = (material.items?.length || material.questions?.length || 0) > 0;
 
@@ -222,6 +223,21 @@ function renderGuide(root, material, onRetry = null) {
       ` : ""}
     </div>
 
+    ${sections.length > 4 ? `
+      <nav class="guide-toc" aria-label="Study guide sections" data-guide-toc>
+        <details>
+          <summary><span>Contents</span><span class="guide-toc-count">${sections.length} sections</span></summary>
+          <ol class="guide-toc-list">
+            ${sections.map((section, idx) => `
+              <li><a href="#${anchorPrefix}-section-${idx + 1}" data-guide-toc-link>
+                ${mathHtml(section.heading || `Section ${idx + 1}`)}
+              </a></li>
+            `).join("")}
+          </ol>
+        </details>
+      </nav>
+    ` : ""}
+
     <article class="guide-content">
       ${sections.length > 0 ? `
         <div class="guide-sections-list">
@@ -229,7 +245,7 @@ function renderGuide(root, material, onRetry = null) {
             const blocks = normalizeGuideBlocks(section, idx);
             const sources = guideSectionSources(section, blocks);
             return `
-            <section class="guide-section" data-guide-section="${escapeHtml(section.id || `section-${idx + 1}`)}">
+            <section id="${anchorPrefix}-section-${idx + 1}" class="guide-section" data-guide-section="${escapeHtml(section.id || `section-${idx + 1}`)}" tabindex="-1">
               <h3 class="guide-section-heading">${mathHtml(section.heading || `Section ${idx + 1}`)}</h3>
               <div class="guide-section-blocks">
                 ${blocks.map((block) => `<div class="guide-section-block" data-guide-block="${escapeHtml(block.id)}">${renderStudyGuideBlock(block)}</div>`).join("")}
@@ -263,6 +279,12 @@ function renderGuide(root, material, onRetry = null) {
       `}
     </article>
   `;
+  root.querySelectorAll("[data-guide-toc-link]").forEach((link) => {
+    link.addEventListener("click", () => {
+      const details = link.closest("details");
+      if (details) details.open = false;
+    });
+  });
   mountStudyGuideBlocks(root);
   void typesetMath(root);
   bindSourceCitations(root, material);

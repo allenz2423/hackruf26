@@ -65,10 +65,29 @@ class SvgPreviewRendererTests(unittest.TestCase):
         self.assertEqual(result, output)
         self.assertEqual(run.call_args.args[0][0], "/usr/bin/rsvg-convert")
         self.assertIn("--width=1280", run.call_args.args[0])
-        self.assertIn("--height=960", run.call_args.args[0])
+        self.assertIn("--height=640", run.call_args.args[0])
         self.assertNotIn(b"<script", run.call_args.kwargs["input"])
         self.assertIn(b"Safe", run.call_args.kwargs["input"])
         self.assertEqual(run.call_args.kwargs["timeout"], 12)
+
+    def test_requested_mobile_preview_uses_the_phone_card_scale(self) -> None:
+        output = png_bytes(360, 180)
+        with (
+            patch("app.services.study_guide_visual_preview.shutil.which", return_value="rsvg-convert"),
+            patch(
+                "app.services.study_guide_visual_preview.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout=output, stderr=b""),
+            ) as run,
+        ):
+            rendered = render_svg_preview_png(
+                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 10"/>',
+                max_width=360,
+                max_height=420,
+            )
+
+        self.assertEqual(rendered, output)
+        self.assertIn("--width=360", run.call_args.args[0])
+        self.assertIn("--height=180", run.call_args.args[0])
 
     def test_fails_closed_when_renderer_is_missing_or_png_is_invalid(self) -> None:
         with patch("app.services.study_guide_visual_preview.shutil.which", return_value=None):
@@ -163,13 +182,17 @@ class StudyGuideVisualSelfPreviewTests(unittest.TestCase):
         with patch(
             "app.services.gemini_content.render_svg_preview_png",
             side_effect=[b"original rendered preview", b"corrected rendered preview"],
-        ):
+        ) as render_preview:
             result = self.service._self_preview_study_guide_svgs(sections)
 
         self.assertIs(result, sections)
         self.assertIn("Corrected", sections[0]["blocks"][0]["svg"])
         self.assertEqual(sections[0]["blocks"][1]["text"], "The explanation remains intact.")
         self.assertEqual(self.service._generate_json.call_count, 2)
+        self.assertEqual(render_preview.call_count, 2)
+        for call in render_preview.call_args_list:
+            self.assertEqual(call.kwargs["max_width"], 360)
+            self.assertEqual(call.kwargs["max_height"], 420)
         for call in self.service._generate_json.call_args_list:
             parts = call.args[0]
             self.assertIn("visual self-preview", parts[0].lower())

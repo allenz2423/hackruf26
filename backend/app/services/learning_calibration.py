@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -292,7 +293,11 @@ async def question_bank_replenishment_wait_seconds(database: SQLiteDatabase) -> 
     )
     if seconds is None:
         return 900.0
-    return min(900.0, max(2.0, float(seconds)))
+    # SQLite's Julian-day subtraction can round a just-created whole-second
+    # deadline a few microseconds high. Truncate to millisecond precision so
+    # the worker never sleeps beyond the persisted due time due to that error.
+    bounded_milliseconds = math.floor(float(seconds) * 1000.0) / 1000.0
+    return min(900.0, max(2.0, bounded_milliseconds))
 
 
 async def process_question_bank_replenishment_jobs(application: Any, limit: int = 1) -> int:

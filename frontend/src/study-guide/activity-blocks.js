@@ -377,7 +377,7 @@ function authoredSvgCard(block) {
     : "";
   return `<section class="study-interactive-model authored-svg-model" data-guide-activity="svg_diagram" data-activity-id="${id}" aria-labelledby="${id}-title">
     <div class="activity-heading"><h4 id="${id}-title">${mathHtml(block.title)}</h4></div>
-    <figure class="authored-svg-figure"><div id="${id}-frame" class="authored-svg-frame" data-authored-svg>${markup}</div><figcaption>${escapeHtml(block.alt_text)}</figcaption></figure>
+    <figure class="authored-svg-figure"><div id="${id}-frame" class="authored-svg-frame" data-authored-svg>${markup}</div><figcaption>${mathHtml(block.fallback_text)}</figcaption></figure>
     <div class="authored-svg-controls" role="group" aria-label="Diagram and animation controls" aria-controls="${id}-frame">
       ${animationControls}
       <button class="btn btn-secondary btn-small" type="button" data-svg-zoom-out aria-label="Zoom out of diagram" title="Zoom out" disabled>−</button>
@@ -385,7 +385,6 @@ function authoredSvgCard(block) {
       <button class="btn btn-secondary btn-small" type="button" data-svg-zoom-in aria-label="Zoom in on diagram" title="Zoom in">+</button>
       <button class="btn btn-secondary btn-small" type="button" data-svg-zoom-reset>Reset view</button>
     </div>
-    <p class="activity-intro">${mathHtml(block.fallback_text)}</p>
   </section>`;
 }
 
@@ -936,6 +935,10 @@ function mountAuthoredSvg(card) {
       svg.setCurrentTime(0);
       svg.unpauseAnimations();
     };
+    // Begin from a legible still frame so students can inspect the diagram before
+    // deciding to play the process. This also makes repeated visits predictable.
+    pause();
+    svg.setCurrentTime(0);
     animationButtons[0]?.addEventListener("click", play);
     animationButtons[1]?.addEventListener("click", pause);
     animationButtons[2]?.addEventListener("click", restart);

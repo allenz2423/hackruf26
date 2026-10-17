@@ -150,8 +150,9 @@ export function formatRemoteMaterial(detail, klassId, uiTypeFallback, uploads = 
 
   const sourceIds = new Set(detail.scope?.upload_ids || []);
   const sourceNames = uploads.filter((upload) => sourceIds.has(getBackendUploadId(upload))).map((upload) => upload.name);
+  const displaySourceName = (name) => String(name || "").replace(/_/gu, " ").replace(/\s+/gu, " ").trim();
   const scopeLabel = detail.scope?.kind === "all" ? "Whole class"
-    : sourceNames.length === 1 && sourceIds.size === 1 ? sourceNames[0]
+    : sourceNames.length === 1 && sourceIds.size === 1 ? displaySourceName(sourceNames[0])
       : sourceIds.size ? `${sourceIds.size} selected ${sourceIds.size === 1 ? "upload" : "uploads"}` : "Class material";
 
   return {

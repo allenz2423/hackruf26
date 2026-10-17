@@ -63,6 +63,12 @@ test("math next to punctuation and digits works", () => {
   assert.deepEqual(kinds("area is $\\pi r^2$ cm"), ["T:area is ", "I:\\pi r^2", "T: cm"]);
 });
 
+test("hyphenated prose remains prose while bare subtraction still renders", () => {
+  const prose = "A six-carbon sugar has a non-reducing end, a two-dimensional cis-trans model, and low-to-high movement.";
+  assert.deepEqual(kinds(prose), [`T:${prose}`]);
+  assert.deepEqual(kinds("The difference is x-y."), ["T:The difference is ", "I:x-y", "T:."]);
+});
+
 test("an unclosed formula cannot swallow prose or later formulas", () => {
   const text = "The transformed tensor is $\\boldsymbol{\\sigma}'=\\mathbf{A}\\boldsymbol{\\sigma}\\mathbfand each new component is obtained by projection. The maximum shear acts at $45^\\circ$ from the principal directions.";
   const segments = splitMath(text);

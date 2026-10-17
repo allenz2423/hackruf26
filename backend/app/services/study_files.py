@@ -25,14 +25,14 @@ from app.services.guide_templates import (
     ANIMAL_CELL_ORGANELLES,
     MOLECULE_3D_CATALOG,
     MOLECULES,
-    animal_cell_map_alt_text,
-    binary_search_trace,
     _graph_traversal,
-    _stress_state,
-    guide_block_alt_text,
-    guide_block_fallback,
     _python_algorithm_trace,
     _simcir_truth_table,
+    _stress_state,
+    animal_cell_map_alt_text,
+    binary_search_trace,
+    guide_block_alt_text,
+    guide_block_fallback,
     sampling_demo_result,
 )
 from app.services.study_guide_visual_preview import (
@@ -174,6 +174,10 @@ _INLINE_CODE_PATTERN = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 
 class StudyFileFailure(RuntimeError):
     """Guide typesetting failed; callers expose a bounded, sanitized error."""
+
+    def __init__(self, message: str, *, line_number: int | None = None) -> None:
+        super().__init__(message)
+        self.line_number = line_number
 
 
 def escape_latex(value: str) -> str:
@@ -368,9 +372,32 @@ def _normalize_text_argument(command: str, inner: str) -> str:
 
 def _normalize_bare_math(value: str) -> str:
     text_commands = {"text", "textrm", "textsf", "texttt", "textbf", "textit", "mbox"}
+    operator_commands = (
+        "cdot|times|pm|mp|leq|geq|neq|approx|equiv|in|notin|perp|parallel|"
+        "to|rightarrow|leftarrow|leftrightarrow|quad|qquad|ldots|cdots|dots"
+    )
+    # Models sometimes omit the separator after a TeX control word, making (for
+    # example) ``\cdotK`` one unknown command instead of ``\cdot K``.
+    value = re.sub(
+        rf"\\({operator_commands})(?=[A-Z])",
+        lambda match: "\\" + match[1] + " ",
+        value,
+    )
+    # Font commands without braces are also occasionally concatenated with their
+    # argument (``\mathrmC``); restore the intended one-token argument.
+    value = re.sub(
+        r"\\(mathrm|text|mathbf|mathit|mathsf|mathcal|mathbb|boldsymbol|operatorname)([A-Z])(?=[A-Za-z0-9])",
+        lambda match: "\\" + match[1] + "{" + match[2] + "}",
+        value,
+    )
 
     def normalize_segment(segment: str) -> str:
         normalized = "".join(_UNICODE_MATH_TEX.get(char, char) for char in segment)
+        normalized = re.sub(
+            rf"\\({operator_commands})(?=[A-Z])",
+            lambda match: "\\" + match[1] + " ",
+            normalized,
+        )
         normalized = re.sub(
             f"[{re.escape(''.join(_UNICODE_SUBSCRIPT))}]+",
             lambda match: "_{" + "".join(_UNICODE_SUBSCRIPT[char] for char in match[0]) + "}",
@@ -476,6 +503,7 @@ def _bare_equation_end(value: str, start: int) -> int:
     index = start
     has_operator = False
     has_value = False
+    expected_closers: list[str] = []
     while index < len(value):
         char = value[index]
         if char == "\n":
@@ -499,9 +527,19 @@ def _bare_equation_end(value: str, start: int) -> int:
             index += 1
             has_value = True
             continue
+        if char in "([{":
+            expected_closers.append({"(": ")", "[": "]", "{": "}"}[char])
+            index += 1
+            continue
+        if char in ")]}":
+            if not expected_closers or expected_closers[-1] != char:
+                break
+            expected_closers.pop()
+            index += 1
+            continue
         if (
             char.isspace()
-            or char in "{}_^.,'′+-−=*/×÷<>≤≥≠≈≡∝()[]|:∂∇∫∑√∞"
+            or char in "_^.,'′+-−=*/×÷<>≤≥≠≈≡∝|:∂∇∫∑√∞"
             or char in _UNICODE_MATH_TEX
         ):
             if char in "=+-−=*/×÷<>≤≥≠≈≡∝":
@@ -510,6 +548,19 @@ def _bare_equation_end(value: str, start: int) -> int:
             continue
         break
     candidate = value[start:index].strip().rstrip(".,;:")
+    # Short words followed by hyphens can look like equation prefixes when the
+    # scanner stops at the next prose word ("six-carbon", "non-reducing"). A
+    # bare operator needs a right-hand operand; multi-letter hyphenated words
+    # are prose unless explicitly marked as math.
+    if (
+        not candidate
+        or (
+            candidate[-1] in "=+-−=*/×÷<>≤≥≠≈≡∝"
+            and not re.search(r"\^\s*[+-]$", candidate)
+        )
+        or re.fullmatch(r"[^\W\d_]{2,}(?:-[^\W\d_]{2,})+", candidate)
+    ):
+        return -1
     if not has_operator or not has_value or len(candidate) < 3:
         return -1
     return start + len(candidate)
@@ -698,36 +749,129 @@ def _inline(value: str, render_math: bool = True, strict_math: bool = False) -> 
     return "".join(parts)
 
 
+def _math_as_plain_text(expression: str) -> str:
+    """Keep a failed equation readable without leaving TeX control syntax in a PDF."""
+    value = str(expression or "")
+    for _ in range(6):
+        previous = value
+        value = re.sub(
+            r"\\(?:mathrm|textrm|textsf|texttt|textbf|textit|mathbf|mathit|mathsf|mathcal|mathbb|boldsymbol|operatorname|mbox)\s*\{([^{}]*)\}",
+            r"\1",
+            value,
+        )
+        value = re.sub(r"\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}", r"(\1)/(\2)", value)
+        value = re.sub(r"\\sqrt\s*\{([^{}]*)\}", r"√(\1)", value)
+        if value == previous:
+            break
+    symbols = {
+        "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε",
+        "theta": "θ", "lambda": "λ", "mu": "μ", "nu": "ν", "pi": "π",
+        "rho": "ρ", "sigma": "σ", "tau": "τ", "phi": "φ", "omega": "ω",
+        "Delta": "Δ", "Sigma": "Σ", "Omega": "Ω", "cdot": "·", "times": "×",
+        "pm": "±", "mp": "∓", "leq": "≤", "geq": "≥", "neq": "≠",
+        "approx": "≈", "equiv": "≡", "rightarrow": "→", "leftarrow": "←",
+        "leftrightarrow": "↔", "perp": "⊥", "parallel": "∥", "infty": "∞",
+        "quad": "  ", "qquad": "    ", "ldots": "…", "cdots": "⋯",
+        "left": "", "right": "", "displaystyle": "",
+    }
+    value = re.sub(
+        r"\\([A-Za-z]+)\s*\{([^{}]*)\}",
+        lambda match: f"{symbols.get(match[1], match[1])}({match[2]})",
+        value,
+    )
+    value = re.sub(r"\\([A-Za-z]+)", lambda match: symbols.get(match[1], match[1]), value)
+    value = value.replace(r"\ ", " ").replace(r"\,", " ").replace(r"\;", " ")
+    value = value.replace(r"\!", "").replace(r"\\", " ; ")
+    value = re.sub(r"\\([{}%#$&_])", r"\1", value)
+    value = re.sub(r"[{}]", "", value)
+    value = value.replace("&", " ; ")
+    return " ".join(value.split()) or "Equation unavailable in typeset form."
+
+
+def _replace_line_math_with_plain_text(latex: str, line_number: int) -> str | None:
+    """Replace math only on the line Tectonic identified, preserving other equations."""
+    lines = latex.splitlines()
+    if not 1 <= line_number <= len(lines):
+        return None
+    source_line = lines[line_number - 1]
+    matches = list(_MATH_PATTERN.finditer(source_line))
+    if not matches:
+        return None
+    pieces: list[str] = []
+    cursor = 0
+    for match in matches:
+        pieces.append(source_line[cursor:match.start()])
+        expression = next(group for group in match.groups() if group is not None)
+        is_display = match[1] is not None or match[2] is not None
+        plain = escape_latex(_math_as_plain_text(expression))
+        if is_display:
+            pieces.append(r"\begin{quote}\centering\small Formula: " + plain + r"\end{quote}")
+        else:
+            pieces.append(plain)
+        cursor = match.end()
+    pieces.append(source_line[cursor:])
+    replacement = "".join(pieces)
+    if replacement == source_line:
+        return None
+    lines[line_number - 1] = replacement
+    return "\n".join(lines) + ("\n" if latex.endswith("\n") else "")
+
+
 def _body(value: str, render_math: bool = True, strict_math: bool = False) -> str:
     lines = []
     prose = []
-    in_list = False
+    list_environment = ""
+
+    def inline_markdown(text: str) -> str:
+        pieces = []
+        cursor = 0
+        for match in re.finditer(r"\*\*(.+?)\*\*", text, re.DOTALL):
+            pieces.append(_inline(text[cursor : match.start()], render_math, strict_math))
+            pieces.append(
+                r"\textbf{"
+                + _inline(match.group(1), render_math, strict_math)
+                + "}"
+            )
+            cursor = match.end()
+        pieces.append(_inline(text[cursor:], render_math, strict_math))
+        return "".join(pieces)
 
     def flush_prose() -> None:
         if prose:
-            lines.append(_inline("\n".join(prose), render_math, strict_math))
+            lines.append(inline_markdown("\n".join(prose)) + r"\par")
             prose.clear()
 
+    def close_list() -> None:
+        nonlocal list_environment
+        if list_environment:
+            lines.append(r"\end{" + list_environment + "}")
+            list_environment = ""
+
     for line in value.splitlines():
-        item = re.match(r"^\s*(?:[-*+] |\d+[.)] )(.+)$", line)
+        item = re.match(r"^\s*(?:[-*+] |(\d+)[.)] )(.+)$", line)
         if item:
             flush_prose()
-            if not in_list:
-                lines.append(r"\begin{itemize}")
-                in_list = True
-            lines.append(r"\item " + _inline(item[1], render_math, strict_math))
+            next_environment = "enumerate" if item[1] else "itemize"
+            if list_environment != next_environment:
+                close_list()
+                lines.append(r"\begin{" + next_environment + "}")
+                list_environment = next_environment
+            lines.append(r"\item " + inline_markdown(item[2]))
+        elif not line.strip():
+            flush_prose()
         else:
-            if in_list:
-                lines.append(r"\end{itemize}")
-                in_list = False
+            close_list()
             heading = re.match(r"^#{1,6}\s+(.+)$", line)
             if heading:
                 flush_prose()
-                lines.append(r"\paragraph{" + escape_latex(heading[1]) + "}")
+                lines.append(
+                    r"\par\medskip\noindent\textbf{"
+                    + inline_markdown(heading[1])
+                    + r"}\par\smallskip"
+                )
             else:
                 prose.append(line)
-    if in_list:
-        lines.append(r"\end{itemize}")
+    close_list()
     flush_prose()
     return "\n".join(lines)
 
@@ -1113,7 +1257,13 @@ def _render_guide_block(
     if block.type == "paragraph":
         return [body(block.text or "")]
     if block.type == "formula":
-        content = [_display_math(block.expression, render_math, strict_math)]
+        keep_together = len(block.definitions) <= 8 and len(block.expression or "") <= 500
+        content = (
+            [r"\begin{samepage}"]
+            if keep_together
+            else []
+        )
+        content.append(_display_math(block.expression, render_math, strict_math))
         if block.definitions:
             content.append(r"\begin{itemize}")
             for definition in block.definitions:
@@ -1126,6 +1276,8 @@ def _render_guide_block(
                     item += " (" + inline(definition.unit) + ")"
                 content.append(r"\item " + item)
             content.append(r"\end{itemize}")
+        if keep_together:
+            content.append(r"\end{samepage}")
         return content
     if block.type == "interactive_model" and block.template_id == "force_components_v1":
         parameters = block.parameters
@@ -1663,7 +1815,9 @@ def compile_guide_pdf(
                     raise StudyFileFailure("Study-guide PDF diagram asset exceeds its size limit.")
                 total_asset_bytes += len(data)
                 if total_asset_bytes > _MAX_GUIDE_DIAGRAM_BYTES:
-                    raise StudyFileFailure("Study-guide PDF diagram assets exceed their combined size limit.")
+                    raise StudyFileFailure(
+                        "Study-guide PDF diagram assets exceed their combined size limit."
+                    )
                 (Path(directory) / name).write_bytes(data)
             command = [executable, "--untrusted", "--chatter", "minimal", "--outdir", directory]
             if only_cached:
@@ -1675,13 +1829,19 @@ def compile_guide_pdf(
                 command,
                 cwd=directory,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                capture_output=True,
                 check=False,
             )
             pdf = Path(directory) / "guide.pdf"
             if result.returncode != 0 or not pdf.is_file() or pdf.stat().st_size > _MAX_FILE_BYTES:
-                raise StudyFileFailure("Study-guide PDF compilation failed.")
+                diagnostics = b"\n".join((result.stdout or b"", result.stderr or b"")).decode(
+                    "utf-8", errors="replace"
+                )
+                line_match = re.search(r"guide\.tex:(\d+):", diagnostics)
+                raise StudyFileFailure(
+                    "Study-guide PDF compilation failed.",
+                    line_number=int(line_match[1]) if line_match else None,
+                )
             data = pdf.read_bytes()
             if not data.startswith(b"%PDF-"):
                 raise StudyFileFailure("Study-guide PDF compilation failed.")
@@ -1729,23 +1889,59 @@ def create_guide_files(
         strict_math=strict_math,
         svg_image_map=svg_image_map,
     )
+    pdf: bytes | None = None
     try:
         pdf = compile_guide_pdf(pdf_latex, settings, assets=assets)
-    except StudyFileFailure:
+    except StudyFileFailure as failure:
         if strict_math:
             raise
-        # A malformed model equation must not discard otherwise valid study content.
-        latex = render_guide_latex(**guide, render_math=False)
-        pdf_latex = render_guide_latex(
-            **guide,
-            render_math=False,
-            svg_image_map=svg_image_map,
-        )
-        try:
-            pdf = compile_guide_pdf(pdf_latex, settings, assets=assets)
-        except StudyFileFailure:
-            if not assets:
-                raise
-            # A broken or unsupported image must not make the entire guide unavailable.
-            pdf = compile_guide_pdf(latex, settings)
+        # If one TeX expression is malformed, replace only math on the failing line.
+        # Keep the remaining equations typeset instead of degrading the whole guide.
+        for _ in range(6):
+            if (
+                failure.line_number is None
+                or not 1 <= failure.line_number <= len(pdf_latex.splitlines())
+            ):
+                break
+            source_line = pdf_latex.splitlines()[failure.line_number - 1]
+            repaired_pdf = _replace_line_math_with_plain_text(
+                pdf_latex, failure.line_number
+            )
+            if repaired_pdf is None:
+                break
+            matching_source_lines = [
+                index + 1
+                for index, line in enumerate(latex.splitlines())
+                if line == source_line
+            ]
+            if len(matching_source_lines) == 1:
+                latex = _replace_line_math_with_plain_text(
+                    latex, matching_source_lines[0]
+                ) or latex
+            pdf_latex = repaired_pdf
+            try:
+                pdf = compile_guide_pdf(pdf_latex, settings, assets=assets)
+            except StudyFileFailure as next_failure:
+                failure = next_failure
+            else:
+                break
+
+        if pdf is None:
+            # Keep malformed content from making a study guide unavailable. This is
+            # only the last fallback, after line-local recovery has been exhausted.
+            latex = render_guide_latex(**guide, render_math=False)
+            pdf_latex = render_guide_latex(
+                **guide,
+                render_math=False,
+                svg_image_map=svg_image_map,
+            )
+            try:
+                pdf = compile_guide_pdf(pdf_latex, settings, assets=assets)
+            except StudyFileFailure:
+                if not assets:
+                    raise
+                # A broken or unsupported image must not make the entire guide unavailable.
+                pdf = compile_guide_pdf(latex, settings)
+    if pdf is None:
+        raise StudyFileFailure("Study-guide PDF compilation failed.")
     return {"latex": latex.encode("utf-8"), "pdf": pdf}

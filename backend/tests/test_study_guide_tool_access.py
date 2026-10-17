@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from app.api.schemas import StudyGuideSectionV2
 from app.config import Settings
 from app.services.gemini_content import (
+    STUDY_GUIDE_STYLE_INSTRUCTIONS,
     GeminiContentService,
     _provider_response_schema,
     _StudyGuideSectionBatch,
@@ -18,6 +19,7 @@ from app.services.study_guide_tools import (
     guide_tool_catalog_prompt,
     guide_tool_instructions,
 )
+from app.services.study_prompts import STUDY_MATERIAL_SYSTEM_PROMPTS
 
 
 def section(upload_id: str, text: str = "A source-grounded explanation.") -> StudyGuideSectionV2:
@@ -56,8 +58,30 @@ class StudyGuideToolAccessTests(unittest.TestCase):
         self.assertEqual(len(GUIDE_TOOLS), 15)
         for tool in GUIDE_TOOLS:
             with self.subTest(tool=tool.id):
-                self.assertIn(f"- {tool.id}: {tool.purpose}", catalog)
+                self.assertIn(f"- {tool.id}: {tool.name} (fits ", catalog)
+                self.assertIn(f"): {tool.purpose}", catalog)
         self.assertNotIn("parameters `{", catalog)
+        self.assertIn("chemistry and biochemistry", catalog)
+
+    def test_visual_authoring_contract_targets_phone_size_and_teachable_animation(self) -> None:
+        prompt = STUDY_MATERIAL_SYSTEM_PROMPTS["study_guide"]
+        custom_svg = guide_tool_instructions(["custom_svg"])
+
+        self.assertIn("360-unit-wide viewBox", prompt)
+        self.assertIn("18–22 units for primary labels", prompt)
+        self.assertIn("at least four meaningful", prompt)
+        self.assertIn("<animate attributeName=", prompt)
+        self.assertIn(
+            "include at least four such activities in distinct sections",
+            STUDY_GUIDE_STYLE_INSTRUCTIONS["interactive"],
+        )
+        self.assertIn("select a meaningful stage", STUDY_GUIDE_STYLE_INSTRUCTIONS["interactive"])
+        self.assertIn("360-unit-wide", custom_svg)
+        self.assertIn("repeatCount", custom_svg)
+        self.assertIn("one or two sentences", custom_svg)
+        self.assertIn("smallest practical viewBox", custom_svg)
+        self.assertIn("precise graph edge", custom_svg)
+        self.assertIn("trace each route from start to finish", custom_svg)
 
     def test_requested_instructions_are_allowlisted_and_catalog_ordered(self) -> None:
         instructions = guide_tool_instructions(["circuit_divider", "math_graph"])

@@ -3392,6 +3392,8 @@ main {
 }
 
 .guide-content {
+  width: min(100%, 88rem);
+  margin-inline: auto;
   padding: var(--space-5);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
@@ -3403,9 +3405,59 @@ main {
   gap: var(--space-5);
 }
 
+.guide-toc {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  margin: 0 0 var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: 0 3px 12px rgb(15 23 42 / 6%);
+}
+
+.guide-toc summary {
+  display: flex;
+  min-height: 2.75rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  color: var(--text);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.guide-toc-count {
+  color: var(--muted);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.guide-toc-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  max-height: min(52dvh, 28rem);
+  gap: 0.25rem var(--space-4);
+  overflow: auto;
+  margin: 0;
+  padding: 0 var(--space-3) var(--space-3) calc(var(--space-3) + 1.4rem);
+}
+
+.guide-toc-list a {
+  display: block;
+  padding: 0.35rem 0.2rem;
+  color: var(--primary);
+  line-height: 1.4;
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.15em;
+  overflow-wrap: anywhere;
+}
+
 .guide-section {
   display: grid;
   gap: var(--space-3);
+  scroll-margin-block-start: var(--space-3);
   padding-bottom: var(--space-4);
   border-bottom: 1px solid var(--line);
 }
@@ -3416,10 +3468,20 @@ main {
 }
 
 .guide-section-heading {
-  font-size: 1.125rem;
+  font-size: 1.3rem;
   font-weight: 700;
   color: var(--text);
   margin: 0;
+}
+
+.guide-section-blocks {
+  display: grid;
+  align-content: start;
+  gap: var(--space-4);
+}
+
+.guide-section-block {
+  min-width: 0;
 }
 
 .guide-section-body {
@@ -3436,16 +3498,36 @@ main {
 }
 
 .guide-block-paragraph {
+  width: min(100%, 74ch);
   color: var(--text);
-  line-height: 1.65;
+  line-height: 1.72;
 }
 
 .guide-block-paragraph p {
-  margin: 0 0 var(--space-2);
+  margin: 0 0 0.85em;
 }
 
 .guide-block-paragraph p:last-child {
   margin-bottom: 0;
+}
+
+.guide-inline-heading {
+  margin: 1.25em 0 0.45em;
+  color: var(--text);
+  font-size: 1.02rem;
+  line-height: 1.35;
+}
+
+.guide-block-paragraph ul,
+.guide-block-paragraph ol {
+  display: grid;
+  gap: 0.4em;
+  margin: 0.6em 0 0.9em;
+  padding-left: 1.5rem;
+}
+
+.guide-block-paragraph li {
+  padding-left: 0.15rem;
 }
 
 .python-algorithm-activity {
@@ -4357,7 +4439,7 @@ main {
 }
 
 .authored-svg-frame {
-  max-height: 680px;
+  max-height: min(46dvh, 440px);
   overflow: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
@@ -4372,15 +4454,16 @@ main {
   display: block;
   width: 100%;
   height: auto;
-  min-height: 180px;
-  max-height: 640px;
+  min-height: 0;
+  max-height: min(44dvh, 420px);
   margin-inline: auto;
 }
 
 .authored-svg-figure figcaption {
   margin-top: 0.5rem;
   color: var(--muted);
-  font-size: 0.9rem;
+  font-size: 0.92rem;
+  line-height: 1.5;
 }
 
 .authored-svg-controls {
@@ -4403,6 +4486,27 @@ main {
 }
 
 @media (max-width: 700px) {
+  .guide-content {
+    padding: var(--space-3);
+  }
+
+  .guide-toc-list {
+    grid-template-columns: minmax(0, 1fr);
+    max-height: 45dvh;
+  }
+
+  .guide-section {
+    gap: var(--space-2);
+  }
+
+  .authored-svg-frame {
+    max-height: min(42dvh, 360px);
+  }
+
+  .authored-svg-frame svg {
+    max-height: min(40dvh, 340px);
+  }
+
   .activity-layout {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -5636,10 +5740,6 @@ main {
 }
 
 @media (max-width: 960px) {
-  .metric-strip {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
   .guest-workspace-content {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -7246,6 +7346,16 @@ p {
 
 .tex-math .katex {
   font-size: 1.05em;
+}
+
+/* A long inline formula may be wider than a phone-sized paragraph. Keep it in
+   the line without letting KaTeX's internal MathML widen or clip the whole view. */
+.tex-math:not(.is-display) {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  vertical-align: baseline;
 }
 
 /* A long display equation scrolls inside its box instead of widening the page. */

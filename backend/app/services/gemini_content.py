@@ -61,8 +61,16 @@ from app.services.study_document_quality import (
     MAX_TEXT_CHARACTERS,
     review_study_guide_quality,
 )
-from app.services.study_guide_tools import guide_tool_catalog_prompt, guide_tool_instructions
-from app.services.study_guide_visual_preview import render_svg_preview_png
+from app.services.study_guide_tools import (
+    GUIDE_TOOLS,
+    guide_tool_catalog_prompt,
+    guide_tool_instructions,
+)
+from app.services.study_guide_visual_preview import (
+    PHONE_CARD_PREVIEW_HEIGHT,
+    PHONE_CARD_PREVIEW_WIDTH,
+    render_svg_preview_png,
+)
 from app.services.study_prompts import (
     QUESTION_BANK_GENERATION_INSTRUCTION,
     QUESTION_BANK_VALIDATION_INSTRUCTION,
@@ -77,6 +85,30 @@ _GUIDE_VISUAL_STOP_WORDS = {
     "at", "as", "is", "are", "be", "it", "its", "this", "that", "their", "all", "each",
     "use", "what", "how", "which", "one", "per", "item", "items", "order", "chapter",
 }
+
+_GUIDE_STAGE_ACTION_CLAIM = re.compile(
+    r"\b(?:select|choose|click|step through)\s+(?:(?:the|each|a|an)\s+)?(?:next\s+)?(?:stages?|steps?|phases?)\b",
+    re.IGNORECASE,
+)
+_GUIDE_CONTROL_ACTION_CLAIM = re.compile(
+    r"\b(?:use|move|adjust|change)\s+(?:the|a)\s+(?:slider|control|button|parameter)\b",
+    re.IGNORECASE,
+)
+_GUIDE_ANIMATION_CLAIM = re.compile(
+    r"\b(?:watch|see|start|pause|restart)\s+(?:the|an?)\s+(?:animation|animated sequence)\b",
+    re.IGNORECASE,
+)
+
+
+def _guide_tool_ids_requested_by_text(instructions: str | None) -> set[str]:
+    """Preload details for registered tools explicitly named by guide preferences."""
+    if not instructions:
+        return set()
+    return {
+        tool.id
+        for tool in GUIDE_TOOLS
+        if re.search(rf"(?<![\w-]){re.escape(tool.id)}(?![\w-])", instructions)
+    }
 
 
 class _StudyGuideSectionBatch(BaseModel):
@@ -224,41 +256,45 @@ STUDY_GUIDE_LUNA_RETRY_OUTPUT_TOKENS = 128_000
 STUDY_GUIDE_REVIEW_OUTPUT_TOKENS = 3_000
 STUDY_GUIDE_STYLE_INSTRUCTIONS = {
     "balanced": (
-        "Use a balanced mix of concise explanations, definitions, formulas, and worked "
-        "examples. Add diagrams or interactive models only where they make a source-supported "
-        "idea clearer."
+        "Use a balanced mix of focused explanations, definitions, formulas, examples, and a few "
+        "purposeful visuals or learner actions where the supplied material supports them."
     ),
     "visual": (
-        "Make this a visual overview: keep prose concise, organize concepts around relationships "
-        "and processes, and author a source-grounded subject-specific SVG diagram whenever a "
-        "visual would explain a cited concept more clearly. Use a matching specialized activity "
-        "when it fits, and draw an original SVG when no fixed activity fits. Aim for at least two "
-        "different, relevant visuals in each section batch when the sources support them; use "
-        "several across a full guide rather than stopping after one. Never substitute a generic "
-        "graph or add a diagram that does not teach the cited concept."
+        "Make this a visual guide: use diagrams for high-value structures, comparisons, and "
+        "processes that are hard to understand from prose alone. Usually add about one visual per "
+        "one or two sections, with no more than two major visuals in a four-section batch unless "
+        "the sources clearly support more distinct visuals. Use a matching specialized activity "
+        "when it fits, and draw an original SVG when no fixed activity fits. Never add a generic "
+        "graph or a picture that merely repeats adjacent prose."
     ),
     "text_dense": (
-        "Make this a text-dense guide with fuller explanations, careful definitions, and explicit "
-        "connections between ideas. Prefer paragraphs and formulas; use diagrams and interactive "
-        "models sparingly, while retaining any visual specifically requested by another selected "
-        "style."
+        "Use complete explanations, precise definitions, and explicit connections between ideas. "
+        "Keep paragraphs short and organized with subheadings or lists when useful. This style "
+        "requests explanatory depth, not uninterrupted prose; retain the focused visuals and "
+        "activities requested by other selected styles."
     ),
     "interactive": (
-        "Make this an interactive learning guide: consider every registered tool and include a "
-        "relevant activity whenever one directly models a cited concept. Use an app-owned activity "
-        "when it fits; otherwise build an original SVG diagram or time-based SVG animation for the "
-        "subject instead of forcing an unrelated template. Add a clear explanation of what to "
-        "notice. SVG remains declarative drawing data and must follow the custom SVG tool contract."
+        "Make this an interactive learning guide. Include meaningful learner actions across the "
+        "guide where the sources support them: change a relevant value, make a prediction, inspect "
+        "a trace, or select a stage and see a concept-specific explanation. For a guide with at "
+        "least 12 sections, include at least four such activities in distinct sections when "
+        "suitable tools exist. At least two should let the learner change a value or select a "
+        "meaningful stage and see a concept-specific response. A zoom button or animation playback "
+        "by itself does not count. Use app-owned tools when they fit; otherwise build a "
+        "source-grounded SVG animation for a real time-dependent process or use clear prose when a "
+        "safe interaction would add no learning value. Add an explanation of what to notice and "
+        "what each control changes."
     ),
     "worked_examples": (
-        "Emphasize source-supported worked examples and derivations. Break procedures into "
-        "ordered steps, explain the reason for each step, and follow examples with the concept or "
-        "decision rule they demonstrate. Do not invent numerical examples absent from the sources."
+        "Emphasize source-supported worked examples and derivations where the topic calls for "
+        "them. Break procedures into ordered steps, explain the reason for each step, and follow "
+        "each example with the concept or decision rule it demonstrates. Do not invent numerical "
+        "examples absent from the sources."
     ),
     "quick_reference": (
-        "Make this a compact quick reference: prioritize concise definitions, formulas with "
-        "variable meanings, key takeaways, and decision rules. Avoid lengthy prose and extended "
-        "worked examples while retaining enough context to use each item correctly."
+        "Add a compact quick-reference element for each major section: a short takeaway, formula "
+        "with variable meanings, comparison, or decision rule. Do not compress away the deeper "
+        "teaching requested by another selected style."
     ),
 }
 STUDY_GUIDE_REPAIR_OUTPUT_TOKENS = 6_000
@@ -424,6 +460,137 @@ def _guide_citation_validation_issues(
         if len(issues) >= 8:
             return issues[:8]
     return issues
+
+
+def _guide_unsupported_markdown_table_issues(sections: list[dict]) -> list[dict[str, object]]:
+    """Reject pipe tables that the guide reader and PDF exporter cannot render."""
+    issues: list[dict[str, object]] = []
+    for section_index, section in enumerate(sections):
+        for block_index, block in enumerate(section.get("blocks") or []):
+            if block.get("type") not in {"paragraph", "takeaway"}:
+                continue
+            lines = str(block.get("text") or "").splitlines()
+            for line_index in range(1, len(lines)):
+                header = lines[line_index - 1].strip()
+                separator = lines[line_index].strip()
+                if "|" not in header or "|" not in separator:
+                    continue
+                header_cells = [cell.strip() for cell in header.strip("|").split("|")]
+                separator_cells = [cell.strip() for cell in separator.strip("|").split("|")]
+                if len(header_cells) < 2 or len(header_cells) != len(separator_cells):
+                    continue
+                if all(re.fullmatch(r":?-{3,}:?", cell) for cell in separator_cells):
+                    issues.append(
+                        {
+                            "location": [
+                                "sections",
+                                section_index,
+                                "blocks",
+                                block_index,
+                                "text",
+                            ],
+                            "type": "unsupported_markdown_table",
+                            "hint": (
+                                "Replace the pipe-delimited Markdown table with a compact list of "
+                                "labeled comparisons. Preserve every useful row and value; do not "
+                                "put table syntax in prose. The study-guide reader and printable "
+                                "export do not support Markdown tables."
+                            ),
+                        }
+                    )
+                    break
+            if len(issues) >= 8:
+                return issues
+    return issues
+
+
+def _guide_interaction_contract_issues(sections: list[dict]) -> list[dict[str, object]]:
+    """Catch reader instructions that promise a control absent from that section."""
+    issues: list[dict[str, object]] = []
+    for index, section in enumerate(sections):
+        blocks = section.get("blocks") or []
+        prose = "\n".join(
+            str(block.get("text") or "")
+            for block in blocks
+            if block.get("type") in {"paragraph", "takeaway"}
+        )
+        templates = {
+            str(block.get("template_id") or "")
+            for block in blocks
+            if block.get("type") in {"labeled_diagram", "interactive_model"}
+        }
+        has_interactive_model = any(
+            block.get("type") == "interactive_model" and block.get("template_id")
+            for block in blocks
+        )
+        has_animation = any(
+            block.get("type") == "svg_diagram"
+            and re.search(r"<(?:animate|animateTransform|animateMotion|set)\b", str(block.get("svg") or ""), re.I)
+            for block in blocks
+        )
+        claims: list[str] = []
+        if _GUIDE_STAGE_ACTION_CLAIM.search(prose) and "process_pathway_v1" not in templates:
+            claims.append("stage or step selection")
+        if _GUIDE_CONTROL_ACTION_CLAIM.search(prose) and not has_interactive_model:
+            claims.append("adjustable control")
+        if _GUIDE_ANIMATION_CLAIM.search(prose) and not has_animation:
+            claims.append("animated sequence")
+        if claims:
+            action_contracts = []
+            if "stage or step selection" in claims:
+                action_contracts.append(
+                    "For stage selection, include a `labeled_diagram` block with "
+                    "`template_id: process_pathway_v1` and 2–12 unique entries in "
+                    "`parameters.stages`; otherwise remove the selection instruction."
+                )
+            if "adjustable control" in claims:
+                action_contracts.append(
+                    "For an adjustable control, include the matching working "
+                    "`interactive_model` block in this same section; otherwise remove the control instruction."
+                )
+            if "animated sequence" in claims:
+                action_contracts.append(
+                    "For an animation, include a `svg_diagram` with actual native SVG motion in this "
+                    "same section; otherwise remove the animation instruction."
+                )
+            issues.append(
+                {
+                    "location": ["sections", index, "blocks"],
+                    "type": "unimplemented_interaction",
+                    "hint": (
+                        "This section promises " + ", ".join(claims) + ". Add the matching "
+                        "working activity block in this same section, or rewrite the sentence so "
+                        "it describes only the material that is actually present. "
+                        + " ".join(action_contracts)
+                    ),
+                }
+            )
+            if len(issues) >= 8:
+                return issues
+    return issues
+
+
+def _guide_has_meaningful_interaction(sections: list[dict]) -> bool:
+    """Return whether a batch contains a learner action that changes or selects meaning."""
+    for section in sections:
+        for block in section.get("blocks") or []:
+            if block.get("type") == "interactive_model" and block.get("template_id"):
+                return True
+            if (
+                block.get("type") == "labeled_diagram"
+                and block.get("template_id") == "process_pathway_v1"
+            ):
+                return True
+            if (
+                block.get("type") == "svg_diagram"
+                and re.search(
+                    r"<(?:animate|animateTransform|animateMotion|set)\b",
+                    str(block.get("svg") or ""),
+                    re.IGNORECASE,
+                )
+            ):
+                return True
+    return False
 
 
 def _normalized_study_guide(sections: list[dict], allowed_source_ids: set[str]) -> dict:
@@ -1372,6 +1539,8 @@ class GeminiContentService:
         source_visuals: list[object] | None = None,
         source_visual_sources: list[dict] | None = None,
         numbered_topics: list[str] | None = None,
+        require_batch_interaction: bool = False,
+        initial_tool_ids: set[str] | None = None,
     ) -> dict:
         """Build a guide in small draft/revision passes before returning it as ready."""
         completed: list[dict] = []
@@ -1385,14 +1554,21 @@ class GeminiContentService:
             + "\nAll listed tools are available immediately; do not wait for permission or omit a "
             "relevant tool because detailed instructions were not requested. Compare the full "
             "registry with each batch's source concepts before drafting. When planning to use a "
-            "fixed tool, include its ID in `requested_tool_ids` so the revision receives its "
-            "exact parameter contract. The server also supplies instructions for tools present "
-            "in your draft. Requesting details is optional and never gates use of a registered "
+            "fixed tool, include its ID in `requested_tool_ids`. If a preference explicitly names "
+            "a registered tool, the server supplies its exact parameter contract to both the "
+            "draft and revision. The server also supplies instructions for tools present in your "
+            "draft. Requesting details is optional and never gates use of a registered "
             "tool. Do not guess parameter names or values; prefer source-supported prose when a "
-            "tool's exact contract is unclear. For selected visual or "
-            "interactive styles, include at least one relevant tool activity in each section where "
-            "a registered tool directly fits the cited material, and aim for multiple useful "
-            "visuals per batch. Prefer varied, subject-specific activities over repeating one "
+            "tool's exact contract is unclear. For selected visual or interactive styles, plan "
+            "high-value visuals and activities across the guide, not in every section. For a "
+            "four-section batch, usually create one or two major visuals, and include a "
+            "meaningful learner action when a listed tool directly models a cited concept. If the "
+            "interactive style is selected and any concept in the batch supports it, include one "
+            "such action in that batch: a selectable process stage, a bounded value control with "
+            "visible feedback, or a source-grounded time-based SVG that the learner can start. "
+            "Do not count zoom, decorative motion, or controls around a static picture as an "
+            "interaction. "
+            "Prefer varied, subject-specific activities over repeating one "
             "diagram. Never force a mismatched tool. Do not invent tools or implementation "
             "details; the response schema and server validation remain authoritative."
         )
@@ -1408,7 +1584,7 @@ class GeminiContentService:
         for batch_index, start in enumerate(batches):
             batch_count = min(batch_size, count - start + 1)
             prior_headings = [section["heading"] for section in completed]
-            requested_tool_ids: set[str] = set()
+            requested_tool_ids: set[str] = set(initial_tool_ids or ())
             draft = self._generate_study_guide_section_range(
                 base_prompt=base_prompt,
                 start=start,
@@ -1418,6 +1594,7 @@ class GeminiContentService:
                 system_instruction=system_instruction,
                 allowed_source_ids=allowed_source_ids,
                 requested_tool_ids=requested_tool_ids,
+                require_learner_interaction=(require_batch_interaction and batch_index < 4),
                 max_output_tokens=batch_output_tokens,
                 retry_output_tokens=retry_output_tokens,
                 source_visuals=visuals_by_batch[batch_index],
@@ -1437,6 +1614,7 @@ class GeminiContentService:
                 draft_sections=draft,
                 allowed_source_ids=allowed_source_ids,
                 requested_tool_ids=requested_tool_ids,
+                require_learner_interaction=(require_batch_interaction and batch_index < 4),
                 max_output_tokens=batch_output_tokens,
                 retry_output_tokens=retry_output_tokens,
                 source_visuals=visuals_by_batch[batch_index],
@@ -1606,7 +1784,11 @@ class GeminiContentService:
                     block.get("id") or f"preview-section-{section_index}-block-{block_index}"
                 )
                 try:
-                    preview_png = render_svg_preview_png(str(block.get("svg") or ""))
+                    preview_png = render_svg_preview_png(
+                        str(block.get("svg") or ""),
+                        max_width=PHONE_CARD_PREVIEW_WIDTH,
+                        max_height=PHONE_CARD_PREVIEW_HEIGHT,
+                    )
                 except Exception as exc:
                     logger.warning(
                         "study_guide_svg_self_preview_unavailable",
@@ -1714,7 +1896,11 @@ class GeminiContentService:
                     continue
                 try:
                     sanitized = sanitize_svg(replacement)
-                    preview_png = render_svg_preview_png(sanitized)
+                    preview_png = render_svg_preview_png(
+                        sanitized,
+                        max_width=PHONE_CARD_PREVIEW_WIDTH,
+                        max_height=PHONE_CARD_PREVIEW_HEIGHT,
+                    )
                 except Exception:
                     # Keep the already sanitized, rendered author version if
                     # the optional in-place correction is invalid.
@@ -1787,6 +1973,7 @@ class GeminiContentService:
         draft_sections: list[dict] | None = None,
         allowed_source_ids: set[str] | None = None,
         requested_tool_ids: set[str] | None = None,
+        require_learner_interaction: bool = False,
         retry_invalid_response: bool = True,
         section_count_retry_remaining: int = 1,
         retry_with_larger_budget: bool = True,
@@ -1822,23 +2009,33 @@ class GeminiContentService:
                 + "\n\nDraft JSON:\n"
                 + json.dumps({"sections": draft_sections}, ensure_ascii=False)
             )
-            direct_instructions = guide_tool_instructions(requested_tool_ids or set())
-            if direct_instructions:
-                prompt += (
-                    "\n\n"
-                    + direct_instructions
-                    + "\nUse these instructions only where they make the cited material clearer. "
-                    "Do not request additional tool instructions during revision."
-                )
-        if validation_feedback:
-            feedback_context = (
-                "The previous response returned the wrong number of study-guide sections. "
-                if any(
-                    item.get("type") == "section_count_mismatch"
-                    for item in validation_feedback
-                )
-                else "The previous response failed server-side schema validation. "
+        direct_instructions = guide_tool_instructions(requested_tool_ids or set())
+        if direct_instructions:
+            prompt += (
+                "\n\n"
+                + direct_instructions
+                + "\nUse these instructions only where they make the cited material clearer. "
+                "Do not request additional tool instructions during revision."
             )
+        if validation_feedback:
+            if any(item.get("type") == "section_count_mismatch" for item in validation_feedback):
+                feedback_context = "The previous response returned the wrong number of study-guide sections. "
+            elif any(
+                item.get("type") == "unsupported_markdown_table" for item in validation_feedback
+            ):
+                feedback_context = (
+                    "The previous response used Markdown tables that the reader cannot render. "
+                )
+            elif any(item.get("type") == "unimplemented_interaction" for item in validation_feedback):
+                feedback_context = (
+                    "The previous response promised an interactive behavior that its section did not contain. "
+                )
+            elif any(item.get("type") == "missing_learner_interaction" for item in validation_feedback):
+                feedback_context = (
+                    "The previous interactive guide batch had no meaningful learner action. "
+                )
+            else:
+                feedback_context = "The previous response failed server-side schema validation. "
             prompt += (
                 "\n\n"
                 + feedback_context
@@ -1885,6 +2082,41 @@ class GeminiContentService:
                     diagnostic_code="invalid_citation",
                     validation_issues=citation_issues,
                 )
+            table_issues = _guide_unsupported_markdown_table_issues(sections)
+            if table_issues:
+                raise ContentGenerationFailure(
+                    "A study-guide section used unsupported Markdown table syntax.",
+                    code="invalid_model_response",
+                    diagnostic_code="unsupported_markdown_table",
+                    validation_issues=table_issues,
+                )
+            interaction_issues = _guide_interaction_contract_issues(sections)
+            if interaction_issues:
+                raise ContentGenerationFailure(
+                    "A study-guide section promised an interaction it did not contain.",
+                    code="invalid_model_response",
+                    diagnostic_code="guide_interaction_contract_failed",
+                    validation_issues=interaction_issues,
+                )
+            if require_learner_interaction and not _guide_has_meaningful_interaction(sections):
+                raise ContentGenerationFailure(
+                    "An interactive guide batch did not include a meaningful learner action.",
+                    code="invalid_model_response",
+                    diagnostic_code="guide_interaction_missing",
+                    validation_issues=[
+                        {
+                            "location": ["sections"],
+                            "type": "missing_learner_interaction",
+                            "hint": (
+                                "Add one source-grounded learner action to this batch: a valid "
+                                "app-owned interactive model, a selectable process pathway, or "
+                                "a meaningful animated SVG. A prediction question or a play/zoom "
+                                "control alone does not satisfy this requirement. Keep the "
+                                "activity tied to a cited concept and explain its response."
+                            ),
+                        }
+                    ],
+                )
             if draft_sections is None and requested_tool_ids is not None:
                 values = getattr(result, "requested_tool_ids", [])
                 if isinstance(values, list):
@@ -1906,6 +2138,7 @@ class GeminiContentService:
                     draft_sections=draft_sections,
                     allowed_source_ids=allowed_source_ids,
                     requested_tool_ids=requested_tool_ids,
+                    require_learner_interaction=require_learner_interaction,
                     retry_invalid_response=retry_invalid_response,
                     section_count_retry_remaining=section_count_retry_remaining,
                     retry_with_larger_budget=False,
@@ -1922,6 +2155,12 @@ class GeminiContentService:
                     "empty_model_response",
                 }
                 and count > 1
+                and exc.diagnostic_code
+                not in {
+                    "guide_interaction_contract_failed",
+                    "guide_interaction_missing",
+                    "unsupported_markdown_table",
+                }
             ):
                 left_count = count // 2
                 if draft_sections is None:
@@ -1934,6 +2173,7 @@ class GeminiContentService:
                         system_instruction=system_instruction,
                         allowed_source_ids=allowed_source_ids,
                         requested_tool_ids=requested_tool_ids,
+                        require_learner_interaction=require_learner_interaction,
                         section_count_retry_remaining=section_count_retry_remaining,
                         max_output_tokens=max_output_tokens,
                         retry_output_tokens=retry_output_tokens,
@@ -1954,6 +2194,7 @@ class GeminiContentService:
                         draft_sections=left_draft_sections,
                         allowed_source_ids=allowed_source_ids,
                         requested_tool_ids=requested_tool_ids,
+                        require_learner_interaction=require_learner_interaction,
                         section_count_retry_remaining=section_count_retry_remaining,
                         max_output_tokens=max_output_tokens,
                         retry_output_tokens=retry_output_tokens,
@@ -1970,6 +2211,7 @@ class GeminiContentService:
                     draft_sections=right_draft_sections,
                     allowed_source_ids=allowed_source_ids,
                     requested_tool_ids=requested_tool_ids,
+                    require_learner_interaction=require_learner_interaction,
                     section_count_retry_remaining=section_count_retry_remaining,
                     max_output_tokens=max_output_tokens,
                     retry_output_tokens=retry_output_tokens,
@@ -2001,6 +2243,7 @@ class GeminiContentService:
                     draft_sections=draft_sections,
                     allowed_source_ids=allowed_source_ids,
                     requested_tool_ids=requested_tool_ids,
+                    require_learner_interaction=require_learner_interaction,
                     retry_invalid_response=retry_invalid_response,
                     section_count_retry_remaining=section_count_retry_remaining - 1,
                     retry_with_larger_budget=retry_with_larger_budget,
@@ -2029,6 +2272,7 @@ class GeminiContentService:
                     draft_sections=draft_sections,
                     allowed_source_ids=allowed_source_ids,
                     requested_tool_ids=requested_tool_ids,
+                    require_learner_interaction=require_learner_interaction,
                     section_count_retry_remaining=section_count_retry_remaining,
                     retry_invalid_response=False,
                     retry_with_larger_budget=retry_with_larger_budget,
@@ -4170,6 +4414,8 @@ class GeminiContentService:
                 numbered_topics=self._numbered_study_guide_topics(
                     additional_instructions, count=count
                 ),
+                require_batch_interaction="interactive" in guide_styles,
+                initial_tool_ids=_guide_tool_ids_requested_by_text(additional_instructions),
             )
             repaired_content = self._repair_duplicate_guide_content(content, sources)
             if repaired_content != content and guide_progress_callback is not None:
@@ -4732,7 +4978,7 @@ class GeminiContentService:
             if not normalized:
                 add(item_id, f"empty_{field_name}")
                 continue
-            for earlier_id, earlier_text, _ in fronts_or_prompts[:index]:
+            for _, earlier_text, _ in fronts_or_prompts[:index]:
                 earlier = cls._normalized_item_text(earlier_text)
                 is_duplicate = normalized == earlier
                 if not is_duplicate and min(len(normalized), len(earlier)) >= 28:

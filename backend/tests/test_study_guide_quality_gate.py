@@ -240,14 +240,18 @@ class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((row["status"], row["failure_code"]), ("failed", "invalid_model_response"))
 
     async def test_oversized_guide_fails_deterministically_without_reviewer_or_repair(self) -> None:
-        verbose_text = "A source-supported mechanics explanation. " * 100
+        # Two max-length authored blocks per section exceed the current
+        # 400,000-character guide limit while remaining valid v2 content.
+        verbose_text = ("A source-supported mechanics explanation. " * 300)[:10_000]
         oversized = guide(self.upload_id)
         oversized["sections"] = []
         for index in range(20):
             section = guide(self.upload_id)["sections"][0]
             section["heading"] = f"Topic {index + 1}"
-            section["body"] = verbose_text
             section["blocks"][0]["text"] = verbose_text
+            section["blocks"].append(
+                {"type": "paragraph", "text": verbose_text}
+            )
             oversized["sections"].append(section)
         self.service.initial = oversized
         await self.add_material()
