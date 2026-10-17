@@ -2341,17 +2341,16 @@ async def _create_material_job(
                     service.generate_material,
                     **generation_kwargs,
                 )
-                if material["kind"] == "study_guide":
-                    if material.get("title_override"):
-                        title = material["title_override"]
-                    else:
-                        title_suggester = getattr(service, "suggest_study_guide_title", None)
-                        if callable(title_suggester):
-                            title = await asyncio.to_thread(
-                                title_suggester,
-                                class_name=material["class_name"] or "Personal study materials",
-                                content=content,
-                            )
+                if material.get("title_override"):
+                    title = material["title_override"]
+                elif material["kind"] == "study_guide":
+                    title_suggester = getattr(service, "suggest_study_guide_title", None)
+                    if callable(title_suggester):
+                        title = await asyncio.to_thread(
+                            title_suggester,
+                            class_name=material["class_name"] or "Personal study materials",
+                            content=content,
+                        )
                 break
             except ContentGenerationFailure as exc:
                 retryable_failure = exc.code in {

@@ -530,7 +530,7 @@ class StudyMaterialCreate(BaseModel):
             if not value:
                 return None
             if any(ord(character) < 32 or ord(character) == 127 for character in value):
-                raise ValueError("Study-guide names cannot contain control characters.")
+                raise ValueError("Study-material names cannot contain control characters.")
         return value
 
     @field_validator("guide_styles")
@@ -544,8 +544,6 @@ class StudyMaterialCreate(BaseModel):
 
     @model_validator(mode="after")
     def generation_preferences_are_kind_scoped(self) -> StudyMaterialCreate:
-        if self.title and self.kind != "study_guide":
-            raise ValueError("A custom name is available only for study guides.")
         if (self.guide_style is not None or self.guide_styles is not None) and self.kind != "study_guide":
             raise ValueError("A guide style is available only for study guides.")
         if self.guide_style is not None and self.guide_styles is not None:

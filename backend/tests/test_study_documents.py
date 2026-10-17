@@ -1402,15 +1402,19 @@ class StudyFormatTests(unittest.TestCase):
                 {"kind": "practice_exam", "additional_instructions": "x" * 2001}
             )
 
-    def test_custom_study_guide_title_is_optional_and_guide_only(self) -> None:
+    def test_custom_study_material_title_is_optional_for_every_material_kind(self) -> None:
         named = StudyMaterialCreate.model_validate(
             {"kind": "study_guide", "title": "  Membrane Transport  "}
         )
         self.assertEqual(named.title, "Membrane Transport")
+        for kind in ("quiz", "practice_exam", "flashcards"):
+            with self.subTest(kind=kind):
+                payload = StudyMaterialCreate.model_validate(
+                    {"kind": kind, "title": f"BIO 170 {kind.title()} — Chapter 2"}
+                )
+                self.assertTrue(payload.title.startswith("BIO 170"))
         blank = StudyMaterialCreate.model_validate({"kind": "study_guide", "title": "   "})
         self.assertIsNone(blank.title)
-        with self.assertRaises(ValidationError):
-            StudyMaterialCreate.model_validate({"kind": "quiz", "title": "Chapter 4"})
         with self.assertRaises(ValidationError):
             StudyMaterialCreate.model_validate({"kind": "study_guide", "title": "Bad\nName"})
 
@@ -2373,6 +2377,7 @@ class SavedDocumentTests(unittest.IsolatedAsyncioTestCase):
             await _process_upload_job(self.application, self.upload_id)
         payload = StudyMaterialCreate(
             kind="quiz",
+            title="BIO 170 Quiz — Chapter 2: Chemical Basis of Life",
             scope={"kind": "uploads", "upload_ids": [self.upload_id]},
             options=StudyOptions(count=4, question_types=["short_answer"]),
             additional_instructions=instruction,
@@ -2380,6 +2385,7 @@ class SavedDocumentTests(unittest.IsolatedAsyncioTestCase):
         summary = await create_study_material(
             self.class_id, payload, self.request(), BackgroundTasks()
         )
+        self.assertEqual(summary.title, "BIO 170 Quiz — Chapter 2: Chemical Basis of Life")
         stored = await self.db.fetchrow(
             "SELECT generation_instructions FROM study_materials WHERE id = ?1", summary.id
         )
@@ -2396,7 +2402,37 @@ class SavedDocumentTests(unittest.IsolatedAsyncioTestCase):
             instruction,
         )
         detail = await get_study_material(summary.id, self.request(), Response())
+        self.assertEqual(detail.title, "BIO 170 Quiz — Chapter 2: Chemical Basis of Life")
         self.assertNotIn("generation_instructions", detail.model_dump())
+
+    async def test_custom_flashcard_title_survives_generation(self) -> None:
+        payload = StudyMaterialCreate(
+            kind="flashcards",
+            title="BIO 170 Flashcards — Chapter 2: Chemical Basis of Life",
+            scope={"kind": "uploads", "upload_ids": [self.upload_id]},
+            options=StudyOptions(count=4),
+        )
+        cards = {
+            "format": "flashcards",
+            "cards": [
+                {
+                    "id": f"card-{index}",
+                    "front": f"What is concept {index}?",
+                    "back": "A source-supported definition.",
+                    "sources": [{"upload_id": str(self.upload_id)}],
+                }
+                for index in range(4)
+            ],
+        }
+        with patch("app.api.class_library.compiler_path", return_value="tectonic"):
+            summary = await create_study_material(
+                self.class_id, payload, self.request(), BackgroundTasks()
+            )
+        self.service.generate_material = Mock(return_value=("Generated flashcards", cards))
+        await _create_material_job(self.application, summary.id)
+        detail = await get_study_material(summary.id, self.request(), Response())
+        self.assertEqual(detail.status, "ready")
+        self.assertEqual(detail.title, payload.title)
 
     async def test_legacy_study_material_schema_gets_instruction_column(self) -> None:
         await self.db.execute(
