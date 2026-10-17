@@ -3198,6 +3198,17 @@ main {
   max-width: 100%;
 }
 
+.preview-dialog .guide-content,
+.preview-dialog .guide-sections-list,
+.preview-dialog .guide-section,
+.preview-dialog .guide-section > *,
+.preview-dialog .guide-section-blocks,
+.preview-dialog .guide-section-block {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+}
+
 .preview-header {
   display: flex;
   flex-wrap: wrap;
@@ -3302,6 +3313,11 @@ main {
   .material-dialog #material-dialog-title {
     max-width: 100%;
     overflow-wrap: anywhere;
+  }
+
+  .preview-dialog #document-detail-level {
+    min-height: 44px;
+    padding-inline: var(--space-3);
   }
 }
 

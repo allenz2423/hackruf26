@@ -122,6 +122,24 @@ test("long material metadata filenames wrap inside narrow viewer headers", async
   assert.match(rule[1], /overflow-wrap:\s*anywhere\s*;/);
 });
 
+test("the source preview detail selector has a touch-sized target on phones", async () => {
+  const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+  const mobileRules = css.slice(css.indexOf("@media (max-width: 560px)"));
+  assert.match(mobileRules, /\.preview-dialog #document-detail-level\s*\{[^}]*min-height:\s*44px;/);
+});
+
+test("generated study-document sections can shrink inside narrow source previews", async () => {
+  const css = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
+  const start = css.indexOf(".preview-dialog .guide-content,");
+  const end = css.indexOf("\n}", start);
+  assert.notEqual(start, -1, "source previews need their own generated-content sizing rules");
+  assert.notEqual(end, -1);
+  const rules = css.slice(start, end);
+  assert.match(rules, /\.preview-dialog \.guide-section > \*/);
+  assert.match(rules, /min-width:\s*0;/);
+  assert.match(rules, /max-width:\s*100%;/);
+});
+
 test("malformed and oversized structured sections fall back to their body", () => {
   for (const blocks of [
     [{ type: "paragraph", text: "valid" }, { type: "unknown", text: "bad" }],
