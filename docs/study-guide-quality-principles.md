@@ -67,6 +67,7 @@ The repaired guide content and its PDF/LaTeX exports must be updated atomically 
 - Does each interaction ask the learner to make or inspect a meaningful choice and then explain the result?
 - Can the student reach sections, sources, practice questions, and answers on a phone and with a keyboard?
 - Do the browser and PDF preserve the same section order, formulas, diagrams, and textual alternatives?
+- Does a PDF page break keep a recap heading with its takeaway instead of leaving a fragment at the page bottom?
 - Are all factual claims supported by the cited course uploads, including claims embedded in SVG labels?
 - Does any course statement conflict with a basic fact, another supplied source, or a standard equation; if so, is the discrepancy narrowly corrected and flagged for instructor confirmation?
 - Does every diagram connector express the intended relationship, and are markers placed on the exact geometry they identify?

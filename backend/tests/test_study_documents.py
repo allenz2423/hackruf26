@@ -135,6 +135,12 @@ def readable_test_pdf() -> bytes:
 
 
 class StudyFormatTests(unittest.TestCase):
+    def test_study_guide_prompt_makes_student_voice_an_unconditional_rule(self) -> None:
+        prompt = STUDY_MATERIAL_SYSTEM_PROMPTS["study_guide"]
+        self.assertIn("This is an unconditional voice rule", prompt)
+        self.assertIn("citations provide attribution", prompt)
+        self.assertIn("omit the incomplete detail without narrating", prompt)
+
     def test_provider_timeout_has_a_stable_generation_failure_code(self) -> None:
         self.assertEqual(
             _study_generation_failure_code(OpenAICompatibleError(504, "PROVIDER_TIMEOUT")),
@@ -1852,6 +1858,25 @@ class StudyFormatTests(unittest.TestCase):
 
 
 class LatexExportTests(unittest.TestCase):
+    def test_section_numbers_have_room_in_long_guide_table_of_contents(self) -> None:
+        upload_id = uuid4()
+        latex = render_guide_latex(
+            title="Long guide",
+            class_name="BIO 170",
+            material_id=uuid4(),
+            content={
+                "format": "study_guide",
+                "sections": [
+                    {"heading": f"Section {index}", "body": "Concept explanation."}
+                    for index in range(1, 13)
+                ],
+            },
+            sources=[{"id": upload_id, "title": "Course notes"}],
+        )
+
+        self.assertIn(r"\renewcommand*{\l@section}{\@dottedtocline{1}{1.5em}{3.5em}}", latex)
+        self.assertIn(r"\tableofcontents", latex)
+
     def test_common_model_math_formats_normalize_for_html_and_pdf(self) -> None:
         self.assertIn(r"\[\sigma_{max}=3\]", _inline("```latex\n\\sigma_{max}=3\n```"))
         self.assertIn(r"\(\tau_{xy}\)", _inline("Use `\\tau_{xy}` here."))

@@ -348,9 +348,10 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
             aria-label="${isFlipped ? "Answer side shown. Click or press Space to show question." : "Question side shown. Click or press Space to reveal answer."}"
           >
             <div class="flashcard-side-tag">
-              <span class="field-hint">
-                <strong>${isFlipped ? "Answer" : "Question"}</strong> &middot; Click card or Space to ${isFlipped ? "flip back" : "reveal"}
-              </span>
+              <div class="flashcard-side-copy">
+                <strong class="flashcard-face-label">${isFlipped ? "Answer" : "Question"}</strong>
+                <span class="flashcard-reveal-hint">Click card or press Space to ${isFlipped ? "flip back" : "reveal"}</span>
+              </div>
               ${isCurrentMastered ? `<span class="pill" data-tone="good" style="margin-left: auto;">Got it</span>` : ""}
               ${isCurrentStudyAgain ? `<span class="pill" data-tone="busy" style="margin-left: auto;">Needs review</span>` : ""}
             </div>

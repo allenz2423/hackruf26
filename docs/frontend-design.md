@@ -117,7 +117,7 @@ The local SQLite workspace calls class/upload APIs without an access-token prere
 - **Guide citations and export:** citations attached to sections and nested blocks use the existing authorized source-preview flow. Existing PDF and LaTeX downloads remain available; version-2 PDF output shows the authored default vector, formulas, units, and a textual component summary rather than a student's transient browser state.
 - **Saved guide files:** remote guides offer Download PDF and Download LaTeX. Files remain saved with the guide; older guides export from stored content on first download. Practice tests display their generated instructions above the assessment form.
 - **Guide viewer sizing and code examples:** study-guide dialogs open at a readable desktop size and can be resized from the lower-right corner; their content pane scrolls independently. On narrow screens they fill the available viewport. Fixed Python examples use a read-only, syntax-highlighted IDE-style editor with a filename/language bar and line numbers, plus a plain-text fallback.
-- **Flashcards view:** flip card with keyboard support (Space to flip, arrows to move), “Got it” / “Study again” sorting, and shuffle.
+- **Flashcards view:** flip card with keyboard support (Space to flip, arrows to move), “Got it” / “Study again” sorting, and shuffle. On narrow screens the question/answer label and flip hint stack above the card's red divider so neither competes with the card text.
 - **AI-generated label and Flag:** every generated item is labeled as AI-generated. Flag actions are shown only where the backend can resolve a safe resource identifier; remote assessment questions with run-scoped opaque IDs do not call the legacy material-question flag endpoint.
 
 ### Upload document preview

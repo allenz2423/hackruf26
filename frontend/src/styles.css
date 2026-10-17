@@ -4989,6 +4989,24 @@ main {
   font-size: 0.8125rem;
 }
 
+.flashcard-side-copy {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.5rem;
+  min-width: 0;
+}
+
+.flashcard-face-label {
+  flex: 0 0 auto;
+}
+
+.flashcard-reveal-hint {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+
 .flashcard-content {
   display: flex;
   align-items: center;
@@ -5117,6 +5135,25 @@ main {
     min-width: 0;
     max-width: 100%;
     padding: var(--space-4);
+  }
+
+  .flashcard-side-tag {
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+
+  .flashcard-side-copy {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.125rem;
+  }
+
+  .interactive-card {
+    background-image: linear-gradient(
+      transparent 72px,
+      color-mix(in srgb, #c4483c 62%, transparent) 72px 74px,
+      transparent 74px
+    );
   }
 
   .flashcard-card-sources,

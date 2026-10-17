@@ -201,7 +201,11 @@ and parallel phrasing, keeping each entry understandable on a narrow phone scree
 Write directly to the student in a clear teaching voice. Do not narrate the source with phrases
 such as "the source says," "the source gives," "the source describes," "the source identifies," or
 "the excerpt gives." Teach the concept directly and cite the supporting source without talking
-about the document as a document. Do not claim that a
+about the document as a document. This is an unconditional voice rule: never describe the upload,
+source document, excerpt, extraction, or what the document says in teaching prose. Convert a
+supported fact into a direct explanation; citations provide attribution. If a detail is unsupported,
+omit it. If extracted text is explicitly truncated, omit the incomplete detail without narrating
+the gap. Mention a source only when a learner needs a scope, rights, or safety warning. Do not claim that a
 fact, topic, page, or example is missing unless the source record is marked truncated or the
 document itself explicitly identifies a gap. When a source record is not truncated, treat all of
 its supplied extracted text as available; do not mistake a long source for a partial excerpt. If a

@@ -170,12 +170,16 @@ class StrictStudyFileTests(unittest.TestCase):
     def test_hyphenated_prose_remains_plain_text_while_bare_subtraction_renders(self) -> None:
         prose = (
             "A six-carbon sugar has a non-reducing end, a two-dimensional cis-trans model, "
-            "and low-to-high movement."
+            "and low-to-high movement. The model's assumptions matter to students' answers."
         )
         self.assertEqual(_inline(prose, strict_math=True), prose)
         self.assertEqual(
             _inline("The difference is x-y.", strict_math=True),
             "The difference is \\(x-y\\).",
+        )
+        self.assertEqual(
+            _inline("The transformed coordinate is x'.", strict_math=True),
+            "The transformed coordinate is \\(x'\\).",
         )
 
     def test_common_missing_tex_command_separator_is_repaired(self) -> None:
@@ -246,6 +250,77 @@ class StrictStudyFileTests(unittest.TestCase):
             r"\\begin\{samepage\}[\s\S]*\\begin\{itemize\}[\s\S]*"
             r"\\end\{itemize\}[\s\S]*\\end\{samepage\}",
         )
+
+    @unittest.skipUnless(compiler_path(settings()), "Tectonic is not installed")
+    def test_takeaway_heading_and_text_stay_on_the_same_pdf_page(self) -> None:
+        recap = (
+            "Keep the central relationship in view when choosing a method. Check the "
+            "assumptions, then explain what the result means for the question at hand."
+        )
+        content = {
+            "format": "study_guide",
+            "schema_version": 2,
+            "sections": [
+                {
+                    "heading": "A page-break test",
+                    "key_terms": [],
+                    "sources": [],
+                    "blocks": [
+                        {
+                            "id": "definition",
+                            "type": "paragraph",
+                            "text": (
+                                "A system can be described by a small set of related variables. "
+                                "A model makes their relationships explicit so that a learner can "
+                                "predict what should change when one input changes."
+                            ),
+                            "sources": [],
+                        },
+                        {
+                            "id": "mechanism",
+                            "type": "paragraph",
+                            "text": (
+                                "First identify the starting conditions and the relevant rule. "
+                                "Then trace how the rule connects the variables, keeping units "
+                                "and assumptions visible throughout the reasoning."
+                            ),
+                            "sources": [],
+                        },
+                        {
+                            "id": "interpretation",
+                            "type": "paragraph",
+                            "text": (
+                                "Finally, compare the result with the original question. A "
+                                "numerical answer is useful only when it has the expected units "
+                                "and the interpretation follows from the model assumptions."
+                            ),
+                            "sources": [],
+                        },
+                        {"id": "recap", "type": "takeaway", "text": recap, "sources": []},
+                    ],
+                }
+            ],
+        }
+        files = create_guide_files(
+            settings(),
+            title="Takeaway pagination",
+            class_name="Test",
+            material_id=uuid4(),
+            content=content,
+            sources=[],
+            strict_math=True,
+        )
+        page_text = [
+            page.extract_text() or "" for page in PdfReader(io.BytesIO(files["pdf"])).pages
+        ]
+        recap_pages = [
+            index
+            for index, text in enumerate(page_text)
+            if "Keep the central relationship" in text or "what the result means" in text
+        ]
+
+        self.assertEqual(len(recap_pages), 1)
+        self.assertIn("Key takeaway", page_text[recap_pages[0]])
 
     @unittest.skipUnless(compiler_path(settings()), "Tectonic is not installed")
     def test_malformed_equation_degrades_locally_without_erasing_other_math(self) -> None:
@@ -322,6 +397,19 @@ class StrictStudyFileTests(unittest.TestCase):
         ):
             with self.subTest(expression=expression):
                 self.assertTrue(_safe_math(expression))
+
+    def test_escaped_percent_is_safe_and_compiles_in_a_percentage(self) -> None:
+        expression = r"\frac{12}{108} \times 100 = 11.1\%"
+        self.assertTrue(_safe_math(expression))
+
+        files = create_guide_files(
+            settings(),
+            strict_math=True,
+            **guide("The prevalence is $" + expression + "$ in this sample."),
+        )
+
+        self.assertTrue(files["pdf"].startswith(b"%PDF-"))
+        self.assertIn(expression, files["latex"].decode("utf-8"))
 
     def test_left_right_delimiter_closers_must_match_the_opening_pair(self) -> None:
         for expression in (

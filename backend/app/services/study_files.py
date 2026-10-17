@@ -126,6 +126,13 @@ _MATH_ENTITIES = {
     "parallel": "∥",
 }
 _MATH_WORDS = {"sin", "cos", "tan", "cot", "log", "ln", "exp", "lim", "max", "min"}
+_NAMED_GREEK_SYMBOLS = frozenset(
+    {
+        "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+        "iota", "kappa", "lambda", "mu", "nu", "xi", "pi", "rho", "sigma",
+        "tau", "upsilon", "phi", "chi", "psi", "omega",
+    }
+)
 _PROSE_WORDS = {
     "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can", "could",
     "do", "does", "for", "from", "had", "has", "have", "he", "her", "here", "how",
@@ -237,7 +244,7 @@ def _safe_math(value: str) -> bool:
                     return False
                 index += 2
                 continue
-            match = re.match(r"\\([A-Za-z]+|[\\ ,;!{}|])", value[index:])
+            match = re.match(r"\\([A-Za-z]+|[\\ ,;!{}|%])", value[index:])
             if not match:
                 return False
             command = match[1]
@@ -565,6 +572,8 @@ def _decode_math_entities(value: str) -> str:
 
 
 def _bare_script_end(value: str, start: int) -> int:
+    if start and re.match(r"[A-Za-z0-9_\u0370-\u03ff]", value[start - 1]):
+        return -1
     base = re.match(r"[A-Za-z0-9\u0370-\u03ff]+", value[start:])
     if not base:
         return -1
@@ -605,8 +614,21 @@ def _bare_script_end(value: str, start: int) -> int:
                 index += 1
             has_script = True
         elif value[index] in "'′°":
-            index += 1
-            has_script = True
+            suffix = value[index]
+            base_text = value[start:index]
+            following_character = value[index + 1] if index + 1 < len(value) else ""
+            is_math_prime = (
+                suffix == "′"
+                or len(base_text) == 1
+                or base_text.casefold() in _NAMED_GREEK_SYMBOLS
+            )
+            if suffix == "°" or (
+                is_math_prime and not (suffix == "'" and following_character.isalpha())
+            ):
+                index += 1
+                has_script = True
+            else:
+                break
         else:
             break
     return index if has_script else -1
@@ -1791,7 +1813,15 @@ def _render_guide_block(
         lines.append(r"\end{enumerate}")
         return lines
     if block.type == "takeaway":
-        return [r"\paragraph{Key takeaway}", body(block.text or "")]
+        # Keep a short recap attached to its heading. Without this wrapper,
+        # LaTeX can put the heading and first line at the bottom of a page and
+        # continue the takeaway on the next page.
+        return [
+            r"\begin{samepage}",
+            r"\paragraph{Key takeaway}",
+            body(block.text or ""),
+            r"\end{samepage}",
+        ]
     return []
 
 
@@ -1823,6 +1853,9 @@ def render_guide_latex(
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{0.6em}
 \emergencystretch=3em
+\makeatletter
+\renewcommand*{\l@section}{\@dottedtocline{1}{1.5em}{3.5em}}
+\makeatother
 \begin{document}
 """,
         r"\title{" + escape_latex(title) + "}",
