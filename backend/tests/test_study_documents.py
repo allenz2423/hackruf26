@@ -140,6 +140,10 @@ class StudyFormatTests(unittest.TestCase):
         self.assertIn("This is an unconditional voice rule", prompt)
         self.assertIn("citations provide attribution", prompt)
         self.assertIn("omit the incomplete detail without narrating", prompt)
+        self.assertIn("not a second full draft", prompt)
+        self.assertIn("do not restate the block paragraphs", prompt)
+        self.assertIn("make a brief internal coverage", prompt)
+        self.assertIn("citation, key-term entry, diagram label", prompt)
 
     def test_provider_timeout_has_a_stable_generation_failure_code(self) -> None:
         self.assertEqual(

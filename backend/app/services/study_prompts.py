@@ -222,9 +222,19 @@ numbered outline as a coverage checklist: before returning, verify that every li
 own section and that the last section covers the outline's final topic. Use the section's space to
 teach its assigned topic in depth rather than spending another section on a subtopic. If the outline
 contains more topics than the requested count, merge only adjacent items and preserve every topic.
-New guides use schema version 2 and ordered blocks, not a separately written
-section body. The section object has only these keys: id, heading, body, key_terms, sources, and
-blocks. Each block has only these keys: id, type, text, expression, definitions, template_id, svg,
+For a full-course request without a user-supplied numbered outline, make a brief internal coverage
+map from explicit tables of contents, chapter or lecture headings, and the supplied course sequence
+before drafting. Assign each major supported topic to an ordered section. A topic is not covered by
+its citation, key-term entry, diagram label, or one passing sentence alone; explain its central idea
+in the section assigned to it. Before returning, compare the finished headings and teaching blocks
+against that map. Merge only adjacent topics when the requested section count requires it, and do
+not invent detail when the supplied evidence does not support it.
+New guides use schema version 2 and ordered blocks as the primary reader-facing content. The
+required `body` field is a concise plain-text fallback/summary, not a second full draft: when a
+section has blocks, keep its body to one or two sentences and do not restate the block paragraphs,
+formula explanations, worked examples, diagram captions, or takeaway. If a section has no blocks,
+put its teaching prose in `body`. The section object has only these keys: id, heading, body,
+key_terms, sources, and blocks. Each block has only these keys: id, type, text, expression, definitions, template_id, svg,
 title, parameters, alt_text, fallback_text, steps, and sources. Use null for unused optional scalar fields
 and empty arrays for unused list fields. Do not add placeholder or explanatory keys such as
 text_placeholder. Use paragraph blocks for prose, formula blocks for source-supported expressions,
