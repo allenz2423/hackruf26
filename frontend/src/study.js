@@ -239,7 +239,7 @@ export function displayStudyMaterialTitle(title, className) {
 
 export function openRemoteStudyGuideViewer(
   material,
-  { klassId, uploads = [], backendClassId = null, canRetry = false } = {}
+  { klassId, uploads = [], backendClassId = null, canRetry = false, currentUserAvatar = null } = {}
 ) {
   let viewer;
   const onRetry = async (failedMaterial, updateViewer) => {
@@ -274,7 +274,7 @@ export function openRemoteStudyGuideViewer(
       viewer.dialog.removeEventListener("close", stopOnClose);
     }
   };
-  viewer = openMaterialViewer(material, canRetry ? { onRetry } : {});
+  viewer = openMaterialViewer(material, { ...(canRetry ? { onRetry } : {}), currentUserAvatar });
   return viewer;
 }
 
@@ -325,7 +325,7 @@ function scoreableQuestions(material) {
   });
 }
 
-export async function renderStudyTab({ root, klass, currentUserId = null, onMaterialAdded, onAttemptCompleted }) {
+export async function renderStudyTab({ root, klass, currentUserId = null, currentUserAvatar = null, onMaterialAdded, onAttemptCompleted }) {
   const backendClassId = getBackendClassId(klass);
   let studyMaterialFolders = [];
   let selectedStudyFolder = "all";
@@ -699,29 +699,32 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
       }
 
       let viewer;
-      viewer = openMaterialViewer(material, canRetryStudyGuide(material, klass, currentUserId) ? {
-        onRetry: async (failedMaterial, updateViewer) => {
-          const summary = await retryStudyMaterialApi(failedMaterial.id);
-          const pending = formatRemoteMaterial(
-            summary, klass.id, "Study guide", klass.uploads, backendClassId
-          );
-          pending.folderId = failedMaterial.folderId || null;
-          const pendingViewer = {
-            ...pending,
-            previewContent: failedMaterial.previewContent,
-            previewRevision: failedMaterial.previewRevision
-          };
-          await onMaterialAdded(pending);
-          renderMaterials();
-          updateViewer(pendingViewer);
-          const retryController = new AbortController();
-          const retrySession = watchLiveGuidePreview(pendingViewer, retryController, viewer);
-          const result = await retrySession.promise;
-          await onMaterialAdded(result);
-          renderMaterials();
-          return result;
-        }
-      } : {});
+      viewer = openMaterialViewer(material, {
+        currentUserAvatar,
+        ...(canRetryStudyGuide(material, klass, currentUserId) ? {
+          onRetry: async (failedMaterial, updateViewer) => {
+            const summary = await retryStudyMaterialApi(failedMaterial.id);
+            const pending = formatRemoteMaterial(
+              summary, klass.id, "Study guide", klass.uploads, backendClassId
+            );
+            pending.folderId = failedMaterial.folderId || null;
+            const pendingViewer = {
+              ...pending,
+              previewContent: failedMaterial.previewContent,
+              previewRevision: failedMaterial.previewRevision
+            };
+            await onMaterialAdded(pending);
+            renderMaterials();
+            updateViewer(pendingViewer);
+            const retryController = new AbortController();
+            const retrySession = watchLiveGuidePreview(pendingViewer, retryController, viewer);
+            const result = await retrySession.promise;
+            await onMaterialAdded(result);
+            renderMaterials();
+            return result;
+          }
+        } : {})
+      });
       return watchLiveGuidePreview(material, controller, viewer);
     }
 
@@ -1432,7 +1435,7 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
 
       const questions = scoreableQuestions(material);
       if (!["Quiz", "Practice test"].includes(material.type) || !questions.length) {
-        openMaterialViewer(material);
+        openMaterialViewer(material, { currentUserAvatar });
         return;
       }
 

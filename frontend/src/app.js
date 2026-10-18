@@ -786,6 +786,7 @@ async function renderClassTab({ id, tab }) {
       root,
       klass,
       currentUserId: currentUser?.id || null,
+      currentUserAvatar: currentUser?.avatar || null,
       onMaterialAdded: (material) => {
         if (material.resourceScope === "personal") {
           // Personal resources are served from the owner-scoped API and must not
@@ -2537,10 +2538,14 @@ async function openRequestedStudyMaterial() {
         klassId: classId,
         uploads,
         backendClassId: classId,
-        canRetry
+        canRetry,
+        currentUserAvatar: currentUser?.avatar || null
       });
     } else {
-      openMaterialViewer(material, { initialFlashcardReview: params.get("review_due") === "1" });
+      openMaterialViewer(material, {
+        initialFlashcardReview: params.get("review_due") === "1",
+        currentUserAvatar: currentUser?.avatar || null
+      });
     }
   } catch (error) {
     toast(error.message || "This study material could not be opened.", { tone: "error" });

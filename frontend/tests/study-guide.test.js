@@ -285,6 +285,72 @@ test("study guides paginate one section at a time with a model-authored mini qui
   }
 });
 
+test("guide chat trigger shows the learner's custom Jot avatar and asks Jot", async (t) => {
+  class FakeElement {
+    constructor() { this.textContent = ""; this.innerHTML = ""; this.scrollTop = 0; }
+    addEventListener() {}
+    querySelectorAll() { return []; }
+    querySelector() { return null; }
+  }
+  class FakeDialog extends FakeElement {
+    constructor() {
+      super();
+      this.open = false;
+      this.root = new FakeElement();
+      this.title = new FakeElement();
+      this.meta = new FakeElement();
+      this.closeButton = new FakeElement();
+    }
+    setAttribute() {}
+    showModal() { this.open = true; }
+    remove() {}
+    querySelector(selector) {
+      return {
+        "#material-session": this.root,
+        "#material-dialog-title": this.title,
+        "#material-dialog-meta": this.meta,
+        "[data-close]": this.closeButton
+      }[selector] || null;
+    }
+  }
+
+  const priorDocument = globalThis.document;
+  const priorFetch = globalThis.fetch;
+  globalThis.document = {
+    createElement: () => new FakeDialog(),
+    body: { append() {} },
+    addEventListener() {},
+    removeEventListener() {}
+  };
+  globalThis.fetch = async () => new Response(JSON.stringify({ sections: [] }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" }
+  });
+  t.after(() => {
+    if (priorDocument === undefined) delete globalThis.document;
+    else globalThis.document = priorDocument;
+    globalThis.fetch = priorFetch;
+  });
+
+  const viewer = openMaterialViewer({
+    id: "guide-chat-avatar",
+    title: "BIO Guide",
+    type: "Study guide",
+    status: "ready",
+    isRemote: true,
+    sections: [{ heading: "Osmosis", body: "Water moves down its water-potential gradient." }]
+  }, {
+    currentUserAvatar: { color: "sunny", face: "wink", accessory: "cap" }
+  });
+
+  const trigger = viewer.dialog.root.innerHTML.match(/<button[^>]*data-guide-chat-open[\s\S]*?<\/button>/u)?.[0];
+  assert.ok(trigger, "ready remote guides should offer the chat action");
+  assert.match(trigger, /<svg class="avatar"/u);
+  assert.match(trigger, /fill="#f0c93a"/u, "the button should use the learner's selected avatar color");
+  assert.match(trigger, />Ask Jot!</u);
+  assert.doesNotMatch(trigger, /Ask about this section|Explain selected passage/u);
+});
+
 test("legacy sections get an honest practice fallback and due sections offer fresh unscored practice", async (t) => {
   class FakeElement {
     constructor() { this.textContent = ""; this.innerHTML = ""; this.scrollTop = 0; }

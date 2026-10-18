@@ -1,6 +1,7 @@
 import { mathHtml, typesetMath } from "./math.js";
 import { escapeHtml, toast } from "./ui.js";
 import { icon } from "./icons.js";
+import { avatarSvg } from "./avatar.js";
 import { renderFlashcards, normalizeCards } from "./flashcards.js";
 import { sourceCitationHtml, bindSourceCitations, sourceWarningsHtml } from "./source-citations.js";
 import {
@@ -288,10 +289,12 @@ function guideMiniQuizHtml(quiz, material, section, sectionIndex, anchorPrefix, 
 
 function renderGuide(root, material, onRetry = null, {
   currentPage = 0,
+  currentUserAvatar = null,
   quizStates = new Map(),
   reviewProgress = new Map(),
   onNavigate = null,
   onOpenChat = null,
+  onReturnToGuide = null,
   onQuizStateChange = null,
   onClearProgress = null
 } = {}) {
@@ -371,7 +374,7 @@ function renderGuide(root, material, onRetry = null, {
             <section id="${anchorPrefix}-section-${page + 1}" class="guide-section" data-guide-section="${escapeHtml(section.id || `section-${page + 1}`)}" tabindex="-1">
               <p class="guide-section-overline">Section ${page + 1} of ${sections.length}</p>
               <h3 class="guide-section-heading">${mathHtml(section.heading || `Section ${page + 1}`)}</h3>
-              ${onOpenChat ? `<div class="guide-section-help"><button class="btn btn-secondary btn-small" type="button" data-guide-chat-open aria-expanded="false">Ask about this section</button><span class="field-hint">Select a passage first to focus the question there; otherwise Jot uses this section.</span></div>` : ""}
+              ${onOpenChat ? `<div class="guide-section-help"><button class="btn btn-secondary btn-small guide-chat-trigger" type="button" data-guide-chat-open aria-expanded="false"><span class="guide-chat-trigger-avatar" aria-hidden="true">${avatarSvg(currentUserAvatar, { size: 24 })}</span><span>Ask Jot!</span></button><span class="field-hint">Select a passage first to focus the question there; otherwise Jot uses this section.</span></div>` : ""}
               <div class="guide-section-blocks">
                 ${blocks.map((block) => `<div class="guide-section-block" data-guide-block="${escapeHtml(block.id)}">${renderStudyGuideBlock(block)}</div>`).join("")}
               </div>
@@ -430,7 +433,6 @@ function renderGuide(root, material, onRetry = null, {
         if (foundIndex >= 0) blockIndex = foundIndex;
       }
     }
-    event.currentTarget.textContent = blockIndex === null ? "Ask about this section" : "Explain selected passage";
     onOpenChat?.({ sectionIndex: page, sectionHeading: section?.heading || `Section ${page + 1}`, blockIndex, sourceTrigger: event.currentTarget });
   });
 
@@ -620,14 +622,14 @@ function renderGuide(root, material, onRetry = null, {
 
   root.querySelector("[data-flashcards]")?.addEventListener("click", () => {
     renderFlashcards(root, material, {
-      onBack: () => renderGuide(root, material, onRetry, { currentPage: page, quizStates, onNavigate })
+      onBack: onReturnToGuide || (() => renderGuide(root, material, onRetry, { currentPage: page, quizStates, onNavigate }))
     });
   });
 
   root.querySelector("[data-practice]")?.addEventListener("click", () => {
-    renderQuestions(root, material, () => renderGuide(root, material, onRetry, {
+    renderQuestions(root, material, onReturnToGuide || (() => renderGuide(root, material, onRetry, {
       currentPage: page, quizStates, onNavigate
-    }));
+    })));
   });
 }
 
@@ -731,7 +733,11 @@ function renderQuestions(root, material, onReturn = null) {
   draw();
 }
 
-export function openMaterialViewer(material, { onRetry = null, initialFlashcardReview = false } = {}) {
+export function openMaterialViewer(material, {
+  onRetry = null,
+  initialFlashcardReview = false,
+  currentUserAvatar = null
+} = {}) {
   const dialog = addDialog(material.type || "Study material", { resizable: material.type === "Study guide" });
   const root = dialog.querySelector("#material-session");
   const chatHost = dialog.querySelector("[data-guide-chat-host]");
@@ -768,6 +774,7 @@ export function openMaterialViewer(material, { onRetry = null, initialFlashcardR
         : null,
       {
         currentPage: currentGuidePage,
+        currentUserAvatar,
         quizStates: miniQuizStates,
         reviewProgress: guideReviewProgress,
         onOpenChat: currentMaterial.isRemote && currentMaterial.status === "ready" ? (context) => {
@@ -792,6 +799,7 @@ export function openMaterialViewer(material, { onRetry = null, initialFlashcardR
           guideChat?.setContext({ sectionIndex: context.sectionIndex, sectionHeading: context.sectionHeading, material: currentMaterial });
           guideChat?.open(context);
         } : null,
+        onReturnToGuide: renderCurrentGuidePage,
         onNavigate(page) {
           currentGuidePage = page;
           saveGuidePosition(currentGuideMaterialId, page);
