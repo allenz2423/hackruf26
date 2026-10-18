@@ -289,6 +289,7 @@ function stripMathDelimiters(value) {
 }
 
 function findBareScriptEnd(text, start) {
+  if (start > 0 && /[\p{L}\p{N}_]/u.test(text[start - 1] || "")) return -1;
   const base = /^[\p{L}\p{N}]+/u.exec(text.slice(start));
   if (!base) return -1;
   let index = start + base[0].length;
@@ -313,7 +314,15 @@ function findBareScriptEnd(text, start) {
     } else if (UNICODE_SUBSCRIPT.has(text[index]) || UNICODE_SUPERSCRIPT.has(text[index])) {
       while (UNICODE_SUBSCRIPT.has(text[index]) || UNICODE_SUPERSCRIPT.has(text[index])) index += 1;
       hasScript = true;
-    } else if (text[index] === "'" || text[index] === "′" || text[index] === "°") {
+    } else if (text[index] === "'") {
+      // A straight apostrophe inside or after an ordinary word is usually a
+      // contraction or possessive ("there's", "students'"). Only treat the
+      // short identifier form as a prime; longer math names should use TeX or
+      // the explicit Unicode prime so prose stays prose.
+      if (base[0].length > 2 || /[\p{L}\p{N}]/u.test(text[index + 1] || "")) break;
+      index += 1;
+      hasScript = true;
+    } else if (text[index] === "′" || text[index] === "°") {
       index += 1;
       hasScript = true;
     } else {

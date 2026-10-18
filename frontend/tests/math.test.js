@@ -69,6 +69,12 @@ test("hyphenated prose remains prose while bare subtraction still renders", () =
   assert.deepEqual(kinds("The difference is x-y."), ["T:The difference is ", "I:x-y", "T:."]);
 });
 
+test("apostrophes in contractions and possessives remain prose while variable primes render", () => {
+  const prose = "There's only 3 shells or are there unlimited shells? It's a user's question; users' answers vary.";
+  assert.deepEqual(kinds(prose), [`T:${prose}`]);
+  assert.deepEqual(kinds("x' = 2 and f'(x)"), ["I:x' = 2", "T: and ", "I:f'", "T:(x)"]);
+});
+
 test("an unclosed formula cannot swallow prose or later formulas", () => {
   const text = "The transformed tensor is $\\boldsymbol{\\sigma}'=\\mathbf{A}\\boldsymbol{\\sigma}\\mathbfand each new component is obtained by projection. The maximum shear acts at $45^\\circ$ from the principal directions.";
   const segments = splitMath(text);
