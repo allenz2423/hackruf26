@@ -8546,9 +8546,10 @@ p {
   max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
-  /* overflow makes this span an inline block with a bottom-edge baseline.
-     Lower it to align the KaTeX glyph baseline with surrounding prose. */
-  vertical-align: -0.2em;
+  /* Scrolling makes this span's baseline its bottom edge rather than KaTeX's
+     internal text baseline. Compensate for the glyph height so inline math
+     sits on the same baseline as surrounding prose. */
+  vertical-align: -0.4em;
 }
 
 /* A long display equation scrolls inside its box instead of widening the page. */
