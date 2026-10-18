@@ -299,7 +299,7 @@ export function conceptGraphPageMarkup({
         <button class="btn btn-primary" type="submit">Create proposed concept</button>
       </form></details>
       ${reviewError ? `<p class="field-hint">The review queue is unavailable; refresh to try again.</p>` : `
-        ${proposals.concepts.length ? `<section class="concept-review-section" aria-labelledby="concept-proposals-title"><h4 id="concept-proposals-title">Concept proposals</h4><div class="concept-card-list">${proposals.concepts.map((concept) => conceptCardMarkup(concept, { concepts: [...concepts, ...proposals.concepts], canManage, proposal: true })).join("")}</div></section>` : `<p class="field-hint">No concept proposals need review.</p>`}
+        ${proposals.concepts.length ? `<section class="concept-review-section" aria-labelledby="concept-proposals-title"><h4 id="concept-proposals-title">Concept proposals</h4><div class="concept-card-list">${proposals.concepts.map((concept) => conceptCardMarkup(concept, { concepts: [...concepts, ...proposals.concepts], canManage, proposal: true })).join("")}</div></section>` : `<p class="field-hint" data-no-concept-proposals tabindex="-1">No concept proposals need review.</p>`}
         ${proposals.aliases.length ? `<section class="concept-review-section" aria-labelledby="alias-proposals-title"><h4 id="alias-proposals-title">Alias proposals</h4><div class="concept-alias-proposal-list">${proposals.aliases.map(aliasProposalMarkup).join("")}</div></section>` : `<p class="field-hint">No alias proposals need review.</p>`}
         ${proposals.edges.length ? `<section class="concept-review-section" aria-labelledby="edge-proposals-title"><h4 id="edge-proposals-title">Relationship proposals</h4><div class="concept-edge-list">${proposals.edges.map((edge) => edgeCardMarkup(edge, [...concepts, ...proposals.concepts], canManage, { proposal: true })).join("")}</div></section>` : `<p class="field-hint">No relationship proposals need review.</p>`}`}
       <details class="concept-create-details"><summary class="btn btn-secondary">Add a source-backed relationship</summary><form class="concept-edge-create-form" id="create-class-concept-edge">
@@ -396,8 +396,11 @@ export async function renderConceptGraphTab({ root, klass }) {
 
   const render = () => { root.innerHTML = conceptGraphPageMarkup(state); };
 
-  async function loadData({ preserveStatus = false } = {}) {
+  async function loadData({ preserveStatus = false, preserveViewport = false } = {}) {
     if (!root.isConnected) return;
+    const viewport = preserveViewport
+      ? { left: window.scrollX, top: window.scrollY }
+      : null;
     if (!classId) {
       state.error = "Save this class to your account before opening its shared concept map.";
       render();
@@ -412,7 +415,9 @@ export async function renderConceptGraphTab({ root, klass }) {
     state.review = {};
     state.uploads = [];
     if (!preserveStatus) state.statusMessage = "";
-    root.innerHTML = `<div class="panel empty-state" role="status">Loading the latest class graph…</div>`;
+    if (!preserveViewport) {
+      root.innerHTML = `<div class="panel empty-state" role="status">Loading the latest class graph…</div>`;
+    }
     const [graphResult, reviewResult, uploadResult, mergeHistoryResult] = await Promise.allSettled([
       getClassConceptGraphApi(classId),
       canManage ? getClassConceptGraphReviewApi(classId) : Promise.resolve({}),
@@ -437,6 +442,7 @@ export async function renderConceptGraphTab({ root, klass }) {
     state.extractionJobs = [...existing.values()];
     storeExtractionJobs(classId, state.extractionJobs);
     render();
+    if (viewport) window.scrollTo(viewport.left, viewport.top);
     for (const job of state.extractionJobs) if (isPending(job.status)) void pollExtraction(job.operation_id);
   }
 
@@ -548,6 +554,14 @@ export async function renderConceptGraphTab({ root, klass }) {
 
     const conceptDecision = event.target.closest("[data-concept-decision]");
     if (conceptDecision) {
+      const decision = conceptDecision.dataset.conceptDecision;
+      const proposalCards = [...root.querySelectorAll(".concept-review-section .concept-card--proposal")];
+      const proposalIndex = proposalCards.indexOf(conceptDecision.closest(".concept-card--proposal"));
+      const nextProposal = [proposalCards[proposalIndex + 1], proposalCards[proposalIndex - 1]]
+        .find(Boolean);
+      const nextProposalId = ["approve", "reject"].includes(decision)
+        ? nextProposal?.querySelector("[data-concept-decision]")?.dataset.conceptId
+        : null;
       if (conceptDecision.dataset.conceptDecision === "deprecate") {
         const confirmed = await openDialog({
           title: "Deprecate this concept?",
@@ -559,10 +573,17 @@ export async function renderConceptGraphTab({ root, klass }) {
       }
       conceptDecision.disabled = true;
       try {
-        await decideClassConceptApi(classId, conceptDecision.dataset.conceptId, conceptDecision.dataset.conceptDecision, Number(conceptDecision.dataset.version));
+        await decideClassConceptApi(classId, conceptDecision.dataset.conceptId, decision, Number(conceptDecision.dataset.version));
         state.statusMessage = "Concept review saved.";
-        await loadData({ preserveStatus: true });
-        root.querySelector("#concept-graph-title")?.focus();
+        await loadData({ preserveStatus: true, preserveViewport: true });
+        if (["approve", "reject"].includes(decision)) {
+          const remainingProposal = nextProposalId
+            ? [...root.querySelectorAll('[data-concept-decision="approve"]')]
+              .find((button) => button.dataset.conceptId === nextProposalId)
+            : null;
+          (remainingProposal || root.querySelector("[data-no-concept-proposals]"))
+            ?.focus({ preventScroll: true });
+        }
       } catch (error) { await reportMutationError(error, `[data-concept-id="${CSS.escape(conceptDecision.dataset.conceptId)}"]`); }
       finally { if (conceptDecision.isConnected) conceptDecision.disabled = false; }
       return;
