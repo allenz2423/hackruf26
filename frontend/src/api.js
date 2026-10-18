@@ -276,6 +276,10 @@ export function getLearningRecommendationsApi({ signal } = {}) {
   return apiFetch("/api/learning/recommendations", { signal });
 }
 
+export function getDueFlashcardDecksApi({ signal } = {}) {
+  return apiFetch("/api/learning/flashcards/due", { signal });
+}
+
 export function updateLearningRecommendationStateApi(recommendationId, state) {
   if (!["active", "completed", "dismissed"].includes(state)) {
     throw new Error("Recommendation state must be active, completed, or dismissed.");

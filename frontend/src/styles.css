@@ -1745,8 +1745,9 @@ main {
 }
 
 .file-name {
-  width: fit-content;
+  width: 100%;
   max-width: 100%;
+  min-width: 0;
   padding: 0;
   border: 0;
   background: transparent;
@@ -1766,13 +1767,16 @@ main {
 
 .row-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-1);
 }
 
 .row-meta {
+  min-width: 0;
   color: var(--muted);
   font-size: 0.8125rem;
+  overflow-wrap: anywhere;
 }
 
 .row-summary {
@@ -5993,7 +5997,7 @@ main {
   font-weight: 600;
 }
 
-@media (max-width: 360px) {
+@media (max-width: 600px) {
   .flashcard-player,
   .flashcard-header,
   .flashcard-stage-interactive,
@@ -6020,6 +6024,11 @@ main {
     max-width: 100%;
     flex-wrap: wrap;
     justify-content: flex-start;
+  }
+
+  .flashcard-piles-indicator {
+    min-width: 0;
+    flex-wrap: wrap;
   }
 
   .flashcard-stage-interactive {
@@ -6072,7 +6081,17 @@ main {
   }
 
   .flashcard-nav-bar > * {
+    min-width: 0;
     max-width: 100%;
+  }
+
+  .flashcard-nav-bar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .flashcard-nav-bar > * {
+    width: 100%;
   }
 }
 
@@ -6084,6 +6103,12 @@ main {
 
   .flashcard-reflection > div:first-child {
     grid-column: auto;
+  }
+}
+
+@media (max-width: 360px) {
+  .flashcard-nav-bar {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -7747,6 +7772,17 @@ p {
 
   .workspace-main {
     padding-top: var(--space-3);
+  }
+}
+
+@media (max-width: 360px) {
+  .data-list li .row-actions {
+    flex-wrap: nowrap;
+    gap: var(--space-1);
+  }
+
+  .data-list li .row-actions [data-preview] .upload-action-label {
+    display: none;
   }
 }
 

@@ -109,6 +109,7 @@ Class-library routes use `class_access.py` to resolve an active membership, capa
 - `GET /api/learning/progress`, `/progress/history`, `/preferences`, `/concepts/{concept_id}`, and `/recommendations`; `PUT /api/learning/preferences`; `PATCH /api/learning/recommendations/{id}/state`
 - `POST /api/learning/recommendations/{id}/review` and `POST /api/learning/reviews/{session_id}/answer` for short, owner-private, source-linked retrieval checks
 - `GET|PUT|DELETE /api/study-materials/{material_id}/flashcard-review` for owner-private flashcard self-ratings and review scheduling
+- `GET /api/learning/flashcards/due` for an owner-private, bounded list of readable flashcard decks with due cards. It returns only material/class identifiers, title, due count, and earliest due timestamp; it never returns card content or changes mastery.
 - `GET /api/admin/learning-calibration` (administrator-only aggregate review and job status)
 - `GET|PUT|DELETE /api/admin/ai-provider` and `POST /api/admin/ai-provider/test` (administrator-only provider settings; DELETE removes the admin override and restores environment settings; responses never include the API key)
 - `GET /api/admin/ai-usage` and `PUT /api/admin/ai-usage/balance` (administrator-only provider request ledger, per-material cost rollups, and manual balance snapshots)

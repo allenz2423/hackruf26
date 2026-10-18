@@ -112,7 +112,7 @@ function shuffleArray(items) {
  * Interactive flashcard player. Ratings are learner self-reports, never mastery
  * evidence; signed-in remote sets may persist only the rating and review date.
  */
-export function renderFlashcards(root, material, { onBack, onAttemptCompleted } = {}) {
+export function renderFlashcards(root, material, { onBack, onAttemptCompleted, initialDueReview = false } = {}) {
   const deck = normalizeCards(material);
   let activeCards = [...deck];
   let currentIndex = 0;
@@ -129,6 +129,8 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
   let clearedHistoryMessage = "";
   let scoreCleanup = null;
   const canPersist = Boolean(material?.isRemote && material?.id);
+  let launchDueReviewAfterHydration = initialDueReview && canPersist;
+  let initialDueReviewOutcome = initialDueReview ? (canPersist ? "loading" : "error") : null;
 
   function teardown() {
     hydrationVersion += 1;
@@ -292,6 +294,7 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
   function startDueReview() {
     const due = dueCards();
     if (!due.length) return;
+    initialDueReviewOutcome = null;
     activeCards = due;
     currentIndex = 0;
     isFlipped = false;
@@ -315,6 +318,8 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
   }
 
   function restartAll() {
+    launchDueReviewAfterHydration = false;
+    initialDueReviewOutcome = null;
     activeCards = [...deck];
     currentIndex = 0;
     isFlipped = false;
@@ -441,9 +446,52 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
     }));
   }
 
+  function renderInitialDueReviewOutcome() {
+    const heading = initialDueReviewOutcome === "loading"
+      ? "Checking your review schedule"
+      : initialDueReviewOutcome === "error"
+        ? "Due cards could not be confirmed"
+        : "No cards are due now";
+    const description = initialDueReviewOutcome === "loading"
+      ? "Loading your private schedule before opening due cards."
+      : initialDueReviewOutcome === "error"
+        ? "Your review schedule is unavailable. Retry it, or choose to review the full set."
+        : "This deck no longer has due cards. You can return or choose to review the full set.";
+    root.innerHTML = `
+      <section class="flashcard-player assessment-view">
+        ${sourceWarningsHtml(material)}
+        ${generatedStudyQualityNote(material, "flashcards")}
+        ${onBack ? `<button class="back-link assessment-back" type="button" data-back>&larr; Back to study materials</button>` : ""}
+        <div class="session-complete" role="status" aria-live="polite" aria-busy="${initialDueReviewOutcome === "loading"}">
+          <span class="kind-icon">${icon("cards", { size: 36 })}</span>
+          <h3>${heading}</h3>
+          <p class="muted">${description}</p>
+          ${initialDueReviewOutcome === "error" && canPersist ? `<button class="btn btn-secondary" type="button" data-retry-due-schedule>Retry schedule</button>` : ""}
+          ${initialDueReviewOutcome !== "loading" ? `<button class="btn btn-primary" type="button" data-open-full-deck>Review full set</button>` : ""}
+          ${onBack ? `<button class="btn btn-ghost" type="button" data-back>Back to study materials</button>` : ""}
+        </div>
+      </section>`;
+    root.querySelectorAll("[data-back]").forEach((button) => button.addEventListener("click", () => {
+      teardown();
+      onBack?.();
+    }));
+    root.querySelector("[data-open-full-deck]")?.addEventListener("click", restartAll);
+    root.querySelector("[data-retry-due-schedule]")?.addEventListener("click", () => {
+      initialDueReviewOutcome = "loading";
+      launchDueReviewAfterHydration = true;
+      privateStateStatus = "loading";
+      render();
+      hydratePrivateState();
+    });
+  }
+
   function render() {
     scoreCleanup?.();
     scoreCleanup = null;
+    if (initialDueReviewOutcome) {
+      renderInitialDueReviewOutcome();
+      return;
+    }
     if (!activeCards.length) {
       renderEmptyState();
       return;
@@ -561,10 +609,23 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
         }
       }
       privateStateStatus = "ready";
-      render();
+      if (launchDueReviewAfterHydration) {
+        launchDueReviewAfterHydration = false;
+        if (dueCards().length) startDueReview();
+        else {
+          initialDueReviewOutcome = "empty";
+          render();
+        }
+      } else {
+        render();
+      }
     }).catch(() => {
       if (requestedVersion !== hydrationVersion || !root.querySelector(".flashcard-player")) return;
       privateStateStatus = "error";
+      if (launchDueReviewAfterHydration) {
+        launchDueReviewAfterHydration = false;
+        initialDueReviewOutcome = "error";
+      }
       render();
     });
   }

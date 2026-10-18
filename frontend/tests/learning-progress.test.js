@@ -7,6 +7,7 @@ import {
   getLearningProgressApi,
   getLearningProgressHistoryApi,
   getLearningRecommendationsApi,
+  getDueFlashcardDecksApi,
   updateLearningPreferencesApi,
   updateLearningRecommendationStateApi
 } from "../src/api.js";
@@ -16,11 +17,13 @@ import {
   learningHistoryMarkup,
   learningProgressMarkup,
   learningRecommendationsMarkup,
+  dueFlashcardDecksMarkup,
   normalizeLearningConceptDetail,
   normalizeLearningHistory,
   normalizeLearningPreferences,
   normalizeLearningProgress,
   normalizeLearningRecommendations,
+  normalizeDueFlashcardDecks,
   startLearningRecommendation
 } from "../src/progress.js";
 
@@ -52,6 +55,57 @@ function progressFixture(overrides = {}) {
     ...overrides
   };
 }
+
+test("due flashcard summaries are strictly normalized and open only due cards", (t) => {
+  const previousLocation = globalThis.location;
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: { href: "https://jot.example/progress?window=30#/progress" }
+  });
+  t.after(() => previousLocation
+    ? Object.defineProperty(globalThis, "location", { configurable: true, value: previousLocation })
+    : delete globalThis.location);
+
+  const due = normalizeDueFlashcardDecks({
+    items: [{
+      material_id: "deck-1", title: "Cell membranes", class_id: "class-1", class_name: "Biology",
+      due_count: 3, first_due_at: "2026-10-18T12:00:00Z"
+    }],
+    has_more: false
+  });
+  const html = dueFlashcardDecksMarkup(due);
+  assert.match(html, /3 cards due/);
+  assert.match(html, /href="\/progress\?study_material=deck-1&amp;review_due=1"/);
+  assert.match(html, /Biology/);
+
+  assert.throws(() => normalizeDueFlashcardDecks({
+    items: [{ material_id: "deck-1", title: "Deck", due_count: 0, first_due_at: "bad" }],
+    has_more: false
+  }), /expected format/);
+  const noisyDto = normalizeDueFlashcardDecks({
+    items: [{
+      material_id: "deck-1", title: "Deck", class_id: null, class_name: null,
+      due_count: 1, first_due_at: "2026-10-18T12:00:00Z", cards: ["secret"]
+    }],
+    has_more: false
+  });
+  assert.doesNotMatch(dueFlashcardDecksMarkup(noisyDto), /secret/);
+});
+
+test("due flashcard API requests the owner-private queue endpoint", async (t) => {
+  const previousFetch = globalThis.fetch;
+  let requestedUrl = "";
+  globalThis.fetch = async (url) => {
+    requestedUrl = String(url);
+    return new Response(JSON.stringify({ items: [], has_more: false }), {
+      status: 200, headers: { "Content-Type": "application/json" }
+    });
+  };
+  t.after(() => { globalThis.fetch = previousFetch; });
+
+  assert.deepEqual(await getDueFlashcardDecksApi(), { items: [], has_more: false });
+  assert.equal(requestedUrl, "/api/learning/flashcards/due");
+});
 
 test("learning progress API uses the signed-in session and validates the requested window", async (t) => {
   const originalFetch = globalThis.fetch;

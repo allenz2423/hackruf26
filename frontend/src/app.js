@@ -29,6 +29,7 @@ import { renderConceptGraphTab } from "./concept-graph.js";
 import { createRouter } from "./router.js";
 import { ScreenCaptureController } from "./screen-capture.js";
 import { formatRemoteMaterial, openRemoteStudyGuideViewer, renderStudyTab } from "./study.js";
+import { openMaterialViewer } from "./material-viewer.js";
 import { renderLearningProgress } from "./progress.js";
 import { AVATAR_ACCESSORIES, AVATAR_COLORS, AVATAR_FACES, avatarSvg, describeAvatar, normalizeAvatar, randomAvatar } from "./avatar.js";
 import { JotBuddy } from "./jot-buddy.js";
@@ -830,8 +831,10 @@ async function renderClassTab({ id, tab }) {
     root,
     klass,
     currentUserId: currentUser?.id || null,
-    onUploadsAdded: (uploads) => {
-      updateClass(klass.id, { uploads: [...klass.uploads, ...uploads] });
+    onUploadsAdded: async (uploads) => {
+      const nextUploads = [...klass.uploads, ...uploads];
+      await updateClass(klass.id, { uploads: nextUploads });
+      klass.uploads = nextUploads;
       renderClassTab({ id, tab });
     },
     onUploadRemoved: (uploadId) => {
@@ -1760,7 +1763,7 @@ function renderLogin({ mode = "signin" } = {}) {
       await applyAuth(user);
       toast(signup ? `Welcome to Jot, ${displayName(user)}!` : `Welcome back, ${displayName(user)}!`);
       redirect("#/classes");
-      void openRequestedStudyGuide();
+      void openRequestedStudyMaterial();
     } catch (error) {
       setBusy(false);
       password.value = "";
@@ -2502,14 +2505,17 @@ const router = createRouter(
   { beforeRender: () => disposeTutor?.() }
 );
 
-async function openRequestedStudyGuide() {
+async function openRequestedStudyMaterial() {
   const params = new URLSearchParams(window.location.search);
-  const materialId = params.get("study_guide");
+  const guideId = params.get("study_guide");
+  const flashcardId = params.get("study_material");
+  const materialId = guideId || flashcardId;
   if (!materialId || !currentUser) return;
 
   try {
     const detail = await getStudyMaterialDetailApi(materialId);
-    if (detail.kind !== "study_guide") throw new Error("This saved item is not a study guide.");
+    if (guideId && detail.kind !== "study_guide") throw new Error("This saved item is not a study guide.");
+    if (flashcardId && detail.kind !== "flashcards") throw new Error("This saved item is not a flashcard set.");
     const classId = detail.class_id || detail.origin_class_id || null;
     let uploads = [];
     if (classId) {
@@ -2519,22 +2525,29 @@ async function openRequestedStudyGuide() {
         // The authorized guide preview can still open if source-name lookup fails.
       }
     }
-    const material = formatRemoteMaterial(detail, classId, "Study guide", uploads, classId);
-    const klass = classId ? getClassById(classId) : null;
-    const isAuthor = material.createdBy && String(material.createdBy) === String(currentUser?.id);
-    const canRetry = material.resourceScope === "personal"
-      ? Boolean(isAuthor)
-      : Boolean(klass?.isOwner || (isAuthor && klass && classHasCapability(klass, "create")));
-    openRemoteStudyGuideViewer(material, {
-      klassId: classId,
-      uploads,
-      backendClassId: classId,
-      canRetry
-    });
+    const material = formatRemoteMaterial(detail, classId, guideId ? "Study guide" : "Flashcards", uploads,
+      detail.resource_scope === "personal" ? null : classId);
+    if (guideId) {
+      const klass = classId ? getClassById(classId) : null;
+      const isAuthor = material.createdBy && String(material.createdBy) === String(currentUser?.id);
+      const canRetry = material.resourceScope === "personal"
+        ? Boolean(isAuthor)
+        : Boolean(klass?.isOwner || (isAuthor && klass && classHasCapability(klass, "create")));
+      openRemoteStudyGuideViewer(material, {
+        klassId: classId,
+        uploads,
+        backendClassId: classId,
+        canRetry
+      });
+    } else {
+      openMaterialViewer(material, { initialFlashcardReview: params.get("review_due") === "1" });
+    }
   } catch (error) {
-    toast(error.message || "This study guide could not be opened.", { tone: "error" });
+    toast(error.message || "This study material could not be opened.", { tone: "error" });
   } finally {
     params.delete("study_guide");
+    params.delete("study_material");
+    params.delete("review_due");
     const query = params.toString();
     const cleanUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
     window.history.replaceState(null, "", cleanUrl);
@@ -2563,5 +2576,5 @@ window.addEventListener("pageshow", (event) => {
   });
 
   router.render();
-  await openRequestedStudyGuide();
+  await openRequestedStudyMaterial();
 })();

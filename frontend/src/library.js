@@ -1,7 +1,7 @@
 import { icon } from "./icons.js";
 import { escapeHtml, formatBytes, openDialog, toast } from "./ui.js";
-import { saveUploadedFile } from "./file-store.js";
-import { getBackendClassId, getBackendUploadId, waitForUpload } from "./course-sync.js";
+import { deleteUploadedFiles, saveUploadedFile } from "./file-store.js";
+import { getBackendClassId, getBackendUploadId, prepareStudySources, waitForUpload } from "./course-sync.js";
 import { classHasCapability, updateClass } from "./classes.js";
 import {
   getUploadsApi,
@@ -121,10 +121,19 @@ export function createLocalUpload(file) {
   };
 }
 
+export function canSyncBrowserUpload(klass, upload) {
+  return Boolean(
+    upload
+    && !getBackendUploadId(upload)
+    && !upload.isSample
+    && classHasCapability(klass, "create")
+  );
+}
+
 export async function renderLibraryTab({ root, klass, currentUserId = null, onUploadsAdded, onUploadRemoved }) {
   // SQLite APIs use the local workspace owner and do not require a bearer token.
   let syllabusData = null;
-  const backendClassId = getBackendClassId(klass);
+  let backendClassId = getBackendClassId(klass);
   if (backendClassId) {
     try {
       const [remoteUploads, remoteSyllabus] = await Promise.allSettled([
@@ -239,19 +248,19 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
         </div>
       </div>` : `<div class="account-status-banner guest-banner"><div><strong>Read-only class access</strong><span>You can study and tutor from released class materials. A class manager can grant permission to add shared resources.</span></div></div>`}
       ${!backendClassId ? `
-        <div class="account-status-banner guest-banner">
+        <div class="account-status-banner guest-banner" data-local-sync-banner>
           ${icon("alert", { size: 20 })}
           <div>
-            <strong>Files waiting to sync</strong>
-            <span>These files are saved in this browser. Starting class tutoring or generating a study set will synchronize the original files with your class library.</span>
+            <strong>Browser-only materials</strong>
+            <span>These materials stay in this browser until synced. Use “Sync to account” on an item, or select it when starting tutoring or study generation.</span>
           </div>
         </div>
       ` : `
-        <div class="account-status-banner signed-in-banner">
+        <div class="account-status-banner signed-in-banner" data-local-sync-banner>
           ${icon("check", { size: 20 })}
           <div>
             <strong>Saved to your account</strong>
-            <span>New uploads are saved to your class library. Study generation, reasoning checks, and quiz-review tutoring send authorized course excerpts to this deployment's configured AI provider. Live tutoring uses Gemini Live; scanned PDFs and lecture recordings may use Gemini Files. Older browser-only files synchronize when you start class tutoring or generate a study set.</span>
+            <span>New uploads are saved to your class library. Browser-only materials stay on this device until synced; use “Sync to account” on an item or select it for tutoring or study generation. Study generation, reasoning checks, and quiz-review tutoring send authorized course excerpts to this deployment's configured AI provider. Live tutoring uses Gemini Live; scanned PDFs and lecture recordings may use Gemini Files.</span>
           </div>
         </div>
       `}
@@ -277,6 +286,7 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
   let activeChunkController = null;
   let sourceSearchGeneration = 0;
   let activeChunkButton = null;
+  const activeUploadSyncs = new Set();
 
   function clearSourceChunk({ restoreFocus = false } = {}) {
     activeChunkController?.abort();
@@ -454,7 +464,7 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
         <div class="row-main">
           <button class="file-name" type="button" data-preview="${escapeHtml(upload.id)}" title="Preview ${escapeHtml(upload.name)}">${escapeHtml(upload.name)}</button>
           <span class="row-meta">${escapeHtml(upload.kind)}${upload.isSample ? " - Built-in sample content" : ` - ${formatBytes(upload.size || 0)} - added ${formatDate(upload.createdAt)}`}</span>
-          ${upload.localOnly ? `<span class="field-hint" role="note">Saved on this device only${upload.localCopyStatus === "session" ? " for this browser session" : ""}; not uploaded to Jot.</span>` : upload.localCopyStatus === "unavailable" ? `<span class="field-hint" role="note">The server copy is saved, but this browser could not keep a local recovery copy.</span>` : upload.localCopyStatus === "session" ? `<span class="field-hint" role="note">The server copy is saved; its local recovery copy lasts only for this browser session.</span>` : ""}
+          ${!getBackendUploadId(upload) && !upload.isSample ? `<span class="field-hint" role="note">Saved in this browser${upload.localCopyStatus === "session" ? " for this browser session" : ""}; not uploaded to Jot.</span>` : upload.localCopyStatus === "unavailable" ? `<span class="field-hint" role="note">The server copy is saved, but this browser could not keep a local recovery copy.</span>` : upload.localCopyStatus === "session" ? `<span class="field-hint" role="note">The server copy is saved; its local recovery copy lasts only for this browser session.</span>` : ""}
           ${upload.summary ? `<span class="row-summary">${escapeHtml(upload.summary)}</span>` : ""}
           ${upload.resourceScope === "student_contribution" ? `<span class="permission-badge">Shared contribution</span>` : ""}
           ${upload.publicationState && upload.resourceScope !== "personal" ? `<span class="permission-badge" data-publication="${escapeHtml(upload.publicationState)}">${upload.publicationState === "scheduled" ? `Scheduled for ${escapeHtml(formatDate(upload.releaseAt))}` : escapeHtml(upload.publicationState)}</span>` : ""}
@@ -465,7 +475,9 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
         <span class="pill" data-tone="${STATUS_TONES[upload.status] || ""}"><strong>${escapeHtml(upload.status)}</strong></span>
         <span class="row-actions">
           ${upload.status === "failed" && canEdit ? `<button class="btn btn-secondary btn-small" type="button" data-retry="${escapeHtml(upload.id)}">${icon("sparkles", { size: 16 })} Retry</button>` : ""}
-          <button class="btn btn-secondary btn-small" type="button" data-preview="${escapeHtml(upload.id)}">${icon("file", { size: 16 })} View</button>
+          ${canSyncBrowserUpload(klass, upload) ? `<button class="btn btn-secondary btn-small" type="button" data-sync-upload="${escapeHtml(upload.id)}" ${activeUploadSyncs.has(upload.id) ? `disabled aria-busy="true"` : ""}>${activeUploadSyncs.has(upload.id) ? "Syncing…" : "Sync to account"}</button>` : ""}
+          ${activeUploadSyncs.has(upload.id) ? `<span class="visually-hidden" role="status" aria-live="polite" data-sync-progress="${escapeHtml(upload.id)}">Preparing to sync ${escapeHtml(upload.name || "material")}.</span>` : ""}
+          <button class="btn btn-secondary btn-small" type="button" data-preview="${escapeHtml(upload.id)}" aria-label="View ${escapeHtml(upload.name)}">${icon("file", { size: 16 })}<span class="upload-action-label">View</span></button>
           ${canDelete ? `<button class="btn btn-ghost btn-icon" type="button" data-remove="${escapeHtml(upload.id)}" aria-label="Remove ${escapeHtml(upload.name)}">${icon("trash", { size: 18 })}</button>` : ""}
         </span>
       </li>
@@ -545,6 +557,27 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
     if (nextUploads.length) {
       const localOnlyCount = nextUploads.filter((upload) => upload.localOnly).length;
       const uploadedCount = nextUploads.length - localOnlyCount;
+      try {
+        await onUploadsAdded(nextUploads);
+        klass.uploads = [...klass.uploads, ...nextUploads];
+      } catch (storageError) {
+        const localFiles = nextUploads.filter((upload) => upload.localOnly).map((upload) => upload.id);
+        let localCleanupSucceeded = true;
+        try {
+          await deleteUploadedFiles(localFiles);
+        } catch {
+          localCleanupSucceeded = false;
+        }
+        const cleanupMessage = localCleanupSucceeded
+          ? "The local copies were removed."
+          : "Some local copies may remain in browser storage, but they are not in the class list.";
+        if (uploadedCount) {
+          toast(`${uploadedCount} file${uploadedCount === 1 ? " was" : "s were"} uploaded, but the browser could not update the class list. Reload the Library tab to recover them. ${localOnlyCount ? `${localOnlyCount} browser-only file${localOnlyCount === 1 ? " was" : "s were"} not added. ${cleanupMessage}` : ""}`, { tone: "error" });
+        } else {
+          toast(`The browser could not save these files to the class list: ${storageError.message || "local storage failed"}. ${cleanupMessage} Add the files again after storage is available.`, { tone: "error" });
+        }
+        return;
+      }
       if (localOnlyCount && uploadedCount) {
         toast(`Uploaded ${uploadedCount} file${uploadedCount === 1 ? "" : "s"} to Jot; ${localOnlyCount} saved on this device only.`, { tone: "busy" });
       } else if (localOnlyCount) {
@@ -552,7 +585,6 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
       } else {
         toast(`Uploaded ${uploadedCount} ${uploadedCount === 1 ? "file" : "files"} to ${klass.name}.`);
       }
-      onUploadsAdded(nextUploads);
       renderFilters();
       renderUploads();
     }
@@ -594,10 +626,12 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
 
     const title = text.trim().slice(0, 40) + "...";
 
+    let remoteEntry = null;
+    let remoteFailure = "";
     if (backendClassId) {
       try {
         const res = await uploadTextApi(backendClassId, text, "notes", title);
-        const uploadEntry = {
+        remoteEntry = {
           id: res.id,
           name: title,
           kind: "Notes",
@@ -612,13 +646,21 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
           content: text,
           isRemote: true
         };
-        onUploadsAdded([uploadEntry]);
-        pollUploadStatus(uploadEntry.id);
-        toast("Pasted notes uploaded to class library.");
-        return;
       } catch (err) {
-        toast(`Upload failed: ${err.message}`, { tone: "error" });
+        remoteFailure = err.message || "server upload failed";
       }
+    }
+
+    if (remoteEntry) {
+      try {
+        await onUploadsAdded([remoteEntry]);
+        klass.uploads = [...klass.uploads, remoteEntry];
+        pollUploadStatus(remoteEntry.id);
+        toast("Pasted notes uploaded to class library.");
+      } catch (error) {
+        toast(`Pasted notes reached Jot, but the browser could not update the class list: ${error.message || "local storage failed"}. Reload the Library tab to recover them.`, { tone: "error" });
+      }
+      return;
     }
 
     const localEntry = {
@@ -629,10 +671,18 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
       status: "ready",
       progress: 100,
       createdAt: new Date().toISOString(),
-      content: text
+      content: text,
+      localOnly: true
     };
-    onUploadsAdded([localEntry]);
-    toast("Notes saved locally.");
+    try {
+      await onUploadsAdded([localEntry]);
+      klass.uploads = [...klass.uploads, localEntry];
+      toast(remoteFailure
+        ? `Upload failed (${remoteFailure}); notes are saved in this browser only and have not been uploaded to Jot.`
+        : "Notes saved in this browser only; they have not been uploaded to Jot.", { tone: "busy" });
+    } catch (error) {
+      toast(`The browser could not save these notes to the class list: ${error.message || "local storage failed"}. The pasted text was not saved.`, { tone: "error" });
+    }
   });
 
   filters.addEventListener("click", (event) => {
@@ -644,6 +694,46 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
   });
 
   list.addEventListener("click", async (event) => {
+    const syncId = event.target.closest("[data-sync-upload]")?.dataset.syncUpload;
+    if (syncId) {
+      const upload = klass.uploads.find((item) => item.id === syncId);
+      if (!canSyncBrowserUpload(klass, upload) || activeUploadSyncs.has(syncId)) return;
+      activeUploadSyncs.add(syncId);
+      renderUploads();
+      try {
+        await prepareStudySources(klass, {
+          selectedUploadIds: [syncId],
+          onProgress: (message) => {
+            const status = [...list.querySelectorAll("[data-sync-progress]")]
+              .find((item) => item.dataset.syncProgress === syncId);
+            if (status && activeUploadSyncs.has(syncId)) status.textContent = message;
+          }
+        });
+        toast(`${upload.name || "Material"} synced to your account.`);
+      } catch (error) {
+        toast(`Could not sync ${upload?.name || "this material"}: ${error.message || "Please try again."}`, { tone: "error" });
+      } finally {
+        activeUploadSyncs.delete(syncId);
+        backendClassId = getBackendClassId(klass);
+        const banner = root.querySelector("[data-local-sync-banner]");
+        if (banner && getBackendClassId(klass)) {
+          banner.classList.remove("guest-banner");
+          banner.classList.add("signed-in-banner");
+          const heading = banner.querySelector("strong");
+          const message = banner.querySelector("span");
+          if (heading) heading.textContent = "Saved to your account";
+          if (message) {
+            const stillLocal = klass.uploads.some((item) => canSyncBrowserUpload(klass, item));
+            message.textContent = stillLocal
+              ? "Synced materials are available on this account. Other browser-only materials remain local until synced."
+              : "Synced materials are available on this account. New uploads will be saved there.";
+          }
+        }
+        renderUploads();
+      }
+      return;
+    }
+
     const previewId = event.target.closest("[data-preview]")?.dataset.preview;
     if (previewId) {
       const upload = klass.uploads.find((item) => item.id === previewId);

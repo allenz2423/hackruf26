@@ -25,6 +25,7 @@ from app.services.learning_scoring import learning_progress
 
 router = APIRouter(tags=["learning-progress"])
 GOALS = {"balanced", "build_foundation", "exam_prep", "review"}
+MAX_DUE_FLASHCARD_DECKS = 25
 
 
 class LearningPreferenceUpdate(BaseModel):
@@ -922,6 +923,60 @@ async def clear_flashcard_review_state(
         material_id,
     )
     return Response(status_code=204, headers={"Cache-Control": "private, no-store"})
+
+
+@router.get("/api/learning/flashcards/due")
+async def get_due_flashcard_decks(request: Request, response: Response) -> dict[str, Any]:
+    """Return small, owner-private summaries for due cards in readable decks."""
+    owner_id = await enforce_sqlite_api_policy(request, request.app.state.settings)
+    _no_store(response)
+    db = database(request)
+    now = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    rows = await db.fetch(
+        "SELECT m.id,m.title,m.kind,m.status,COALESCE(m.class_id,m.origin_class_id) class_id,"
+        "c.name class_name,MIN(s.next_due_at) first_due_at "
+        "FROM flashcard_review_state s JOIN study_materials m ON m.id=s.material_id "
+        "LEFT JOIN course_classes c ON c.id=COALESCE(m.class_id,m.origin_class_id) "
+        "WHERE s.owner_id=?1 AND s.next_due_at<=?2 AND m.kind='flashcards' AND m.status='ready' "
+        "GROUP BY m.id ORDER BY first_due_at,m.id LIMIT ?3",
+        owner_id,
+        now,
+        MAX_DUE_FLASHCARD_DECKS + 1,
+    )
+    has_more = len(rows) > MAX_DUE_FLASHCARD_DECKS
+    items: list[dict[str, Any]] = []
+    for row in rows[:MAX_DUE_FLASHCARD_DECKS]:
+        try:
+            material, _ = await material_access(db, row["id"], owner_id)
+        except ApiError:
+            continue
+        if material["kind"] != "flashcards" or material["status"] != "ready":
+            continue
+        valid_card_ids = _flashcard_ids(material)
+        if not valid_card_ids:
+            continue
+        due_rows = await db.fetch(
+            "SELECT card_id,next_due_at FROM flashcard_review_state "
+            "WHERE owner_id=?1 AND material_id=?2 AND next_due_at<=?3",
+            owner_id,
+            row["id"],
+            now,
+        )
+        valid_due = [item for item in due_rows if str(item["card_id"]) in valid_card_ids]
+        if not valid_due:
+            continue
+        first_due_at = min(str(item["next_due_at"]) for item in valid_due)
+        items.append(
+            {
+                "material_id": str(material["id"]),
+                "title": str(material["title"]),
+                "class_id": str(row["class_id"]) if row["class_id"] is not None else None,
+                "class_name": str(row["class_name"]) if row["class_name"] is not None else None,
+                "due_count": len(valid_due),
+                "first_due_at": first_due_at,
+            }
+        )
+    return {"items": items, "has_more": has_more}
 
 
 @router.get("/api/learning/progress")

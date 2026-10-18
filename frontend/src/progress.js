@@ -4,6 +4,7 @@ import {
   getLearningProgressApi,
   getLearningProgressHistoryApi,
   getLearningRecommendationsApi,
+  getDueFlashcardDecksApi,
   startLearningReviewApi,
   submitLearningReviewAnswerApi,
   updateLearningPreferencesApi,
@@ -24,6 +25,58 @@ const LEARNING_GOAL_LABELS = {
   exam_prep: "Simulate an exam",
   review: "Remember for next week"
 };
+
+export function normalizeDueFlashcardDecks(dto) {
+  if (!dto || typeof dto !== "object" || Array.isArray(dto)
+    || !Array.isArray(dto.items) || dto.items.length > 25
+    || typeof dto.has_more !== "boolean") {
+    throw new Error("Due flashcard reviews are not available in the expected format.");
+  }
+  const seen = new Set();
+  const items = dto.items.map((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)
+      || typeof raw.material_id !== "string" || !raw.material_id
+      || typeof raw.title !== "string" || !raw.title.trim()
+      || (raw.class_id !== null && typeof raw.class_id !== "string")
+      || (raw.class_name !== null && typeof raw.class_name !== "string")
+      || !Number.isSafeInteger(raw.due_count) || raw.due_count < 1
+      || !requiredTimestamp(raw.first_due_at)
+      || seen.has(raw.material_id)) {
+      throw new Error("Due flashcard reviews are not available in the expected format.");
+    }
+    seen.add(raw.material_id);
+    return {
+      material_id: raw.material_id,
+      title: raw.title.slice(0, 240),
+      class_id: raw.class_id,
+      class_name: raw.class_name?.slice(0, 160) || null,
+      due_count: raw.due_count,
+      first_due_at: raw.first_due_at
+    };
+  });
+  return { items, has_more: dto.has_more };
+}
+
+function dueFlashcardHref(materialId) {
+  const currentUrl = new URL(globalThis.location?.href || "/", "http://jot.local");
+  currentUrl.hash = "";
+  currentUrl.search = "";
+  currentUrl.searchParams.set("study_material", materialId);
+  currentUrl.searchParams.set("review_due", "1");
+  return `${currentUrl.pathname}${currentUrl.search}`;
+}
+
+export function dueFlashcardDecksMarkup(dueDecks) {
+  if (!dueDecks.items.length) {
+    return `<div class="panel empty-state"><strong>No flashcards due</strong><span>Your saved flashcard schedules will appear here when a review is due.</span></div>`;
+  }
+  return `<div class="class-grid">${dueDecks.items.map((item) => `<article class="panel progress-recommendation-card due-flashcard-card">
+    <span class="permission-badge">${item.due_count} ${item.due_count === 1 ? "card" : "cards"} due</span>
+    <h3>${escapeHtml(item.title)}</h3>
+    <p>${escapeHtml(item.class_name || "Personal study set")} · First due ${escapeHtml(reviewDateLabel(item.first_due_at))}</p>
+    <a class="btn btn-primary btn-small" href="${escapeHtml(dueFlashcardHref(item.material_id))}">Review ${item.due_count} due ${item.due_count === 1 ? "card" : "cards"}</a>
+  </article>`).join("")}</div>${dueDecks.has_more ? `<p class="field-hint">This list is capped at 25 entries; more due decks may be available.</p>` : ""}`;
+}
 
 export function normalizeLearningPreferences(dto) {
   if (!dto || typeof dto !== "object" || Array.isArray(dto) || !LEARNING_GOALS.has(dto.chosen_goal)) {
@@ -257,6 +310,12 @@ export function learningProgressMarkup(progress) {
         <div id="progress-concept-detail"></div>
         <div id="progress-history-detail"></div>
       </section>
+      <section class="progress-due-reviews" aria-labelledby="due-reviews-title">
+        <div class="progress-section-heading"><h2 id="due-reviews-title">Review due</h2><p class="muted">Private flashcard schedules. Ratings are planning signals and do not change concept mastery.</p></div>
+        <div id="due-flashcard-decks" class="progress-recommendation-list" role="region" aria-live="polite" aria-label="Flashcard decks due for review">
+          <p class="panel empty-state" role="status" aria-busy="true">Checking saved flashcard schedules…</p>
+        </div>
+      </section>
       <section class="progress-recommendations" aria-labelledby="recommendations-title">
         <div class="progress-section-heading"><h2 id="recommendations-title">Practice suggestions</h2><p class="muted">Suggestions are based on your own learning evidence.</p></div>
         <div id="learning-goal-control" class="progress-goal-control" role="region" aria-label="Practice goal">
@@ -281,6 +340,7 @@ export async function renderLearningProgress({ root, initialWindowDays = 30 }) {
   let goalStatus = "Loading your practice goal…";
   let goalStatusRole = "status";
   let evidenceSufficiencyByConcept = new Map();
+  let dueDeckRequestVersion = 0;
 
   function renderGoalControl() {
     const container = root.querySelector("#learning-goal-control");
@@ -364,6 +424,7 @@ export async function renderLearningProgress({ root, initialWindowDays = 30 }) {
       });
       void loadLearningGoal();
       void loadRecommendations();
+      void loadDueFlashcardDecks();
     } catch (error) {
       if (version !== requestVersion) return;
       root.innerHTML = `
@@ -457,6 +518,22 @@ export async function renderLearningProgress({ root, initialWindowDays = 30 }) {
       if (revision !== goalRevision) return;
       container.innerHTML = `<div class="panel empty-state" role="alert"><strong>Practice suggestions could not be loaded</strong><span>${escapeHtml(error.message || "Try again.")}</span><button type="button" class="btn btn-secondary btn-small" data-recommendations-retry>Try again</button></div>`;
       container.querySelector("[data-recommendations-retry]")?.addEventListener("click", () => void loadRecommendations());
+    }
+  }
+
+  async function loadDueFlashcardDecks() {
+    const container = root.querySelector("#due-flashcard-decks");
+    if (!container) return;
+    const revision = ++dueDeckRequestVersion;
+    container.innerHTML = `<p class="panel empty-state" role="status" aria-live="polite" aria-busy="true">Checking saved flashcard schedules…</p>`;
+    try {
+      const dueDecks = normalizeDueFlashcardDecks(await getDueFlashcardDecksApi());
+      if (revision !== dueDeckRequestVersion || !container.isConnected) return;
+      container.innerHTML = dueFlashcardDecksMarkup(dueDecks);
+    } catch (error) {
+      if (revision !== dueDeckRequestVersion || !container.isConnected) return;
+      container.innerHTML = `<div class="panel empty-state" role="alert"><strong>Due flashcard reviews could not be loaded</strong><span>${escapeHtml(error.message || "Try again.")}</span><button class="btn btn-secondary btn-small" type="button" data-due-flashcards-retry>Try again</button></div>`;
+      container.querySelector("[data-due-flashcards-retry]")?.addEventListener("click", () => void loadDueFlashcardDecks());
     }
   }
 

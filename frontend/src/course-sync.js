@@ -19,6 +19,19 @@ export function getBackendUploadId(upload) {
   return upload.backendId || (upload.isRemote ? upload.id : null);
 }
 
+export function mergeAcceptedUploadState(upload, detail) {
+  const next = {
+    ...upload,
+    backendId: detail.id,
+    status: detail.status,
+    progress: detail.processing_progress ?? 0,
+    isRemote: true,
+    ...(detail.summary ? { summary: detail.summary } : {})
+  };
+  delete next.localOnly;
+  return next;
+}
+
 function throwIfAborted(signal) {
   signal?.throwIfAborted();
 }
@@ -53,15 +66,14 @@ async function waitForJob(read, { signal, onStatus, timeoutMs = PROCESSING_WAIT_
 }
 
 async function saveUploadState(klass, upload, detail) {
-  const patch = {
-    backendId: detail.id,
-    status: detail.status,
-    progress: detail.processing_progress ?? 0,
-    ...(detail.summary ? { summary: detail.summary } : {})
-  };
-  Object.assign(upload, patch);
+  // The server has accepted the source. Keep its local recovery copy, but stop
+  // presenting the item as browser-only or unsynced.
+  Object.assign(upload, mergeAcceptedUploadState(upload, detail));
+  delete upload.localOnly;
   const current = getClassById(klass.id) || klass;
-  const uploads = current.uploads.map((item) => item.id === upload.id ? { ...item, ...patch } : item);
+  const uploads = current.uploads.map((item) => item.id === upload.id
+    ? mergeAcceptedUploadState(item, detail)
+    : item);
   await updateClass(klass.id, { uploads });
   klass.uploads = uploads;
 }

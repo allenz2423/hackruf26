@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { reconcileRemoteUploads } from "../src/library.js";
+import { canSyncBrowserUpload, reconcileRemoteUploads } from "../src/library.js";
+import { mergeAcceptedUploadState } from "../src/course-sync.js";
 import { describeUploadProcessing, uploadDocumentErrorMessage } from "../src/file-preview.js";
 
 test("remote upload reconciliation removes deleted mappings and keeps local-only uploads", () => {
@@ -17,6 +18,34 @@ test("remote upload reconciliation removes deleted mappings and keeps local-only
   assert.equal(result[0].backendId, "remote-kept");
   assert.equal(result[0].name, "Current title");
   assert.equal(result[1].name, "Not uploaded yet");
+});
+
+test("browser-only uploads expose explicit sync only to contributors", () => {
+  assert.equal(canSyncBrowserUpload({ isOwner: true }, { id: "local" }), true);
+  assert.equal(canSyncBrowserUpload({ capabilities: ["read"] }, { id: "local" }), false);
+  assert.equal(canSyncBrowserUpload({ capabilities: ["create"] }, { id: "local", isSample: true }), false);
+  assert.equal(canSyncBrowserUpload({ capabilities: ["create"] }, { id: "server-copy", backendId: "server-id" }), false);
+});
+
+test("accepted uploads persist their server mapping and stop appearing unsynced", () => {
+  const result = mergeAcceptedUploadState({
+    id: "local-id",
+    localOnly: true,
+    localCopyStatus: "persistent",
+    name: "Lecture.pdf"
+  }, {
+    id: "server-id",
+    status: "processing",
+    processing_progress: 10,
+    summary: "Lecture notes"
+  });
+
+  assert.equal(result.backendId, "server-id");
+  assert.equal(result.isRemote, true);
+  assert.equal(result.status, "processing");
+  assert.equal(result.summary, "Lecture notes");
+  assert.equal(result.localCopyStatus, "persistent");
+  assert.equal("localOnly" in result, false);
 });
 
 test("missing upload documents get an actionable message without offering a retry", () => {

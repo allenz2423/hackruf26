@@ -724,6 +724,55 @@ class LearningProgressApiTests(unittest.TestCase):
             0,
         )
 
+    def test_due_flashcard_decks_are_private_bounded_summaries_of_valid_cards(self) -> None:
+        material_id = str(uuid4())
+        self.client.portal.call(
+            self.db.execute,
+            "INSERT INTO study_materials(id,resource_scope,owner_id,created_by,kind,title,status,content) "
+            "VALUES (?1,'personal',?2,?2,'flashcards','Cell transport review','ready',?3)",
+            material_id,
+            self.reader["id"],
+            json.dumps(
+                {
+                    "format": "flashcards",
+                    "cards": [
+                        {"id": "card-1", "front": "Osmosis?", "back": "Water movement."},
+                        {"id": "card-2", "front": "Diffusion?", "back": "Particle movement."},
+                    ],
+                }
+            ),
+        )
+        self.client.portal.call(
+            self.db.execute,
+            "INSERT INTO flashcard_review_state(owner_id,material_id,card_id,next_due_at) "
+            "VALUES (?1,?2,'card-1','2000-01-01T00:00:00.000Z'),"
+            "(?1,?2,'card-2','2999-01-01T00:00:00.000Z'),"
+            "(?1,?2,'deleted-card','2000-01-01T00:00:00.000Z')",
+            self.reader["id"],
+            material_id,
+        )
+
+        response = self.call("get", "/api/learning/flashcards/due", "progress_reader")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "private, no-store")
+        payload = response.json()
+        self.assertFalse(payload["has_more"])
+        self.assertEqual(len(payload["items"]), 1)
+        item = payload["items"][0]
+        self.assertEqual(item["material_id"], material_id)
+        self.assertEqual(item["title"], "Cell transport review")
+        self.assertEqual(item["due_count"], 1)
+        self.assertIsNone(item["class_id"])
+        self.assertEqual(set(item), {
+            "material_id", "title", "class_id", "class_name", "due_count", "first_due_at"
+        })
+        self.assertNotIn("Osmosis", json.dumps(payload))
+        self.assertNotIn("Water movement", json.dumps(payload))
+
+        other_owner = self.call("get", "/api/learning/flashcards/due", "progress_owner")
+        self.assertEqual(other_owner.status_code, 200, other_owner.text)
+        self.assertEqual(other_owner.json()["items"], [])
+
     async def _quality_weight(self, owner_id: str, private: dict) -> float:
         async with self.db.acquire() as connection:
             return await _quality_weight_for_outcome(

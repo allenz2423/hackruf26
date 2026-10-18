@@ -731,7 +731,7 @@ function renderQuestions(root, material, onReturn = null) {
   draw();
 }
 
-export function openMaterialViewer(material, { onRetry = null } = {}) {
+export function openMaterialViewer(material, { onRetry = null, initialFlashcardReview = false } = {}) {
   const dialog = addDialog(material.type || "Study material", { resizable: material.type === "Study guide" });
   const root = dialog.querySelector("#material-session");
   const chatHost = dialog.querySelector("[data-guide-chat-host]");
@@ -755,6 +755,7 @@ export function openMaterialViewer(material, { onRetry = null } = {}) {
   const guideReviewProgress = new Map();
   const guideProgressController = new AbortController();
   let guideChat = null;
+  let launchFlashcardDueReview = initialFlashcardReview;
 
   const renderCurrentGuidePage = () => {
     const sectionCount = parseGuideSections(currentMaterial).length;
@@ -856,8 +857,10 @@ export function openMaterialViewer(material, { onRetry = null } = {}) {
 
     if (nextMaterial.type === "Flashcards") {
       renderFlashcards(root, nextMaterial, {
-        onBack: () => dialog.close()
+        onBack: () => dialog.close(),
+        initialDueReview: launchFlashcardDueReview
       });
+      launchFlashcardDueReview = false;
     } else if (nextMaterial.type === "Study guide" && (
       nextMaterial.content || nextMaterial.sections || nextMaterial.previewContent
       || ["generating", "failed"].includes(nextMaterial.status)
