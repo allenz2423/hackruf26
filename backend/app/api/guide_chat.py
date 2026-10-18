@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Request, Response
 from pydantic import ValidationError
@@ -15,14 +16,18 @@ from app.api.dependencies import database, enforce_sqlite_api_policy
 from app.api.errors import ApiError
 from app.api.schemas import (
     GuideChatReference,
+    GuideChatEditPreview,
     GuideChatRequest,
     GuideChatResponse,
+    GuideChatSectionEdit,
     GuideMiniQuizAttemptRequest,
     GuideMiniQuizAttemptResponse,
     GuidePracticeQuestion,
     GuideProgressResponse,
     GuideSectionProgress,
+    SourceCitation,
     StudyGuideContent,
+    GuideSectionContent,
     StudyGuideSectionV2,
 )
 from app.config import Settings
@@ -36,6 +41,7 @@ from app.services.ai_usage_ledger import bind_usage_context, reset_usage_context
 from app.services.database import json_value
 from app.services.guide_templates import guide_block_alt_text, guide_block_fallback
 from app.services.guide_chat import GUIDE_CHAT_MAX_CONTEXT_CHARS
+from app.services.guide_editing import guide_section_fingerprint
 from app.services.source_index import fetch_authorized_chunk, search_authorized_sources
 
 logger = logging.getLogger("screen_tutor.guide_chat_api")
@@ -46,6 +52,13 @@ MAX_SOURCE_CHUNK_CHARS = 2_200
 MAX_GUIDE_TEXT_CHARS = 14_000
 MAX_CONTEXT_CHARS = GUIDE_CHAT_MAX_CONTEXT_CHARS
 MAX_SECTION_CITATIONS = 32
+MAX_EDITABLE_SECTION_CONTEXT_CHARS = 6_000
+GUIDE_EDIT_REQUEST_RE = re.compile(
+    r"\b(?:adapt|tailor|rewrite|revise|modify|edit|update|shorten|expand|simplify|"
+    r"reformat|add|remove|replace|make|turn|change|apply|customize|personalize|"
+    r"adjust|rework|improve|fix|correct)\b",
+    re.IGNORECASE,
+)
 
 
 def _no_store(response: Response) -> None:
@@ -99,6 +112,179 @@ def _citations(section: object) -> list[dict]:
         for citation in getattr(block, "sources", []) or []:
             values.append(citation.model_dump(mode="json", exclude_none=True))
     return values
+
+
+def _editable_section_blocks(section: object, section_index: int) -> list[dict]:
+    """Make block IDs and concise descriptions available without sending raw SVG or quiz keys."""
+    if isinstance(section, StudyGuideSectionV2):
+        raw_blocks = [block.model_dump(mode="json", exclude_none=True) for block in section.blocks]
+    elif isinstance(section, GuideSectionContent):
+        raw_blocks = [{
+            "type": "paragraph",
+            "text": section.body,
+        }]
+    else:
+        return []
+
+    blocks: list[dict] = []
+    used_ids: set[str] = set()
+    for index, raw in enumerate(raw_blocks):
+        item = dict(raw)
+        block_id = str(item.get("id") or f"legacy-s{section_index + 1}-b{index + 1}")[:100]
+        if block_id in used_ids:
+            block_id = f"{block_id[:84]}-{index + 1}"
+        used_ids.add(block_id)
+        item["id"] = block_id
+        if item.get("type") == "svg_diagram":
+            item.pop("svg", None)
+            item["visual_present"] = True
+        item.pop("sources", None)
+        item.pop("id", None)
+        for key in ("text", "expression", "fallback_text", "alt_text"):
+            if isinstance(item.get(key), str):
+                item[key] = item[key][:1_200]
+        item["id"] = block_id
+        blocks.append(item)
+
+    bounded: list[dict] = []
+    used_chars = 0
+    for item in blocks:
+        encoded_size = len(json.dumps(item, ensure_ascii=False))
+        if bounded and used_chars + encoded_size > MAX_EDITABLE_SECTION_CONTEXT_CHARS:
+            bounded.append({"id": item["id"], "type": item.get("type"), "summary_truncated": True})
+            continue
+        bounded.append(item)
+        used_chars += encoded_size
+    return bounded
+
+
+def _section_edit_basis(section: object, section_index: int) -> tuple[str, list[dict]]:
+    if isinstance(section, StudyGuideSectionV2):
+        heading = section.heading
+        key_terms = list(section.key_terms)
+    elif isinstance(section, GuideSectionContent):
+        heading = section.heading
+        key_terms = list(section.key_terms)
+    else:
+        return "", []
+    blocks = _editable_section_blocks(section, section_index)
+    return json.dumps({"heading": heading, "key_terms": key_terms, "blocks": blocks}, ensure_ascii=False), blocks
+
+
+def _default_section_citations(section: object) -> list[dict]:
+    section_sources = [
+        citation.model_dump(mode="json", exclude_none=True)
+        for citation in getattr(section, "sources", []) or []
+    ]
+    if section_sources:
+        return section_sources[:20]
+    block_sources: list[dict] = []
+    seen: set[str] = set()
+    for block in getattr(section, "blocks", []) or []:
+        for citation in getattr(block, "sources", []) or []:
+            value = citation.model_dump(mode="json", exclude_none=True)
+            key = json.dumps(value, sort_keys=True, separators=(",", ":"))
+            if key not in seen:
+                block_sources.append(value)
+                seen.add(key)
+    return block_sources[:20]
+
+
+def _build_edit_preview(
+    section: object,
+    *,
+    section_index: int,
+    edit: object,
+    retrieved_source_ids: list[str],
+    section_citations: list[dict],
+) -> GuideChatSectionEdit:
+    """Apply validated, bounded operations to a saved section without touching its check."""
+    if isinstance(section, StudyGuideSectionV2):
+        raw_blocks = [block.model_dump(mode="json", exclude_none=True) for block in section.blocks]
+        heading = section.heading
+        key_terms = list(section.key_terms)
+    elif isinstance(section, GuideSectionContent):
+        raw_blocks = [{
+            "id": f"legacy-s{section_index + 1}-b1",
+            "type": "paragraph",
+            "text": section.body,
+            "sources": [],
+        }]
+        heading = section.heading
+        key_terms = list(section.key_terms)
+    else:
+        raise ValueError("This section cannot be edited safely.")
+
+    normalized_blocks: list[dict] = []
+    ids: set[str] = set()
+    for index, raw in enumerate(raw_blocks):
+        block = dict(raw)
+        block_id = str(block.get("id") or f"legacy-s{section_index + 1}-b{index + 1}")[:100]
+        if block_id in ids:
+            block_id = f"{block_id[:84]}-{index + 1}"
+        ids.add(block_id)
+        block["id"] = block_id
+        normalized_blocks.append(block)
+    by_id = {block["id"]: block for block in normalized_blocks}
+
+    replacements = {item.block_id: item.block for item in edit.replace_blocks}
+    removals = set(edit.remove_block_ids)
+    insertions: dict[str | None, list[object]] = {}
+    for item in edit.insert_blocks:
+        if item.after_block_id is not None and item.after_block_id not in by_id:
+            raise ValueError("The proposed insertion point is not in the saved section.")
+        insertions.setdefault(item.after_block_id, []).append(item.block)
+    if not set(replacements).issubset(by_id) or not removals.issubset(by_id):
+        raise ValueError("The proposal references a block that is no longer in this section.")
+    if set(replacements) & removals:
+        raise ValueError("The proposal both replaces and removes the same block.")
+
+    # Never trust model-authored source IDs or locators. Preserve old citations for
+    # replacements and attach file-level IDs from source chunks fetched this turn.
+    existing_citation_ids = {
+        str(item.get("upload_id"))
+        for item in section_citations
+        if item.get("upload_id")
+    }
+    retrieved_citations = [
+        {"upload_id": source_id}
+        for source_id in dict.fromkeys(retrieved_source_ids)
+        if source_id not in existing_citation_ids
+    ][:8]
+    fallback_citations = retrieved_citations or section_citations
+
+    final_blocks: list[dict] = []
+    for block in normalized_blocks:
+        block_id = block["id"]
+        if block_id not in removals:
+            if block_id in replacements:
+                replacement = replacements[block_id].model_dump(mode="json", exclude_none=True)
+                replacement["id"] = block_id
+                replacement["sources"] = block.get("sources") or fallback_citations
+                final_blocks.append(replacement)
+            else:
+                final_blocks.append(block)
+        for inserted in insertions.get(block_id, []):
+            data = inserted.model_dump(mode="json", exclude_none=True)
+            data["id"] = f"chat-edit-{uuid4().hex}"
+            data["sources"] = fallback_citations
+            final_blocks.append(data)
+    for inserted in insertions.get(None, []):
+        data = inserted.model_dump(mode="json", exclude_none=True)
+        data["id"] = f"chat-edit-{uuid4().hex}"
+        data["sources"] = fallback_citations
+        final_blocks.append(data)
+    if not 1 <= len(final_blocks) <= 24:
+        raise ValueError("The proposed section would have an unsupported number of blocks.")
+    if not any(block.get("type") == "paragraph" for block in final_blocks):
+        raise ValueError("Keep at least one plain-language explanation in each section.")
+
+    result = GuideChatSectionEdit(
+        heading=edit.heading if edit.heading is not None else heading,
+        key_terms=edit.key_terms if edit.key_terms is not None else key_terms,
+        blocks=final_blocks,
+    )
+    return result
 
 
 def _reference_from_chunk(chunk: dict) -> GuideChatReference | None:
@@ -307,14 +493,26 @@ async def guide_chat(
         query=retrieval_query or str(section.heading),
         warnings=warnings,
     )
+    guide_editing_allowed = (
+        material.get("resource_scope") == "personal"
+        and str(material.get("owner_id") or "") == str(owner_id)
+    )
     context = {
         "guide_title": str(material.get("title") or "Study guide")[:300],
         "scope": payload.scope,
         "focus_section": str(section.heading)[:300],
+        "guide_editing_allowed": guide_editing_allowed,
+        "editable_section_available": guide_editing_allowed,
         "guide_reference_text": guide_reference_text,
         "course_source_excerpts": source_excerpts,
         "source_warnings": sorted(warnings),
     }
+    if guide_editing_allowed:
+        context["editable_section"] = {
+            "section_index": payload.section_index,
+            "editable_fields": "heading, key_terms, and blocks only; the server preserves sources, section identity, and the saved mini-quiz",
+            "section_json": _section_edit_basis(section, payload.section_index)[0],
+        }
     if len(json.dumps(context, ensure_ascii=False)) > MAX_CONTEXT_CHARS:
         # Keep the guide and source contexts bounded even after JSON escaping.
         context["guide_reference_text"] = str(context["guide_reference_text"])[:8_000]
@@ -324,6 +522,19 @@ async def guide_chat(
         ]
         warnings.add("source_context_truncated")
         context["source_warnings"] = sorted(warnings)
+    if len(json.dumps(context, ensure_ascii=False)) > MAX_CONTEXT_CHARS:
+        context.pop("editable_section", None)
+        context["editable_section_available"] = False
+        context["editing_unavailable"] = "The focused section is too large to safely propose edits."
+    allow_edit = bool(
+        context.get("guide_editing_allowed") is True
+        and context.get("editable_section_available") is True
+        and payload.intent != "practice"
+        and (
+            payload.intent == "adapt"
+            or GUIDE_EDIT_REQUEST_RE.search(payload.message)
+        )
+    )
 
     service = getattr(request.app.state, "guide_chat_service", None)
     if service is None:
@@ -335,12 +546,14 @@ async def guide_chat(
         operation_label="Study guide chat",
     )
     try:
+        edit_kwargs = {"allow_edit": True} if allow_edit else {}
         draft = await service.reply(
             context,
             payload.history,
             payload.message,
             intent=payload.intent,
             request_id=request_id,
+            **edit_kwargs,
         )
     finally:
         reset_usage_context(usage_token)
@@ -351,11 +564,44 @@ async def guide_chat(
             prompt=draft.practice_question,
             references=response_references,
         )
+    edit_proposal = None
+    reply = draft.reply
+    if draft.edit_proposal is not None and allow_edit:
+        try:
+            retrieved_source_ids = list(dict.fromkeys(
+                str(item.get("upload_id"))
+                for item in source_excerpts
+                if item.get("upload_id")
+            ))
+            edited_section = _build_edit_preview(
+                section,
+                section_index=payload.section_index,
+                edit=draft.edit_proposal,
+                retrieved_source_ids=retrieved_source_ids,
+                section_citations=_default_section_citations(section),
+            )
+            edit_proposal = GuideChatEditPreview(
+                section_index=payload.section_index,
+                expected_fingerprint=guide_section_fingerprint(section),
+                summary=draft.edit_proposal.summary,
+                section=edited_section,
+            )
+        except (TypeError, ValueError, ValidationError) as exc:
+            logger.info(
+                "guide_chat_edit_rejected request_id=%s category=%s",
+                request_id,
+                type(exc).__name__,
+            )
+            reply = (
+                reply.rstrip()
+                + "\n\nI couldn't prepare a safe section preview, so the saved guide was not changed."
+            )[:6000]
     return GuideChatResponse(
-        reply=draft.reply,
+        reply=reply,
         references=response_references,
         source_warnings=sorted(warnings),
         practice_question=practice_question,
+        edit_proposal=edit_proposal,
     )
 
 

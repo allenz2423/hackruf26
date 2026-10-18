@@ -750,6 +750,14 @@ export function sendGuideChatMessageApi(materialId, message, { signal } = {}) {
   });
 }
 
+export function applyGuideChatEditApi(materialId, edit, { signal } = {}) {
+  return apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/guide-edits`, {
+    method: "POST",
+    body: JSON.stringify(edit),
+    signal
+  });
+}
+
 export function getGuideProgressApi(materialId, { signal } = {}) {
   return apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/guide-progress`, { signal });
 }

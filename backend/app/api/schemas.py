@@ -806,7 +806,7 @@ class GuideChatRequest(BaseModel):
     section_index: int = Field(ge=0, le=99, strict=True)
     block_index: int | None = Field(default=None, ge=0, le=23, strict=True)
     scope: Literal["section", "guide"] = "section"
-    intent: Literal["explain", "example", "connect", "practice"] = "explain"
+    intent: Literal["explain", "example", "connect", "practice", "adapt"] = "explain"
     message: str = Field(min_length=1, max_length=2000, strict=True)
     history: list[GuideChatMessage] = Field(default_factory=list, max_length=6)
 
@@ -839,16 +839,6 @@ class GuidePracticeQuestion(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
     prompt: str = Field(min_length=1, max_length=1200)
     references: list[GuideChatReference] = Field(default_factory=list, max_length=8)
-
-
-class GuideChatResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
-    reply: str = Field(min_length=1, max_length=6000)
-    references: list[GuideChatReference] = Field(default_factory=list, max_length=8)
-    source_warnings: list[Literal[
-        "source_changed", "source_missing", "source_context_truncated", "source_evidence_unavailable"
-    ]] = Field(default_factory=list, max_length=4)
-    practice_question: GuidePracticeQuestion | None = None
 
 
 class GuideMiniQuizAttemptRequest(BaseModel):
@@ -1600,6 +1590,47 @@ class StudyGuideContent(BaseModel):
         if self.schema_version == 1 and has_v2_sections:
             raise ValueError("Version 1 study guides cannot contain version 2 sections.")
         return self
+
+
+class GuideChatSectionEdit(BaseModel):
+    """Editable section fields; answer keys and section-level citations are server-owned."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+    heading: str = Field(min_length=1, max_length=300)
+    key_terms: list[str] = Field(default_factory=list, max_length=50)
+    blocks: list[StudyGuideBlock] = Field(min_length=1, max_length=24)
+
+
+class GuideChatEditPreview(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+    section_index: int = Field(ge=0, le=99)
+    expected_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$", min_length=64, max_length=64)
+    summary: str = Field(min_length=1, max_length=500)
+    section: GuideChatSectionEdit
+
+
+class GuideChatResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+    reply: str = Field(min_length=1, max_length=6000)
+    references: list[GuideChatReference] = Field(default_factory=list, max_length=8)
+    source_warnings: list[Literal[
+        "source_changed", "source_missing", "source_context_truncated", "source_evidence_unavailable"
+    ]] = Field(default_factory=list, max_length=4)
+    practice_question: GuidePracticeQuestion | None = None
+    edit_proposal: GuideChatEditPreview | None = None
+
+
+class GuideChatEditApplyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    section_index: int = Field(ge=0, le=99, strict=True)
+    expected_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$", min_length=64, max_length=64)
+    section: GuideChatSectionEdit
+
+
+class GuideChatEditApplyResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    content: dict
+    updated_at: str
 
 
 DocumentDetailLevel = Literal["concise", "balanced", "detailed"]

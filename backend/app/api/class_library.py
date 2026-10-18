@@ -36,12 +36,17 @@ from app.api.schemas import (
     ClassCreate,
     ClassPatch,
     ClassSummary,
+    GuideChatEditApplyRequest,
+    GuideChatEditApplyResponse,
+    GuideChatSectionEdit,
+    GuideSectionContent,
     MaterialDetail,
     MaterialSummary,
     QuestionAttemptResult,
     QuestionBankGenerationRequest,
     ResourcePublicationUpdate,
     StudyGuideContent,
+    StudyGuideSectionV2,
     StudyMaterialCreate,
     StudyMaterialFlagCreate,
     StudyMaterialFolderAssignment,
@@ -88,6 +93,7 @@ from app.services.learning_scoring import (
     materialize_released_evidence_for_run,
     record_assessment_outcome,
 )
+from app.services.guide_editing import guide_section_fingerprint
 from app.services.question_bank import (
     create_generated_assessment,
     create_validated_private_assessment,
@@ -3534,6 +3540,332 @@ async def download_study_file(
             "Cache-Control": "private, no-store",
             "X-Content-Type-Options": "nosniff",
         },
+    )
+
+
+def _current_guide_section_edit(section: object, section_index: int) -> GuideChatSectionEdit:
+    if isinstance(section, StudyGuideSectionV2):
+        heading = section.heading
+        key_terms = list(section.key_terms)
+        blocks = [block.model_dump(mode="json", exclude_none=True) for block in section.blocks]
+    elif isinstance(section, GuideSectionContent):
+        heading = section.heading
+        key_terms = list(section.key_terms)
+        blocks = [{
+            "id": f"legacy-s{section_index + 1}-b1",
+            "type": "paragraph",
+            "text": section.body,
+            "sources": [],
+        }]
+    else:
+        raise ApiError(409, "guide_edit_unavailable", "This guide section cannot be edited safely.")
+
+    seen: set[str] = set()
+    normalized: list[dict] = []
+    for index, block in enumerate(blocks):
+        value = dict(block)
+        block_id = str(value.get("id") or f"legacy-s{section_index + 1}-b{index + 1}")[:100]
+        if block_id in seen:
+            block_id = f"{block_id[:84]}-{index + 1}"
+        seen.add(block_id)
+        value["id"] = block_id
+        normalized.append(value)
+    return GuideChatSectionEdit(heading=heading, key_terms=key_terms, blocks=normalized)
+
+
+def _citation_signature(
+    citation: object,
+) -> tuple[str, int | None, int | None, float | None] | None:
+    upload_id = getattr(citation, "upload_id", None)
+    if upload_id is None:
+        return None
+    timestamp = getattr(citation, "timestamp_seconds", None)
+    return (
+        str(upload_id),
+        getattr(citation, "page", None),
+        getattr(citation, "slide", None),
+        float(timestamp) if timestamp is not None else None,
+    )
+
+
+def _section_citation_signatures(
+    section: object,
+) -> set[tuple[str, int | None, int | None, float | None]]:
+    values: set[tuple[str, int | None, int | None, float | None]] = set()
+    for citation in getattr(section, "sources", []) or []:
+        signature = _citation_signature(citation)
+        if signature is not None:
+            values.add(signature)
+    for block in getattr(section, "blocks", []) or []:
+        for citation in getattr(block, "sources", []) or []:
+            signature = _citation_signature(citation)
+            if signature is not None:
+                values.add(signature)
+    return values
+
+
+def _same_guide_edit(left: GuideChatSectionEdit, right: GuideChatSectionEdit) -> bool:
+    """Treat export-time citation inheritance as the same learner-approved edit."""
+    if left.heading != right.heading or left.key_terms != right.key_terms or len(left.blocks) != len(right.blocks):
+        return False
+
+    def comparable(value: object) -> object:
+        if isinstance(value, dict):
+            return {
+                key: comparable(item)
+                for key, item in value.items()
+                if key not in {"id", "sources", "fallback_text", "alt_text"}
+            }
+        if isinstance(value, list):
+            return [comparable(item) for item in value]
+        return value
+
+    for left_block, right_block in zip(left.blocks, right.blocks, strict=True):
+        left_data = left_block.model_dump(mode="json", exclude_none=True)
+        right_data = right_block.model_dump(mode="json", exclude_none=True)
+        # Export normalization assigns canonical IDs, citations, alt text, and
+        # fallback text. Ignore those server-derived fields so a retry after a
+        # lost response recognizes the exact user-approved edit as committed.
+        if comparable(left_data) != comparable(right_data):
+            return False
+    return True
+
+
+def _guide_v2_section(section: object, section_index: int) -> dict:
+    if isinstance(section, StudyGuideSectionV2):
+        return section.model_dump(mode="json", exclude_none=True)
+    if isinstance(section, GuideSectionContent):
+        return {
+            "id": f"legacy-section-{section_index + 1}",
+            "heading": section.heading,
+            "key_terms": list(section.key_terms),
+            "sources": [item.model_dump(mode="json", exclude_none=True) for item in section.sources],
+            "blocks": [{
+                "id": f"legacy-s{section_index + 1}-b1",
+                "type": "paragraph",
+                "text": section.body,
+                "sources": [],
+            }],
+        }
+    raise ApiError(409, "guide_edit_unavailable", "This guide section cannot be edited safely.")
+
+
+@router.post(
+    "/api/study-materials/{material_id}/guide-edits",
+    response_model=GuideChatEditApplyResponse,
+)
+async def apply_guide_chat_edit(
+    material_id: UUID,
+    payload: GuideChatEditApplyRequest,
+    request: Request,
+    response: Response,
+) -> GuideChatEditApplyResponse:
+    """Persist a learner-approved section preview, preserving its private check."""
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Pragma"] = "no-cache"
+    user_id, db, settings = await _authorize(request)
+    material = await db.fetchrow(
+        "SELECT m.*,c.name AS class_name FROM study_materials m "
+        "LEFT JOIN course_classes c ON c.id=COALESCE(m.class_id,m.origin_class_id) "
+        "WHERE m.id=?1",
+        material_id,
+    )
+    if material is None:
+        raise ApiError(404, "not_found", "The requested resource was not found.")
+    _accessible, access = await material_access(db, material_id, user_id)
+    if (
+        material.get("kind") != "study_guide"
+        or material.get("status") != "ready"
+    ):
+        raise ApiError(409, "guide_edit_not_ready", "Only a saved, ready study guide can be changed.")
+    if (
+        material.get("resource_scope") != "personal"
+        or str(material.get("owner_id") or "") != str(user_id)
+    ):
+        raise ApiError(
+            409,
+            "guide_edit_private_only",
+            "Make a personal study guide before tailoring shared class material.",
+        )
+    try:
+        original = StudyGuideContent.model_validate(json_value(material.get("content"), {}))
+    except (ValidationError, TypeError, ValueError):
+        raise ApiError(503, "guide_edit_unavailable", "This guide could not be safely edited.") from None
+    if payload.section_index >= len(original.sections):
+        raise ApiError(409, "guide_edit_stale", "This section changed. Ask Jot for a fresh preview.")
+
+    original_section = original.sections[payload.section_index]
+    current_fingerprint = guide_section_fingerprint(original_section)
+    if current_fingerprint != payload.expected_fingerprint:
+        current_edit = _current_guide_section_edit(original_section, payload.section_index)
+        if not _same_guide_edit(current_edit, payload.section):
+            raise ApiError(
+                409,
+                "guide_edit_stale",
+                "This section changed after the preview. Ask Jot to prepare a fresh one.",
+            )
+        # A retry after a successful save whose response was lost is a no-op success.
+        visible_ids = await _visible_material_source_ids(db, material_id, user_id, material, access)
+        return GuideChatEditApplyResponse(
+            content=_public_material_content(
+                "study_guide", material.get("content"), visible_source_ids=visible_ids
+            ) or {},
+            updated_at=str(material.get("updated_at") or ""),
+        )
+
+    visible_source_ids = await _visible_material_source_ids(
+        db, material_id, user_id, material, access
+    )
+    if not visible_source_ids:
+        raise ApiError(
+            409,
+            "guide_edit_sources_unavailable",
+            "The guide's course sources are no longer available, so this edit was not saved.",
+        )
+    old_citations = _section_citation_signatures(original_section)
+    for block in payload.section.blocks:
+        for citation in block.sources:
+            signature = _citation_signature(citation)
+            if signature in old_citations:
+                continue
+            if (
+                signature is not None
+                and signature[0] in visible_source_ids
+                and signature[1] is None
+                and signature[2] is None
+                and signature[3] is None
+            ):
+                continue
+            raise ApiError(
+                422,
+                "guide_edit_invalid_citation",
+                "The preview contains a source locator that cannot be verified.",
+            )
+
+    sections = [_guide_v2_section(item, index) for index, item in enumerate(original.sections)]
+    target = sections[payload.section_index]
+    target.update({
+        "heading": payload.section.heading,
+        "key_terms": list(payload.section.key_terms),
+        "blocks": [block.model_dump(mode="json", exclude_none=True) for block in payload.section.blocks],
+    })
+    target.pop("body", None)
+    # Section identity, citations, and mini-quiz keys stay server-owned.
+    if isinstance(original_section, StudyGuideSectionV2) and original_section.mini_quiz is not None:
+        target["mini_quiz"] = original_section.mini_quiz.model_dump(mode="json", exclude_none=True)
+    candidate = {"format": "study_guide", "schema_version": 2, "sections": sections}
+    try:
+        parsed_candidate = StudyGuideContent.model_validate(candidate)
+        normalized = parsed_candidate.model_dump(mode="json", exclude_none=True)
+        export_sources = await db.fetch(
+            "SELECT COALESCE(n.id,s.source_note_id,s.note_id) AS id,"
+            "COALESCE(n.title,s.source_title) AS title,COALESCE(n.kind,s.source_kind) AS kind "
+            "FROM study_material_sources s LEFT JOIN course_notes n "
+            "ON n.id=COALESCE(s.source_note_id,s.note_id) "
+            "WHERE s.material_id=?1 ORDER BY s.position",
+            material_id,
+        )
+        export_sources = [
+            dict(row) for row in export_sources
+            if row.get("id") is not None and str(row["id"]) in visible_source_ids
+        ]
+        service = getattr(request.app.state, "gemini_content_service", None)
+        normalized, files = await asyncio.to_thread(
+            _validate_and_export_study_guide,
+            service=service,
+            settings=settings,
+            title=str(material.get("title") or "Study guide"),
+            class_name=str(material.get("class_name") or "Personal study materials"),
+            material_id=material_id,
+            content=normalized,
+            sources=export_sources,
+            requested_section_count=_requested_guide_section_count(material),
+        )
+    except (ValidationError, TypeError, ValueError, ContentGenerationFailure) as exc:
+        logger.info("guide_edit_validation_failed category=%s", type(exc).__name__)
+        raise ApiError(
+            422,
+            "guide_edit_validation_failed",
+            "This change did not pass the guide's structure and export checks. The saved guide is unchanged.",
+        ) from None
+    except StudyFileFailure as exc:
+        logger.info("guide_edit_export_failed category=%s", type(exc).__name__)
+        raise ApiError(
+            503,
+            "guide_edit_export_failed",
+            "The updated guide could not be exported. Your saved guide is unchanged.",
+        ) from None
+
+    old_content = material.get("content")
+    serialized = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+    async with db.acquire() as connection:
+        async with connection.transaction():
+            updated = await connection.fetchrow(
+                "UPDATE study_materials SET content=?3,quality_review_version=?4,"
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                "WHERE id=?1 AND owner_id=?2 AND resource_scope='personal' "
+                "AND status='ready' AND content=?5 RETURNING updated_at",
+                material_id,
+                user_id,
+                serialized,
+                STUDY_GUIDE_QUALITY_VERSION,
+                old_content,
+            )
+            if updated is None:
+                latest = await connection.fetchrow(
+                    "SELECT content,updated_at FROM study_materials WHERE id=?1 AND owner_id=?2 "
+                    "AND resource_scope='personal' AND status='ready'",
+                    material_id,
+                    user_id,
+                )
+                if latest is None:
+                    raise ApiError(404, "not_found", "The requested resource was not found.")
+                try:
+                    latest_guide = StudyGuideContent.model_validate(json_value(latest["content"], {}))
+                    latest_section = latest_guide.sections[payload.section_index]
+                    if _same_guide_edit(
+                        _current_guide_section_edit(latest_section, payload.section_index),
+                        payload.section,
+                    ):
+                        return GuideChatEditApplyResponse(
+                            content=_public_material_content(
+                                "study_guide", latest["content"], visible_source_ids=visible_source_ids
+                            ) or {},
+                            updated_at=str(latest.get("updated_at") or ""),
+                        )
+                except (IndexError, ValidationError, TypeError, ValueError):
+                    pass
+                raise ApiError(
+                    409,
+                    "guide_edit_stale",
+                    "This section changed while the edit was being saved. Ask Jot for a fresh preview.",
+                )
+            await connection.execute(
+                "DELETE FROM study_material_files WHERE material_id=?1", material_id
+            )
+            await connection.executemany(
+                "INSERT INTO study_material_files (material_id,format,content) VALUES (?1,?2,?3)",
+                [(material_id, file_format, data) for file_format, data in files.items()],
+            )
+            # The edited section keeps its original mini-quiz, but the old
+            # review schedule no longer describes the learner's current guide.
+            # Keep immutable receipts for replay protection; clear only the
+            # active schedule row in the same transaction as the content save.
+            section_id = f"{payload.section_index}:{getattr(original_section, 'id', None) or 'legacy'}"
+            await connection.execute(
+                "DELETE FROM guide_section_review_state "
+                "WHERE owner_id=?1 AND material_id=?2 AND section_id=?3",
+                user_id,
+                material_id,
+                section_id,
+            )
+
+    public_content = _public_material_content(
+        "study_guide", normalized, visible_source_ids=visible_source_ids
+    ) or {}
+    return GuideChatEditApplyResponse(
+        content=public_content,
+        updated_at=str(updated.get("updated_at") or ""),
     )
 
 

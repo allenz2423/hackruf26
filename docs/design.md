@@ -60,6 +60,8 @@ Study guides use a section-level learning loop: orient with a concrete objective
 
 While a guide is open, the student may open a guide-scoped clarification chat without leaving the passage. The chat is a separate, transient tutor surface: the server rechecks current guide/source access on every turn, retrieves only bounded authorized course evidence, labels source uncertainty, and withholds an unattempted check's answer. Conversation text and free-text attempts are kept only in the open browser view and active request; they are not persisted, logged, or counted as mastery evidence. Closing the guide clears the chat.
 
+The learner may ask guide chat to tailor the active section using preferences discussed in that open conversation. Jot returns a structured section preview; the learner must apply or discard it. Applying edits updates only an owner-private guide, preserves its saved mini-quiz and answer key, and regenerates the printable exports. Shared class materials are never silently changed. Chat history and free-text attempts remain transient, and guide edits do not create mastery evidence.
+
 Remote quizzes also offer an optional **Reasoning Mode** at start; Standard mode remains the default and keeps its existing answer-and-submit flow. In Reasoning Mode, students can select answers first, then explain their thinking. A backend sufficiency check unlocks submission for meaningful attempts even when they are wrong; a targeted follow-up or an explicit confirmed skip handles insufficient attempts. The selected mode belongs to that saved quiz run, and submitted reasoning receives separate post-grade feedback.
 
 ## Product behavior

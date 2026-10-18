@@ -771,7 +771,24 @@ export function openMaterialViewer(material, { onRetry = null, initialFlashcardR
         quizStates: miniQuizStates,
         reviewProgress: guideReviewProgress,
         onOpenChat: currentMaterial.isRemote && currentMaterial.status === "ready" ? (context) => {
-          guideChat ||= createGuideChat(chatHost, { material: currentMaterial, classId: currentMaterial.classId });
+          guideChat ||= createGuideChat(chatHost, {
+            material: currentMaterial,
+            classId: currentMaterial.classId,
+            onApplyEdit: async (saved, proposal) => {
+              const scrollTop = root.scrollTop;
+              currentMaterial = {
+                ...currentMaterial,
+                content: saved.content,
+                sections: Array.isArray(saved.content?.sections) ? saved.content.sections : currentMaterial.sections,
+                updatedAt: saved.updated_at || currentMaterial.updatedAt
+              };
+              if (Number.isInteger(proposal?.section_index)) {
+                guideReviewProgress.delete(proposal.section_index);
+              }
+              renderCurrentGuidePage();
+              root.scrollTop = scrollTop;
+            }
+          });
           guideChat?.setContext({ sectionIndex: context.sectionIndex, sectionHeading: context.sectionHeading, material: currentMaterial });
           guideChat?.open(context);
         } : null,

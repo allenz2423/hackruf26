@@ -3705,6 +3705,36 @@ main {
 .guide-chat-challenge p { margin: 0; }
 .guide-chat-challenge textarea { min-height: 5rem; }
 
+.guide-chat-edit {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--primary) 35%, var(--line));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--primary) 4%, var(--surface));
+}
+
+.guide-chat-edit-heading h4,
+.guide-chat-edit-preview h5 { margin: 0; }
+.guide-chat-edit-preview {
+  max-height: min(38vh, 24rem);
+  min-width: 0;
+  overflow: auto;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  overscroll-behavior: contain;
+}
+.guide-chat-edit-preview h5 { margin-bottom: var(--space-2); font-size: 1rem; }
+.guide-chat-edit-preview .guide-section-blocks { gap: var(--space-2); }
+.guide-chat-edit-preview .guide-section-block { padding: 0.65rem; }
+.guide-chat-edit-terms { margin: var(--space-2) 0 0; font-size: 0.84rem; }
+.guide-chat-edit-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.guide-chat-edit-status { min-height: 1.2em; margin: 0; color: var(--muted); font-size: 0.82rem; }
+
 .guide-chat-status {
   min-height: 1.4em;
   margin: var(--space-2) 0 0;
