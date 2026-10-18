@@ -348,6 +348,12 @@ Treat each arrow as a precise graph edge: connect the intended source and destin
 branch outcome, and trace every route from start to finish. A branch must not look like the next
 step in a sequence. Put markers on the actual point, endpoint, intersection, or extremum they
 describe; do not place approximate markers nearby.
+Before returning a directional-transfer diagram, trace every arrow from its tail to its arrowhead
+and verify that its direction matches the labels and stated outcome. Never use a single directional
+arrow to represent “no net flow”; show equal opposing flows or a neutral no-net marker. For
+osmosis, label the external solution relative to the cell: water leaves in a hypertonic solution,
+enters in a hypotonic solution, and moves equally in both directions with no net volume change in
+an isotonic solution. Make any cell-volume labels agree with those movements.
 
 For quantitative or spatial drawings, map values to geometry consistently. Derive angles and
 directions from supplied values; do not add a familiar-looking 45-degree angle, perpendicular axis,

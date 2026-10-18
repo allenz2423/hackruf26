@@ -1780,14 +1780,21 @@ def _render_guide_block(
         )
         return lines
     if block.type == "svg_diagram":
-        lines = [r"\paragraph{" + escape_latex(block.title or "Custom diagram") + "}"]
-        if svg_image and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,80}\.png", svg_image):
+        has_svg_image = bool(
+            svg_image
+            and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,80}\.png", svg_image)
+        )
+        lines = (
+            [r"\begin{samepage}"] if has_svg_image else []
+        ) + [r"\paragraph{" + escape_latex(block.title or "Custom diagram") + "}"]
+        if has_svg_image:
             lines.extend(
                 [
                     r"\begin{center}\includegraphics[width=\linewidth,height=0.46\textheight,keepaspectratio]{"
                     + svg_image
                     + r"}\end{center}",
                     inline("Text alternative: " + (block.alt_text or "Custom course diagram.")),
+                    r"\end{samepage}",
                 ]
             )
         else:

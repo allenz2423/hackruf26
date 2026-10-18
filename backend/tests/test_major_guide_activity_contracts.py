@@ -478,8 +478,17 @@ class MajorGuideActivityFallbackAndExportTests(unittest.TestCase):
         ):
             files = create_guide_files(settings(), **self.svg_guide())
 
-        self.assertIn(r"\includegraphics", compiler_inputs["latex"])
-        self.assertIn("Text alternative: Particles move from high to low concentration.", compiler_inputs["latex"])
+        pdf_latex = compiler_inputs["latex"]
+        diagram_title = r"\paragraph{Diffusion across a membrane}"
+        title_index = pdf_latex.index(diagram_title)
+        samepage_start = pdf_latex.rfind(r"\begin{samepage}", 0, title_index)
+        alt_index = pdf_latex.index(
+            "Text alternative: Particles move from high to low concentration.", title_index
+        )
+        samepage_end = pdf_latex.index(r"\end{samepage}", alt_index)
+        self.assertIn(r"\includegraphics", pdf_latex)
+        self.assertLess(samepage_start, title_index)
+        self.assertLess(alt_index, samepage_end)
         self.assertEqual(compiler_inputs["assets"], {"jot-guide-diagram-001.png": b"png-bytes"})
         standalone_latex = files["latex"].decode("utf-8")
         self.assertNotIn(r"\includegraphics", standalone_latex)

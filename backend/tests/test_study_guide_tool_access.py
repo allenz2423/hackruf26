@@ -105,6 +105,11 @@ class StudyGuideToolAccessTests(unittest.TestCase):
         self.assertIn("smallest practical viewBox", custom_svg)
         self.assertIn("precise graph edge", custom_svg)
         self.assertIn("trace each route from start to finish", custom_svg)
+        self.assertIn("trace every arrow from its tail to its arrowhead", prompt)
+        self.assertIn('arrow to represent “no net flow”', prompt)
+        self.assertIn("show equal opposing flows", prompt)
+        self.assertIn("water leaves in a hypertonic solution", prompt)
+        self.assertIn("moves equally in both directions", prompt)
 
     def test_requested_instructions_are_allowlisted_and_catalog_ordered(self) -> None:
         instructions = guide_tool_instructions(["circuit_divider", "math_graph"])
