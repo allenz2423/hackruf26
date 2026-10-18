@@ -165,7 +165,7 @@ export function createGuideChat(host, { material, sectionIndex = 0, sectionHeadi
     }
     const available = Math.max(608, layout?.clientWidth || 900);
     const min = 288;
-    return { min, max: Math.max(min, Math.min(400, available - 320)) };
+    return { min, max: Math.max(min, Math.min(640, available - 320)) };
   }
 
   function setPanelSize(value, isMobile, persist = false) {
