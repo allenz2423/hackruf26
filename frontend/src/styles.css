@@ -3669,9 +3669,11 @@ body.is-resizing-guide-chat-mobile * {
 }
 
 .guide-chat-scroll {
+  min-width: 0;
   min-height: 5rem;
   flex: 1 1 auto;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
 }
