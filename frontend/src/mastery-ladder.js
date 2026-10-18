@@ -25,6 +25,23 @@ const DRAFT_STORAGE_ENTRY_LIMIT = 24_000;
 const DRAFT_ENTRY_COUNT_LIMIT = 100;
 const OPERATION_STORAGE_ENTRY_LIMIT = 12_000;
 const OPERATION_ENTRY_COUNT_LIMIT = 100;
+export const MAX_LADDER_CONCEPT_SELECTIONS = 12;
+
+export function masteryLadderConceptPickerState(concepts, selectedIds, query = "") {
+  const selected = new Set(selectedIds);
+  const normalizedQuery = String(query).trim().toLocaleLowerCase();
+  const visibleConcepts = concepts.filter((concept) => (
+    !normalizedQuery || concept.label.toLocaleLowerCase().includes(normalizedQuery)
+  ));
+  const visibleUnselectedCount = visibleConcepts.filter((concept) => !selected.has(concept.concept_id)).length;
+  return {
+    visibleConcepts,
+    selectedCount: selected.size,
+    visibleUnselectedCount,
+    canSelectVisible: visibleUnselectedCount > 0
+      && selected.size + visibleUnselectedCount <= MAX_LADDER_CONCEPT_SELECTIONS
+  };
+}
 
 function draftPrefix(userId) {
   return `jot.mastery-ladder-draft:v1:${encodeURIComponent(String(userId))}:`;
@@ -491,7 +508,16 @@ export async function renderMasteryLadderPanel({ root, klass, currentUserId = nu
     root.innerHTML = `<section class="panel mastery-ladder-launcher" aria-labelledby="mastery-ladder-launch-title">
       <div class="page-heading"><div><p class="eyebrow">Practice mode</p><h2 id="mastery-ladder-launch-title">Mastery Ladder</h2><p class="muted">Work through four cognitive levels for selected class concepts. Your progress is private to your account.</p></div></div>
       ${concepts.length ? `<form data-mastery-ladder-start>
-        <fieldset class="field-block"><legend>Choose concepts</legend><div class="mastery-ladder-concept-options">${concepts.map((concept) => `<label><input type="checkbox" name="concept_id" value="${escapeHtml(concept.concept_id)}" ${pendingCreate?.payload?.concept_ids?.includes(concept.concept_id) ? "checked" : ""}><span>${escapeHtml(concept.label)}</span></label>`).join("")}</div></fieldset>
+        <fieldset class="field-block mastery-ladder-concept-picker"><legend>Choose up to ${MAX_LADDER_CONCEPT_SELECTIONS} concepts</legend>
+          <div class="mastery-ladder-concept-picker-tools">
+            <label class="field mastery-ladder-concept-search"><span>Find a concept</span><input type="search" maxlength="120" autocomplete="off" placeholder="Search by name" aria-controls="mastery-ladder-concept-options" aria-describedby="mastery-ladder-concept-help" data-ladder-concept-search></label>
+            <div class="mastery-ladder-picker-actions"><button class="btn btn-ghost btn-small" type="button" data-select-visible>Choose shown</button><button class="btn btn-ghost btn-small" type="button" data-clear-concepts>Clear selection</button></div>
+          </div>
+          <p class="field-hint mastery-ladder-concept-count" role="status" aria-live="polite" data-ladder-concept-count></p>
+          <div class="mastery-ladder-concept-options" id="mastery-ladder-concept-options" role="group" aria-label="Available concepts">${concepts.map((concept) => `<label><input type="checkbox" name="concept_id" value="${escapeHtml(concept.concept_id)}" ${pendingCreate?.payload?.concept_ids?.includes(concept.concept_id) ? "checked" : ""}><span>${escapeHtml(concept.label)}</span></label>`).join("")}</div>
+          <p class="field-hint" id="mastery-ladder-concept-help" data-ladder-concept-help></p>
+          <p class="field-hint" role="status" aria-live="polite" data-ladder-concept-no-results hidden>No concepts match this search.</p>
+        </fieldset>
         <label class="field"><span>Progression policy</span><select name="grading_policy"><option value="objective_only" ${pendingCreate?.payload?.grading_policy === "objective_only" ? "selected" : ""}>Objective-only</option><option value="reasoning_required" ${pendingCreate?.payload?.grading_policy === "reasoning_required" ? "selected" : ""}>Reasoning-required</option></select></label>
         <p class="field-hint">Reasoning-required adds a separate quality rubric. It is distinct from a check that you made a meaningful attempt.</p>
         <button class="btn btn-secondary" type="submit" data-start-ladder>Start Mastery Ladder</button>
@@ -500,7 +526,56 @@ export async function renderMasteryLadderPanel({ root, klass, currentUserId = nu
     </section>`;
     const form = root.querySelector("[data-mastery-ladder-start]");
     if (!form) return;
-    form.addEventListener("change", () => {
+    const conceptSearch = form.querySelector("[data-ladder-concept-search]");
+    const selectVisibleButton = form.querySelector("[data-select-visible]");
+    const clearConceptsButton = form.querySelector("[data-clear-concepts]");
+    const conceptCount = form.querySelector("[data-ladder-concept-count]");
+    const conceptHelp = form.querySelector("[data-ladder-concept-help]");
+    const noConceptMatches = form.querySelector("[data-ladder-concept-no-results]");
+    const conceptCheckboxes = [...form.querySelectorAll('input[name="concept_id"]')];
+    const selectedConceptIds = () => conceptCheckboxes.filter((input) => input.checked).map((input) => input.value);
+    const updateConceptPicker = () => {
+      const selected = selectedConceptIds();
+      const pickerState = masteryLadderConceptPickerState(concepts, selected, conceptSearch.value);
+      const visibleIds = new Set(pickerState.visibleConcepts.map((concept) => concept.concept_id));
+      for (const input of conceptCheckboxes) input.closest("label").hidden = !visibleIds.has(input.value);
+      conceptCount.textContent = `${pickerState.selectedCount} of ${MAX_LADDER_CONCEPT_SELECTIONS} selected · Showing ${pickerState.visibleConcepts.length} of ${concepts.length}`;
+      selectVisibleButton.disabled = !pickerState.canSelectVisible;
+      clearConceptsButton.disabled = pickerState.selectedCount === 0;
+      noConceptMatches.hidden = pickerState.visibleConcepts.length > 0;
+      if (!pickerState.visibleConcepts.length) {
+        conceptHelp.textContent = "Try a shorter or different search.";
+      } else if (!pickerState.visibleUnselectedCount) {
+        conceptHelp.textContent = "All shown concepts are selected. Search for more or clear your selection.";
+      } else if (pickerState.selectedCount + pickerState.visibleUnselectedCount > MAX_LADDER_CONCEPT_SELECTIONS) {
+        conceptHelp.textContent = `Narrow the search to ${MAX_LADDER_CONCEPT_SELECTIONS - pickerState.selectedCount} or fewer additional concepts to choose them all at once.`;
+      } else {
+        conceptHelp.textContent = "Select concepts individually or choose all shown results.";
+      }
+    };
+    conceptSearch.addEventListener("input", updateConceptPicker);
+    selectVisibleButton.addEventListener("click", () => {
+      const pickerState = masteryLadderConceptPickerState(concepts, selectedConceptIds(), conceptSearch.value);
+      if (!pickerState.canSelectVisible) return;
+      const visibleIds = new Set(pickerState.visibleConcepts.map((concept) => concept.concept_id));
+      for (const input of conceptCheckboxes) {
+        if (visibleIds.has(input.value)) input.checked = true;
+      }
+      updateConceptPicker();
+      form.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    clearConceptsButton.addEventListener("click", () => {
+      for (const input of conceptCheckboxes) input.checked = false;
+      updateConceptPicker();
+      form.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    form.addEventListener("change", (event) => {
+      const changedCheckbox = event.target.closest?.('input[name="concept_id"]');
+      if (changedCheckbox?.checked && selectedConceptIds().length > MAX_LADDER_CONCEPT_SELECTIONS) {
+        changedCheckbox.checked = false;
+        form.querySelector("[data-ladder-launch-status]").textContent = `A ladder can include up to ${MAX_LADDER_CONCEPT_SELECTIONS} concepts. Remove one before adding another.`;
+      }
+      updateConceptPicker();
       const selectedIds = [...form.querySelectorAll('input[name="concept_id"]:checked')].map((input) => input.value);
       const payloadKey = JSON.stringify({ selected: selectedIds, policy: form.elements.grading_policy.value });
       if (pendingCreate?.payloadKey !== payloadKey) {
@@ -508,6 +583,7 @@ export async function renderMasteryLadderPanel({ root, klass, currentUserId = nu
         clearPendingCreate(currentUserId, classId);
       }
     });
+    updateConceptPicker();
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const selected = [...form.querySelectorAll('input[name="concept_id"]:checked')].map((input) => input.value);
@@ -516,6 +592,11 @@ export async function renderMasteryLadderPanel({ root, klass, currentUserId = nu
       if (!selected.length) {
         status.textContent = "Choose at least one concept.";
         form.querySelector('input[name="concept_id"]')?.focus();
+        return;
+      }
+      if (selected.length > MAX_LADDER_CONCEPT_SELECTIONS) {
+        status.textContent = `Choose no more than ${MAX_LADDER_CONCEPT_SELECTIONS} concepts per ladder.`;
+        conceptSearch.focus();
         return;
       }
       button.disabled = true;

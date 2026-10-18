@@ -755,21 +755,78 @@ main {
   gap: var(--space-3);
 }
 
+.mastery-ladder-concept-picker {
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+.mastery-ladder-concept-picker legend {
+  padding-inline: var(--space-1);
+  font-weight: 700;
+}
+
+.mastery-ladder-concept-picker-tools {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.mastery-ladder-concept-search {
+  width: min(100%, 25rem);
+  min-width: min(100%, 15rem);
+}
+
+.mastery-ladder-picker-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.mastery-ladder-picker-actions button {
+  min-height: 40px;
+}
+
+.mastery-ladder-concept-count {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
 .mastery-ladder-concept-options {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
-  gap: var(--space-2);
+  align-content: start;
+  max-height: min(22rem, 50vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 1px var(--space-1) 1px 1px;
+  gap: var(--space-1);
+  scrollbar-gutter: stable;
 }
 
 .mastery-ladder-concept-options label {
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
-  min-height: 44px;
-  padding: var(--space-3);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-md);
+  min-width: 0;
+  min-height: 42px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
   background: var(--surface);
+  cursor: pointer;
+}
+
+.mastery-ladder-concept-picker .mastery-ladder-concept-options label {
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.mastery-ladder-concept-options label:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-muted);
 }
 
 .mastery-ladder-concept-options input,
@@ -780,6 +837,36 @@ main {
 
 .mastery-ladder-concept-options span {
   overflow-wrap: anywhere;
+}
+
+.mastery-ladder-concept-picker [hidden] {
+  display: none !important;
+}
+
+.mastery-ladder-picker-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+@media (max-width: 640px) {
+  .mastery-ladder-concept-picker-tools {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .mastery-ladder-concept-search {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .mastery-ladder-picker-actions button {
+    flex: 1 1 auto;
+  }
+
+  .mastery-ladder-concept-options {
+    grid-template-columns: minmax(0, 1fr);
+    max-height: min(20rem, 45vh);
+  }
 }
 
 .mastery-ladder-policy-note {

@@ -12,6 +12,8 @@ import {
 } from "../src/api.js";
 import {
   clearMasteryLadderDraft,
+  MAX_LADDER_CONCEPT_SELECTIONS,
+  masteryLadderConceptPickerState,
   masteryLadderProgressMessage,
   masteryLadderMarkup,
   normalizeLadderReasoningResult,
@@ -116,6 +118,36 @@ test("only validated concepts are selectable for ladders", () => {
     { id: "draft", canonical_name: "Draft", status: "proposed" },
     { id: "rejected", canonical_name: "Rejected", state: "rejected" }
   ] }), [{ concept_id: "valid", label: "Validated" }]);
+});
+
+test("mastery ladder picker filters case-insensitively and keeps hidden selections counted", () => {
+  const concepts = Array.from({ length: 20 }, (_, index) => ({
+    concept_id: `concept-${index}`,
+    label: index < 3 ? `Amino acid concept ${index}` : `Cell concept ${index}`
+  }));
+  const state = masteryLadderConceptPickerState(concepts, ["concept-0", "concept-18"], "AMINO");
+  assert.deepEqual(state.visibleConcepts.map((concept) => concept.concept_id), ["concept-0", "concept-1", "concept-2"]);
+  assert.equal(state.selectedCount, 2);
+  assert.equal(state.visibleUnselectedCount, 2);
+  assert.equal(state.canSelectVisible, true);
+});
+
+test("mastery ladder picker does not bulk-select beyond the server's twelve-concept limit", () => {
+  const concepts = Array.from({ length: MAX_LADDER_CONCEPT_SELECTIONS + 1 }, (_, index) => ({
+    concept_id: `concept-${index}`,
+    label: `Concept ${index}`
+  }));
+  const allVisible = masteryLadderConceptPickerState(concepts, [], "");
+  assert.equal(allVisible.canSelectVisible, false);
+  assert.equal(allVisible.visibleUnselectedCount, MAX_LADDER_CONCEPT_SELECTIONS + 1);
+
+  const narrowed = masteryLadderConceptPickerState(concepts, [], "Concept 0");
+  assert.equal(narrowed.visibleConcepts.length, 1);
+  assert.equal(narrowed.canSelectVisible, true);
+
+  const atLimit = masteryLadderConceptPickerState(concepts, concepts.slice(0, MAX_LADDER_CONCEPT_SELECTIONS).map(({ concept_id }) => concept_id), "Concept 12");
+  assert.equal(atLimit.selectedCount, MAX_LADDER_CONCEPT_SELECTIONS);
+  assert.equal(atLimit.canSelectVisible, false);
 });
 
 test("reasoning-required ladder holds final submission until accepted and escapes prompt", () => {
