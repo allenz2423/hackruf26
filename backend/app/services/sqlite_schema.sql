@@ -1002,6 +1002,69 @@ CREATE TABLE IF NOT EXISTS flashcard_review_state (
 CREATE INDEX IF NOT EXISTS flashcard_review_state_owner_due_idx
     ON flashcard_review_state(owner_id,next_due_at,material_id);
 
+-- Model-assisted study scores retain only numeric aggregates, the validated
+-- score, a short explanation, and model/prompt provenance. They are not grades
+-- and never feed the mastery estimator.
+CREATE TABLE IF NOT EXISTS study_performance_scores (
+    id                    TEXT PRIMARY KEY,
+    owner_id              TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    class_id              TEXT NOT NULL REFERENCES course_classes(id) ON DELETE CASCADE,
+    triggering_material_id TEXT NOT NULL REFERENCES study_materials(id) ON DELETE CASCADE,
+    input_digest          TEXT NOT NULL CHECK (length(input_digest)=64),
+    status                TEXT NOT NULL CHECK (status IN ('pending','ready','failed')),
+    quiz_score            REAL CHECK (quiz_score IS NULL OR quiz_score BETWEEN 0 AND 100),
+    exam_score            REAL CHECK (exam_score IS NULL OR exam_score BETWEEN 0 AND 100),
+    flashcard_score       REAL CHECK (flashcard_score IS NULL OR flashcard_score BETWEEN 0 AND 100),
+    overall_score         REAL CHECK (overall_score IS NULL OR overall_score BETWEEN 0 AND 100),
+    evidence_level        TEXT CHECK (evidence_level IS NULL OR evidence_level IN ('low','moderate','high')),
+    explanation           TEXT CHECK (explanation IS NULL OR length(explanation) <= 500),
+    evidence_summary      TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(evidence_summary)
+        AND json_type(evidence_summary)='object'),
+    model_identifier      TEXT,
+    prompt_version        TEXT NOT NULL,
+    error_code            TEXT,
+    created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (owner_id,class_id,input_digest)
+);
+CREATE INDEX IF NOT EXISTS study_performance_scores_owner_class_idx
+    ON study_performance_scores(owner_id,class_id,created_at DESC);
+
+-- Private guide retrieval practice stores only outcomes and scheduling metadata.
+-- It deliberately excludes selected choices, free-text answers, and chat content.
+CREATE TABLE IF NOT EXISTS guide_section_review_state (
+    owner_id              TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    material_id           TEXT NOT NULL REFERENCES study_materials(id) ON DELETE CASCADE,
+    section_id            TEXT NOT NULL CHECK (length(trim(section_id)) BETWEEN 1 AND 160),
+    content_fingerprint   TEXT NOT NULL CHECK (length(content_fingerprint)=64),
+    attempt_count         INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    last_correct          INTEGER CHECK (last_correct IS NULL OR last_correct IN (0,1)),
+    last_attempt_at       TEXT,
+    next_due_at           TEXT,
+    last_operation_id     TEXT,
+    updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (owner_id,material_id,section_id)
+);
+CREATE INDEX IF NOT EXISTS guide_section_review_due_idx
+    ON guide_section_review_state(owner_id,next_due_at,material_id);
+
+-- Idempotency receipts for guide checks. These record only the evaluated
+-- result and scheduling metadata; a submitted choice or answer is never kept.
+CREATE TABLE IF NOT EXISTS guide_section_review_receipts (
+    owner_id            TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    material_id         TEXT NOT NULL REFERENCES study_materials(id) ON DELETE CASCADE,
+    section_id          TEXT NOT NULL CHECK (length(trim(section_id)) BETWEEN 1 AND 160),
+    operation_id        TEXT NOT NULL CHECK (length(trim(operation_id)) = 36),
+    content_fingerprint TEXT NOT NULL CHECK (length(content_fingerprint)=64),
+    correct             INTEGER NOT NULL CHECK (correct IN (0,1)),
+    attempt_count       INTEGER NOT NULL CHECK (attempt_count > 0),
+    attempted_at        TEXT NOT NULL,
+    next_due_at         TEXT NOT NULL,
+    PRIMARY KEY (owner_id,material_id,section_id,operation_id)
+);
+CREATE INDEX IF NOT EXISTS guide_section_review_receipts_material_idx
+    ON guide_section_review_receipts(owner_id,material_id,attempted_at);
+
 -- Aggregate-safe exposure and outcome telemetry for internal calibration. No
 -- raw reasoning, transcript, or direct user identifier is stored here.
 CREATE TABLE IF NOT EXISTS question_calibration_events (

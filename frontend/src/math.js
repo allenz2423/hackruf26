@@ -638,7 +638,11 @@ export function displayMathHtml(text) {
 let katexLoad = null;
 
 function loadKatex() {
-  katexLoad ??= Promise.all([import("katex"), import("katex/dist/katex.min.css")]).then(([module]) => module.default ?? module);
+  katexLoad ??= Promise.all([
+    import("katex"),
+    import("katex/contrib/mhchem"),
+    import("katex/dist/katex.min.css")
+  ]).then(([module]) => module.default ?? module);
   return katexLoad;
 }
 

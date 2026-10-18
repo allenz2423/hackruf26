@@ -153,7 +153,7 @@ async def set_tracked_balance(
 
 
 async def usage_ledger_snapshot(database: SQLiteDatabase, *, limit: int = 500) -> dict[str, Any]:
-    """Return totals and recent entries for the administrator ledger."""
+    """Return totals, recent events, and complete per-material cost rollups."""
     summary = await database.fetchrow(
         "SELECT "
         "COALESCE(SUM(CASE WHEN entry_type='provider_call' THEN reported_cost_microusd ELSE 0 END),0) "
@@ -173,13 +173,44 @@ async def usage_ledger_snapshot(database: SQLiteDatabase, *, limit: int = 500) -
         "SELECT e.id,e.entry_type,e.operation_id,e.operation_kind,e.operation_label,"
         "e.provider_host,e.model,e.actual_model,e.attempt,e.outcome,e.http_status,e.prompt_tokens,"
         "e.completion_tokens,e.reasoning_tokens,e.total_tokens,e.reported_cost_microusd,"
-        "e.balance_delta_microusd,e.adjustment_note,e.created_at,m.status AS material_status "
+        "e.balance_delta_microusd,e.adjustment_note,e.created_at,"
+        "COALESCE(m.status,d.status) AS material_status "
         "FROM ai_usage_ledger_entries e LEFT JOIN study_materials m ON m.id=e.operation_id "
+        "LEFT JOIN upload_documents d ON e.operation_id="
+        "('upload-document:'||d.note_id||':'||d.detail_level) "
         # Multiple entries can be inserted within the same millisecond; rowid gives
         # an insertion-order tie break instead of sorting random UUIDs lexically.
         "ORDER BY e.created_at DESC,e.rowid DESC LIMIT ?1",
         limit,
     )
+    materials = await database.fetch(
+        "WITH items AS ("
+        "SELECT m.id AS material_id,m.kind,m.title,m.status,m.created_at,"
+        "NULL AS detail_level,m.id AS operation_id FROM study_materials m "
+        "UNION ALL "
+        "SELECT n.id AS material_id,'companion_notes' AS kind,"
+        "n.title||' · '||d.detail_level||' notes' AS title,d.status,n.created_at,"
+        "d.detail_level,'upload-document:'||d.note_id||':'||d.detail_level AS operation_id "
+        "FROM upload_documents d JOIN course_notes n ON n.id=d.note_id) "
+        "SELECT i.material_id,i.kind,i.title,i.status,i.created_at,i.detail_level,"
+        "COUNT(e.id) AS provider_calls,"
+        "COALESCE(SUM(e.reported_cost_microusd),0) AS known_cost_microusd,"
+        "COALESCE(SUM(CASE WHEN e.id IS NOT NULL AND e.reported_cost_microusd IS NULL "
+        "THEN 1 ELSE 0 END),0) AS unpriced_calls,"
+        "COALESCE(SUM(CASE WHEN e.id IS NOT NULL AND e.outcome<>'success' "
+        "THEN 1 ELSE 0 END),0) AS unsuccessful_calls "
+        "FROM items i LEFT JOIN ai_usage_ledger_entries e "
+        "ON e.operation_id=i.operation_id AND e.entry_type='provider_call' "
+        "GROUP BY i.material_id,i.kind,i.title,i.status,i.created_at,i.detail_level,i.operation_id "
+        "ORDER BY i.created_at DESC,i.material_id DESC,i.detail_level LIMIT ?1",
+        limit,
+    )
+    for material in materials:
+        calls = int(material.get("provider_calls") or 0)
+        unpriced = int(material.get("unpriced_calls") or 0)
+        material["cost_status"] = (
+            "not_recorded" if calls == 0 else "partial" if unpriced else "complete"
+        )
     return {
         "total_spend_microusd": int(summary.get("total_spend_microusd") or 0),
         "month_spend_microusd": int(summary.get("month_spend_microusd") or 0),
@@ -192,4 +223,5 @@ async def usage_ledger_snapshot(database: SQLiteDatabase, *, limit: int = 500) -
             else None
         ),
         "entries": entries,
+        "materials": materials,
     }

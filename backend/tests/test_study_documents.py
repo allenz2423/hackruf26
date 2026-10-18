@@ -2200,7 +2200,7 @@ class StudyFormatTests(unittest.TestCase):
 
 
 class LatexExportTests(unittest.TestCase):
-    def test_mini_quizzes_print_with_a_separate_answer_key(self) -> None:
+    def test_mini_quizzes_print_prompts_without_exposing_the_answer_key(self) -> None:
         upload_id = uuid4()
         content = {
             "format": "study_guide",
@@ -2231,9 +2231,9 @@ class LatexExportTests(unittest.TestCase):
 
         self.assertIn("Check your understanding", latex)
         self.assertIn("Which process moves water", latex)
-        self.assertIn("Mini-quiz answer key", latex)
-        self.assertIn(r"\textbf{Answer:} Osmosis", latex)
-        self.assertIn("diffusion of water across", latex)
+        self.assertIn("Osmosis", latex)
+        self.assertNotIn("Mini-quiz answer key", latex)
+        self.assertNotIn("diffusion of water across", latex)
 
     def test_section_numbers_have_room_in_long_guide_table_of_contents(self) -> None:
         upload_id = uuid4()
@@ -2564,6 +2564,7 @@ class FakeStudyGenerationService:
         self.upload_id = upload_id
         self.guide = guide
         self.generation_contexts: list[dict] = []
+        self.upload_document_usage_contexts: list[dict[str, str]] = []
         self.material_generation_options: list[dict] = []
         self.generation_failures = 0
         self.generation_calls = 0
@@ -2605,6 +2606,9 @@ class FakeStudyGenerationService:
         return content
 
     def generate_upload_document_chunk(self, **_kwargs):
+        from app.services.ai_usage_ledger import usage_context_values
+
+        self.upload_document_usage_contexts.append(usage_context_values())
         return [section(self.upload_id)]
 
     def generate_question_bank(self, context: dict) -> QuestionBankAIGeneration:
@@ -2886,7 +2890,11 @@ class SavedDocumentTests(unittest.IsolatedAsyncioTestCase):
         detail = await get_study_material(self.material_id, self.request(), response)
         self.assertEqual(detail.status, "failed")
         self.assertEqual(detail.preview_revision, 1)
-        self.assertEqual(detail.preview_content, preview)
+        expected_preview = deepcopy(preview)
+        expected_quiz = expected_preview["sections"][0]["mini_quiz"]
+        expected_quiz.pop("correct_index", None)
+        expected_quiz.pop("explanation", None)
+        self.assertEqual(detail.preview_content, expected_preview)
         self.assertEqual(detail.download_urls, {})
         self.assertEqual(response.headers["Cache-Control"], "private, no-store")
 
@@ -3106,6 +3114,11 @@ class SavedDocumentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 (await document_detail(self.db, self.upload_id, level))["status"], "ready"
             )
+            usage = self.service.upload_document_usage_contexts[-1]
+            self.assertEqual(
+                usage["operation_id"], f"upload-document:{self.upload_id}:{level}"
+            )
+            self.assertEqual(usage["operation_kind"], "companion_notes")
             _, created_again = await _reserve_document(self.db, self.upload_id, level)
             self.assertFalse(created_again)
             response = await download_upload_document(

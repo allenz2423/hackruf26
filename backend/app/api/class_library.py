@@ -111,7 +111,7 @@ from app.services.study_files import StudyFileFailure, compiler_path, create_gui
 
 logger = logging.getLogger("screen_tutor.class_library")
 router = APIRouter(tags=["class-library"])
-STUDY_GUIDE_QUALITY_VERSION = 7
+STUDY_GUIDE_QUALITY_VERSION = 8
 
 
 def _provider_error_metadata(exc: Exception) -> tuple[int | None, str | None]:
@@ -495,6 +495,14 @@ def _public_material_content(
     if not isinstance(content, dict):
         return None
     result = json.loads(json.dumps(content))
+    # Mini-quiz keys are held back until the owner submits an answer through
+    # the dedicated check endpoint. Strip them from every material detail and
+    # preview response, even when source filtering is not needed.
+    if kind == "study_guide":
+        for section in result.get("sections", []) if isinstance(result.get("sections"), list) else []:
+            if isinstance(section, dict) and isinstance(section.get("mini_quiz"), dict):
+                section["mini_quiz"].pop("correct_index", None)
+                section["mini_quiz"].pop("explanation", None)
     if kind in {"quiz", "practice_exam"}:
         questions = result.get("questions", [])
         # Assessment delivery happens through immutable runs, never material detail.

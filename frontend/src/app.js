@@ -41,6 +41,12 @@ import { escapeHtml, openDialog, toast } from "./ui.js";
 import { classBadge, classColor, classInitial, openClassEditor } from "./class-style.js";
 import { getClassDisplayCounts } from "./class-counts.js";
 import {
+  materialCostDetails,
+  materialCostKindLabel,
+  materialCostLabel,
+  trackedBalanceInputValue
+} from "./ai-usage-ledger-view.js";
+import {
   getCurrentUser,
   getStudyMaterialDetailApi,
   getMyStudyMaterialsApi,
@@ -77,6 +83,7 @@ initTheme();
 let currentUser = null;
 let disposeTutor = null;
 let tutorMemoryPanel = null;
+let authCheckState = "checking";
 
 const state = {
   session: "idle",
@@ -211,6 +218,7 @@ const displayName = (user) => user?.display_name || user?.username || "";
 // account is removed the moment that account is no longer the one signed in.
 async function applyAuth(user) {
   currentUser = user;
+  authCheckState = "confirmed";
   setDemoContent(user?.is_demo);
   if (user) {
     claimLocalClassData(user.id);
@@ -432,12 +440,28 @@ function renderHome() {
       <div class="home-inner">
         <div class="home-logo">
           <span class="home-mascot" aria-hidden="true"><img src="${jotMascot}" alt="" /></span>
-          <h1>Jot</h1>
+        <h1>Jot</h1>
         </div>
+        ${authCheckState === "unavailable" ? `<div class="auth-check-warning" role="status"><p>Jot could not check your sign-in right now. Your saved browser data was left untouched. Try again when the server is reachable.</p><button class="btn btn-secondary btn-small" type="button" data-retry-auth>Retry account check</button></div>` : ""}
         ${copy}
       </div>
     </main>
   `;
+
+  app.querySelector("[data-retry-auth]")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = "Checking…";
+    try {
+      await applyAuth(await getCurrentUser());
+      router.render();
+    } catch {
+      authCheckState = "unavailable";
+      button.disabled = false;
+      button.textContent = "Retry account check";
+      button.focus();
+    }
+  });
 }
 
 async function renderGuestWorkspace() {
@@ -560,8 +584,12 @@ async function renderClasses() {
   async function addClass() {
     const name = await openDialog({ title: "New class", input: { label: "Class name" }, confirmLabel: "Create class", confirmIcon: "plus" });
     if (!name) return;
-    const nextClass = await createClass(name);
-    window.location.hash = `#/classes/${encodeURIComponent(nextClass.id)}/library`;
+    try {
+      const nextClass = await createClass(name);
+      window.location.hash = `#/classes/${encodeURIComponent(nextClass.id)}/library`;
+    } catch (error) {
+      toast(`The class was not created on Jot. Check your connection and try again. ${error.message || ""}`.trim(), { tone: "error" });
+    }
   }
 
   document.querySelector("#new-class").addEventListener("click", addClass);
@@ -2093,10 +2121,10 @@ function renderAdmin() {
         </div>
         <form id="ai-balance-form" class="ai-balance-form">
           <label>Current provider balance (USD)
-            <input name="balance_usd" type="number" min="0" max="1000000" step="0.000001" value="63.86" required>
+            <input name="balance_usd" type="number" min="0" max="1000000" step="0.000001" value="" placeholder="Unknown — set a snapshot" required>
           </label>
           <button class="btn btn-primary" type="submit">Set balance</button>
-          <p class="muted">Starts from the $63.86 balance you reported. After an outside deposit or balance change, update this snapshot; Jot will subtract charges it can verify.</p>
+          <p class="muted">Set a balance snapshot to begin tracking. This ledger includes only provider charges Jot records here; Gemini Live/media and other provider use outside this ledger are excluded. Update the snapshot after outside deposits or balance changes.</p>
         </form>
         <p id="ai-usage-message" class="muted" role="status" aria-live="polite"></p>
         <div id="ai-usage-entries" class="ai-usage-entries" aria-live="polite" aria-busy="true">
@@ -2247,9 +2275,7 @@ function renderAdmin() {
       <p class="ai-usage-caption">${snapshot.unpriced_calls || snapshot.unsuccessful_calls
         ? `${escapeHtml(String(snapshot.unpriced_calls || 0))} calls have no reported cost; ${escapeHtml(String(snapshot.unsuccessful_calls || 0))} returned an error or invalid response.`
         : "Charges are recorded from provider usage responses."}</p>`;
-    if (snapshot.balance_known && Number.isFinite(Number(snapshot.balance_microusd))) {
-      balanceForm.elements.balance_usd.value = (Number(snapshot.balance_microusd) / 1_000_000).toFixed(6);
-    }
+    balanceForm.elements.balance_usd.value = trackedBalanceInputValue(snapshot);
 
     const grouped = new Map();
     for (const entry of snapshot.entries || []) {
@@ -2289,15 +2315,25 @@ function renderAdmin() {
       }
     }
     const rows = [...grouped.values()];
-    if (!rows.length) {
-      usageEntries.setAttribute("aria-busy", "false");
-      usageEntries.innerHTML = `<p class="muted">No provider calls recorded yet.</p>`;
-      return;
-    }
     usageEntries.setAttribute("aria-busy", "false");
     usageEntries.innerHTML = `
-      <h3>Recent activity</h3>
-      <ul>${rows.slice(0, 14).map((item) => {
+      <div class="ai-usage-detail-grid">
+        <section class="ai-material-costs" aria-labelledby="ai-material-costs-title">
+          <h3 id="ai-material-costs-title">Cost by generated item</h3>
+          ${(snapshot.materials || []).length ? `<ul>${snapshot.materials.map((material) => `
+            <li class="ai-usage-entry">
+              <div>
+                <strong>${escapeHtml(material.title || material.kind || "Study material")}</strong>
+                <small>${escapeHtml(materialCostKindLabel(material))} · ${escapeHtml(material.status || "unknown status")} · ${escapeHtml(formatDate(material.created_at))} · ${escapeHtml(materialCostDetails(material))}</small>
+              </div>
+              <span class="ai-material-cost-value ai-material-cost-${escapeHtml(material.cost_status || "not_recorded")}">${escapeHtml(materialCostLabel(material, formatUsd))}</span>
+            </li>
+          `).join("")}</ul>` : `<p class="muted">No generated study materials recorded yet.</p>`}
+          <p class="ai-usage-caption">Each row includes all recorded generation and retry attempts for that item. A missing or unpriced call means the total may be higher.</p>
+        </section>
+        <section class="ai-usage-entries" aria-labelledby="ai-recent-activity-title">
+          <h3 id="ai-recent-activity-title">Recent activity</h3>
+          ${rows.length ? `<ul>${rows.slice(0, 14).map((item) => {
         if (item.adjustment) {
           const entry = item.adjustment;
           const delta = Number(entry.balance_delta_microusd) || 0;
@@ -2313,8 +2349,10 @@ function renderAdmin() {
           <div><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(formatDate(item.latest))}${item.status ? ` · ${escapeHtml(item.status)}` : ""} · ${item.calls} request${item.calls === 1 ? "" : "s"} · ${item.tokens.toLocaleString()} tokens · ${escapeHtml(item.model)}${extra}${item.errors ? ` · ${item.errors} error${item.errors === 1 ? "" : "s"}` : ""}</small></div>
           <span>${escapeHtml(cost)}</span>
         </li>`;
-      }).join("")}</ul>
-      <p class="ai-usage-caption">Only Jot requests appear here. Requests without provider-reported cost are not deducted from the tracked balance.</p>`;
+      }).join("")}</ul>` : `<p class="muted">No provider calls recorded yet.</p>`}
+        </section>
+      </div>
+      <p class="ai-usage-caption">Only provider calls recorded by this Jot ledger appear here. Gemini Live/media and other provider use outside the ledger are excluded; requests without provider-reported cost are not deducted from the tracked balance.</p>`;
   };
   const loadUsageLedger = async () => {
     usageEntries.setAttribute("aria-busy", "true");
@@ -2513,6 +2551,7 @@ window.addEventListener("pageshow", (event) => {
   try {
     await applyAuth(await getCurrentUser());
   } catch (err) {
+    authCheckState = "unavailable";
     console.warn("Initial auth check:", err);
   }
 

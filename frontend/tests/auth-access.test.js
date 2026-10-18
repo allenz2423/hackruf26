@@ -17,6 +17,13 @@ test("current-user response controls guest links and signup copy", async (t) => 
   assert.deepEqual(getAuthOptions(), { guestAccessEnabled: false, signupMode: "closed" });
 });
 
+test("an auth-check outage is not treated as a confirmed guest", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => new Response("", { status: 503 });
+  await assert.rejects(getCurrentUser(), (error) => error.code === "server_unreachable" && error.status === 503);
+});
+
 test("signup preserves the pending response without treating it as a login", async (t) => {
   const originalFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = originalFetch; });

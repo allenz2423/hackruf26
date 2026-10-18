@@ -3,9 +3,15 @@ import { escapeHtml, toast } from "./ui.js";
 import { icon } from "./icons.js";
 import { renderFlashcards, normalizeCards } from "./flashcards.js";
 import { sourceCitationHtml, bindSourceCitations, sourceWarningsHtml } from "./source-citations.js";
-import { downloadStudyFileApi } from "./api.js";
+import {
+  clearGuideProgressApi,
+  downloadStudyFileApi,
+  getGuideProgressApi,
+  submitGuideMiniQuizApi
+} from "./api.js";
 import { normalizeGuideBlocks } from "./study-guide/normalize.js";
 import { mountStudyGuideBlocks, renderStudyGuideBlock } from "./study-guide/force-components.js";
+import { createGuideChat } from "./guide-chat.js";
 
 function addDialog(title, { resizable = false } = {}) {
   const dialog = document.createElement("dialog");
@@ -24,7 +30,10 @@ function addDialog(title, { resizable = false } = {}) {
         <button class="btn btn-secondary" type="button" data-close aria-label="Close study material">Close</button>
       </div>
     </header>
-    <div class="material-session" id="material-session"></div>
+    <div class="material-session-layout">
+      <div class="material-session" id="material-session"></div>
+      <div data-guide-chat-host hidden></div>
+    </div>
   `;
   dialog.querySelector("[data-close]").addEventListener("click", () => dialog.close());
   const fullscreenButton = dialog.querySelector("[data-fullscreen]");
@@ -200,46 +209,79 @@ function guidePageNavigationHtml(currentPage, sectionCount) {
   `;
 }
 
-function guideMiniQuizHtml(quiz, material, section, sectionIndex, anchorPrefix, quizStates) {
+function newStudyOperationId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  if (!globalThis.crypto?.getRandomValues) throw new Error("Secure review IDs are unavailable in this browser.");
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function sectionProgressMap(payload) {
+  const result = new Map();
+  for (const item of Array.isArray(payload?.sections) ? payload.sections : []) {
+    if (Number.isInteger(item?.section_index) && item.section_index >= 0) result.set(item.section_index, item);
+  }
+  return result;
+}
+
+function guideMiniQuizHtml(quiz, material, section, sectionIndex, anchorPrefix, quizStates, reviewMeta = null, onOpenChat = null) {
   if (!quiz || typeof quiz !== "object" || !Array.isArray(quiz.choices) || quiz.choices.length !== 4) {
-    return "";
+    if (!onOpenChat) return "";
+    return `
+      <section class="guide-mini-quiz guide-mini-quiz-empty" aria-labelledby="guide-check-${sectionIndex + 1}-title">
+        <p class="guide-mini-quiz-kicker">Section check</p>
+        <h4 id="guide-check-${sectionIndex + 1}-title">No independent check yet</h4>
+        <p>This saved section does not have a validated check. You can ask Jot to make a practice question; it will not be scored or added to review progress.</p>
+        <button class="btn btn-secondary btn-small" type="button" data-guide-chat-practice>Ask Jot for a practice question</button>
+      </section>
+    `;
   }
   const quizKey = `${material.id || "local"}:${section.id || sectionIndex}`;
-  const state = quizStates.get(quizKey) || { selected: null, checked: false };
+  const state = quizStates.get(quizKey) || { selected: null, feedback: null, operationId: null, error: "", submitting: false };
   const fieldsetId = `${anchorPrefix}-quiz-${sectionIndex + 1}`;
-  const correct = state.checked && state.selected === quiz.correct_index;
+  const correct = state.feedback?.correct === true;
   const choices = quiz.choices.map((choice, index) => `
     <label class="guide-mini-quiz-choice" for="${fieldsetId}-choice-${index}">
       <input id="${fieldsetId}-choice-${index}" type="radio" name="${fieldsetId}" value="${index}"
-        ${state.selected === index ? "checked" : ""} ${state.checked ? "disabled" : ""}>
+        ${state.selected === index ? "checked" : ""} ${state.feedback || state.submitting || state.operationId ? "disabled" : ""}>
       <span>${mathHtml(choice)}</span>
     </label>
   `).join("");
-  const answerText = state.checked && !correct
-    ? `<p class="guide-mini-quiz-answer">Correct answer: <strong>${mathHtml(quiz.choices[quiz.correct_index] || "")}</strong></p>`
-    : "";
+  const dueText = state.feedback?.next_due_at || reviewMeta?.next_due_at;
+  const dueLabel = dueText && Number.isFinite(Date.parse(dueText))
+    ? new Date(dueText).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+    : null;
+  const dueNow = dueText && Number.isFinite(Date.parse(dueText)) && Date.parse(dueText) <= Date.now();
 
   return `
     <section class="guide-mini-quiz" aria-labelledby="${fieldsetId}-title" data-guide-mini-quiz>
       <p class="guide-mini-quiz-kicker">Quick check</p>
       <h4 id="${fieldsetId}-title">Try this before moving on</h4>
       <p class="guide-mini-quiz-question">${mathHtml(quiz.question || "")}</p>
-      <fieldset class="guide-mini-quiz-options" ${state.checked ? "disabled" : ""}>
+      <fieldset class="guide-mini-quiz-options" ${state.feedback || state.submitting || state.operationId ? "disabled" : ""}>
         <legend class="visually-hidden">Choose one answer</legend>
         ${choices}
       </fieldset>
-      <div class="guide-mini-quiz-feedback${correct ? " is-correct" : state.checked ? " is-incorrect" : ""}"
-        data-guide-mini-quiz-feedback role="status" aria-live="polite" ${state.checked ? "" : "hidden"}>
-        ${state.checked ? `
+      <div class="guide-mini-quiz-feedback${state.feedback ? (correct ? " is-correct" : " is-incorrect") : ""}"
+        data-guide-mini-quiz-feedback role="status" aria-live="polite" ${state.feedback || state.error ? "" : "hidden"}>
+        ${state.feedback ? `
           <strong>${correct ? "That’s right." : "Not quite yet."}</strong>
-          <p>${mathHtml(quiz.explanation || "")}</p>
-          ${answerText}
+          <p>${mathHtml(state.feedback.explanation || "")}</p>
+          ${!correct && state.feedback.correct_choice ? `<p class="guide-mini-quiz-answer">A better answer: <strong>${mathHtml(state.feedback.correct_choice)}</strong></p>` : ""}
+          ${Number.isInteger(state.feedback.attempt_count) ? `<p class="guide-mini-quiz-due">Guide checks: ${state.feedback.attempt_count}. </p>` : Number.isInteger(reviewMeta?.attempt_count) && reviewMeta.attempt_count > 0 ? `<p class="guide-mini-quiz-due">Guide checks: ${reviewMeta.attempt_count}. </p>` : ""}
+          ${dueLabel ? `<p class="guide-mini-quiz-due">Next review ${escapeHtml(dueLabel)} · separate from mastery.</p>` : `<p class="guide-mini-quiz-due">This check updates review timing only, not mastery.</p>`}
         ` : ""}
+        ${state.error ? `<p>${escapeHtml(state.error)}</p>` : ""}
       </div>
+      ${dueNow && onOpenChat ? `<div class="guide-mini-quiz-due-action"><p>This section is due to revisit. The fresh practice question is unscored and will not reset this schedule.</p><button class="btn btn-secondary btn-small" type="button" data-guide-chat-review>Try a fresh practice question</button></div>` : ""}
       <button class="btn btn-secondary btn-small" type="button" data-guide-mini-quiz-check
-        ${state.selected === null ? "disabled" : ""}>
-        ${state.checked ? "Try again" : "Check answer"}
+        ${state.selected === null || state.feedback || state.submitting ? "disabled" : ""}>
+        ${state.submitting ? "Checking…" : state.operationId ? "Retry check" : "Check answer"}
       </button>
+      ${state.feedback && !correct && onOpenChat ? `<button class="btn btn-ghost btn-small" type="button" data-guide-chat-new-practice>Ask for a different practice question</button>` : ""}
     </section>
   `;
 }
@@ -247,7 +289,11 @@ function guideMiniQuizHtml(quiz, material, section, sectionIndex, anchorPrefix, 
 function renderGuide(root, material, onRetry = null, {
   currentPage = 0,
   quizStates = new Map(),
-  onNavigate = null
+  reviewProgress = new Map(),
+  onNavigate = null,
+  onOpenChat = null,
+  onQuizStateChange = null,
+  onClearProgress = null
 } = {}) {
   const sections = parseGuideSections(material);
   const anchorPrefix = `guide-${String(material.id || "local").replace(/[^a-zA-Z0-9_-]/gu, "-")}`;
@@ -258,7 +304,7 @@ function renderGuide(root, material, onRetry = null, {
   const blocks = section ? normalizeGuideBlocks(section, page) : [];
   const sources = section ? guideSectionSources(section, blocks) : [];
   const quizKey = section ? `${material.id || "local"}:${section.id || page}` : null;
-  if (quizKey && !quizStates.has(quizKey)) quizStates.set(quizKey, { selected: null, checked: false });
+  if (quizKey && !quizStates.has(quizKey)) quizStates.set(quizKey, { selected: null, feedback: null, operationId: null, error: "", submitting: false });
 
   root.innerHTML = `
     ${sourceWarningsHtml(material)}
@@ -283,7 +329,7 @@ function renderGuide(root, material, onRetry = null, {
         ${onRetry ? `<button class="btn btn-secondary btn-small" type="button" data-retry-guide>Retry generation</button>` : ""}
       </div>
     ` : ""}
-    <div class="study-mode-actions">
+      <div class="study-mode-actions">
       ${material.isRemote && material.status === "ready" ? `
         <button class="btn btn-primary" type="button" data-download-guide="pdf">Download PDF</button>
         <button class="btn btn-secondary" type="button" data-download-guide="latex">Download LaTeX</button>
@@ -294,12 +340,13 @@ function renderGuide(root, material, onRetry = null, {
           ${icon("cards", { size: 16 })} Study flashcards
         </button>
       ` : ""}
-      ${questionsAvailable ? `
+        ${questionsAvailable ? `
         <button class="btn btn-secondary" type="button" data-practice>
           ${icon("quiz", { size: 16 })} Practice questions
         </button>
-      ` : ""}
-    </div>
+        ` : ""}
+        ${material.isRemote && material.status === "ready" ? `<button class="btn btn-ghost btn-small" type="button" data-guide-progress-clear>Clear guide review schedule</button><span class="field-hint" data-guide-progress-status role="status" aria-live="polite"></span>` : ""}
+      </div>
 
     ${sections.length > 1 ? `
       <nav class="guide-toc" aria-label="Study guide sections" data-guide-toc>
@@ -324,6 +371,7 @@ function renderGuide(root, material, onRetry = null, {
             <section id="${anchorPrefix}-section-${page + 1}" class="guide-section" data-guide-section="${escapeHtml(section.id || `section-${page + 1}`)}" tabindex="-1">
               <p class="guide-section-overline">Section ${page + 1} of ${sections.length}</p>
               <h3 class="guide-section-heading">${mathHtml(section.heading || `Section ${page + 1}`)}</h3>
+              ${onOpenChat ? `<div class="guide-section-help"><button class="btn btn-secondary btn-small" type="button" data-guide-chat-open aria-expanded="false">Ask about this section</button><span class="field-hint">Select a passage first to focus the question there; otherwise Jot uses this section.</span></div>` : ""}
               <div class="guide-section-blocks">
                 ${blocks.map((block) => `<div class="guide-section-block" data-guide-block="${escapeHtml(block.id)}">${renderStudyGuideBlock(block)}</div>`).join("")}
               </div>
@@ -343,7 +391,7 @@ function renderGuide(root, material, onRetry = null, {
                   </div>
                 </div>
               ` : ""}
-              ${guideMiniQuizHtml(section.mini_quiz, material, section, page, anchorPrefix, quizStates)}
+              ${guideMiniQuizHtml(section.mini_quiz, material, section, page, anchorPrefix, quizStates, reviewProgress.get(page), onOpenChat)}
             </section>
         </div>
       ` : `
@@ -369,8 +417,26 @@ function renderGuide(root, material, onRetry = null, {
     });
   });
 
+  root.querySelector("[data-guide-chat-open]")?.addEventListener("click", (event) => {
+    const selection = globalThis.getSelection?.();
+    let blockIndex = null;
+    if (selection && !selection.isCollapsed && selection.rangeCount) {
+      const node = selection.getRangeAt(0).commonAncestorContainer;
+      const element = node.nodeType === 1 ? node : node.parentElement;
+      const selectedBlock = element?.closest?.("[data-guide-block]");
+      if (selectedBlock) {
+        const id = selectedBlock.dataset.guideBlock;
+        const foundIndex = blocks.findIndex((block) => String(block.id) === String(id));
+        if (foundIndex >= 0) blockIndex = foundIndex;
+      }
+    }
+    event.currentTarget.textContent = blockIndex === null ? "Ask about this section" : "Explain selected passage";
+    onOpenChat?.({ sectionIndex: page, sectionHeading: section?.heading || `Section ${page + 1}`, blockIndex, sourceTrigger: event.currentTarget });
+  });
+
   const quiz = section?.mini_quiz;
-  const quizState = quizKey ? quizStates.get(quizKey) : null;
+  const quizState = quizKey ? (quizStates.get(quizKey) || { selected: null, feedback: null, operationId: null, error: "", submitting: false }) : null;
+  if (quizKey && !quizStates.has(quizKey)) quizStates.set(quizKey, quizState);
   const quizFeedback = root.querySelector("[data-guide-mini-quiz-feedback]");
   const quizFieldset = root.querySelector(".guide-mini-quiz-options");
   const quizButton = root.querySelector("[data-guide-mini-quiz-check]");
@@ -378,7 +444,7 @@ function renderGuide(root, material, onRetry = null, {
     input.addEventListener("change", () => {
       if (!quizState) return;
       quizState.selected = Number(input.value);
-      quizState.checked = false;
+      if (quizState.feedback || quizState.operationId) return;
       if (quizFeedback) {
         quizFeedback.hidden = true;
         quizFeedback.innerHTML = "";
@@ -391,40 +457,120 @@ function renderGuide(root, material, onRetry = null, {
       }
     });
   });
-  quizButton?.addEventListener("click", () => {
-    if (!quizState || !quiz) return;
-    if (quizState.checked) {
-      quizState.selected = null;
-      quizState.checked = false;
-      root.querySelectorAll("[data-guide-mini-quiz] input[type='radio']").forEach((input) => {
-        input.checked = false;
-      });
-      if (quizFeedback) {
-        quizFeedback.hidden = true;
-        quizFeedback.innerHTML = "";
-        quizFeedback.className = "guide-mini-quiz-feedback";
-      }
-      if (quizFieldset) quizFieldset.disabled = false;
-      quizButton.disabled = true;
-      quizButton.textContent = "Check answer";
+  quizButton?.addEventListener("click", async () => {
+    if (!quizState || !quiz || !Number.isInteger(quizState.selected) || quizState.feedback || quizState.submitting) return;
+    if (!material.isRemote && Number.isInteger(quiz.correct_index)) {
+      const correct = quizState.selected === quiz.correct_index;
+      quizState.feedback = {
+        correct,
+        correct_choice: correct ? "" : String(quiz.choices[quiz.correct_index] || ""),
+        explanation: String(quiz.explanation || ""),
+        next_due_at: null,
+        attempt_count: null
+      };
+      onQuizStateChange?.();
       return;
     }
-    if (!Number.isInteger(quizState.selected)) return;
-    quizState.checked = true;
-    const isCorrect = quizState.selected === quiz.correct_index;
+    if (!material.isRemote || !material.id) return;
+    if (!quizState.operationId) {
+      try { quizState.operationId = newStudyOperationId(); }
+      catch (error) {
+        quizState.error = error.message;
+        if (quizFeedback) { quizFeedback.hidden = false; quizFeedback.textContent = error.message; }
+        return;
+      }
+    }
+    quizState.submitting = true;
+    quizState.error = "";
+    quizButton.disabled = true;
+    quizButton.textContent = "Checking…";
     if (quizFieldset) quizFieldset.disabled = true;
     if (quizFeedback) {
       quizFeedback.hidden = false;
-      quizFeedback.className = `guide-mini-quiz-feedback ${isCorrect ? "is-correct" : "is-incorrect"}`;
-      quizFeedback.innerHTML = `
-        <strong>${isCorrect ? "That’s right." : "Not quite yet."}</strong>
-        <p>${mathHtml(quiz.explanation || "")}</p>
-        ${isCorrect ? "" : `<p class="guide-mini-quiz-answer">Correct answer: <strong>${mathHtml(quiz.choices[quiz.correct_index] || "")}</strong></p>`}
-      `;
-      void typesetMath(quizFeedback);
+      quizFeedback.textContent = "Checking your answer…";
+      quizFeedback.className = "guide-mini-quiz-feedback";
     }
-    quizButton.disabled = false;
-    quizButton.textContent = "Try again";
+    try {
+      const result = await submitGuideMiniQuizApi(material.id, page, {
+        operation_id: quizState.operationId,
+        choice_index: quizState.selected
+      });
+      if (typeof result.correct !== "boolean" || typeof result.explanation !== "string") {
+        throw new Error("The server could not confirm this answer. Retry to check the same choice safely.");
+      }
+      quizState.feedback = {
+        correct: result.correct === true,
+        correct_choice: typeof result.correct_choice === "string" ? result.correct_choice : "",
+        explanation: typeof result.explanation === "string" ? result.explanation : "",
+        next_due_at: result.next_due_at || null,
+        attempt_count: Number.isInteger(result.attempt_count) ? result.attempt_count : null
+      };
+      quizState.operationId = null;
+      quizState.error = "";
+      reviewProgress.set(page, {
+        section_index: page,
+        attempt_count: quizState.feedback.attempt_count,
+        last_correct: quizState.feedback.correct,
+        last_attempt_at: result.last_attempt_at || null,
+        next_due_at: quizState.feedback.next_due_at
+      });
+      quizState.submitting = false;
+      onQuizStateChange?.();
+    } catch (error) {
+      quizState.error = error.message || "Your answer could not be checked. Retry to send the same answer safely.";
+      if (quizFeedback) {
+        quizFeedback.hidden = false;
+        quizFeedback.textContent = quizState.error;
+        quizFeedback.className = "guide-mini-quiz-feedback is-incorrect";
+      }
+      quizButton.disabled = false;
+      quizButton.textContent = "Retry check";
+    } finally {
+      quizState.submitting = false;
+    }
+  });
+
+  root.querySelector("[data-guide-chat-new-practice]")?.addEventListener("click", (event) => {
+    onOpenChat?.({
+      sectionIndex: page,
+      sectionHeading: section?.heading || `Section ${page + 1}`,
+      blockIndex: null,
+      scope: "section",
+      sourceTrigger: event.currentTarget,
+      intent: "practice",
+      message: "Give me a different application question about this section, without repeating the guide check."
+    });
+  });
+
+  root.querySelectorAll("[data-guide-chat-practice], [data-guide-chat-review]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      onOpenChat?.({
+        sectionIndex: page,
+        sectionHeading: section?.heading || `Section ${page + 1}`,
+        blockIndex: null,
+        scope: "section",
+        sourceTrigger: event.currentTarget,
+        intent: "practice",
+        message: "Give me one fresh, source-grounded practice question about this section. Do not repeat its saved check. Tell me this practice is unscored."
+      });
+    });
+  });
+
+  root.querySelector("[data-guide-progress-clear]")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    if (!globalThis.confirm?.("Clear this guide’s private review schedule? This does not delete the guide.")) return;
+    button.disabled = true;
+    try {
+      await onClearProgress?.();
+      reviewProgress.clear();
+      quizStates.clear();
+      onQuizStateChange?.();
+    } catch (error) {
+      const status = root.querySelector("[data-guide-progress-status]");
+      if (status) status.textContent = error.message || "Could not clear this guide’s review schedule.";
+    } finally {
+      button.disabled = false;
+    }
   });
 
   mountStudyGuideBlocks(root);
@@ -588,6 +734,7 @@ function renderQuestions(root, material, onReturn = null) {
 export function openMaterialViewer(material, { onRetry = null } = {}) {
   const dialog = addDialog(material.type || "Study material", { resizable: material.type === "Study guide" });
   const root = dialog.querySelector("#material-session");
+  const chatHost = dialog.querySelector("[data-guide-chat-host]");
   let currentMaterial = material;
   const guidePositionKey = (materialId) => `jot-guide-position:${String(materialId || "local")}`;
   const readGuidePosition = (materialId) => {
@@ -605,6 +752,9 @@ export function openMaterialViewer(material, { onRetry = null } = {}) {
   let currentGuideMaterialId = String(material.id || "local");
   let currentGuidePage = readGuidePosition(currentGuideMaterialId);
   const miniQuizStates = new Map();
+  const guideReviewProgress = new Map();
+  const guideProgressController = new AbortController();
+  let guideChat = null;
 
   const renderCurrentGuidePage = () => {
     const sectionCount = parseGuideSections(currentMaterial).length;
@@ -618,15 +768,38 @@ export function openMaterialViewer(material, { onRetry = null } = {}) {
       {
         currentPage: currentGuidePage,
         quizStates: miniQuizStates,
+        reviewProgress: guideReviewProgress,
+        onOpenChat: currentMaterial.isRemote && currentMaterial.status === "ready" ? (context) => {
+          guideChat ||= createGuideChat(chatHost, { material: currentMaterial, classId: currentMaterial.classId });
+          guideChat?.setContext({ sectionIndex: context.sectionIndex, sectionHeading: context.sectionHeading, material: currentMaterial });
+          guideChat?.open(context);
+        } : null,
         onNavigate(page) {
           currentGuidePage = page;
           saveGuidePosition(currentGuideMaterialId, page);
           renderCurrentGuidePage();
           root.scrollTop = 0;
           root.querySelector(".guide-section")?.focus?.({ preventScroll: true });
+        },
+        async onClearProgress() {
+          await clearGuideProgressApi(currentMaterial.id);
+        },
+        onQuizStateChange() {
+          const scrollTop = root.scrollTop;
+          renderCurrentGuidePage();
+          root.scrollTop = scrollTop;
+          const feedback = root.querySelector("[data-guide-mini-quiz-feedback]");
+          feedback?.focus?.({ preventScroll: true });
         }
       }
     );
+    const currentSection = parseGuideSections(currentMaterial)[currentGuidePage];
+    guideChat?.setContext({
+      sectionIndex: currentGuidePage,
+      sectionHeading: currentSection?.heading || "Current section",
+      material: currentMaterial,
+      sourceTrigger: root.querySelector("[data-guide-chat-open]")
+    });
   };
 
   const render = (nextMaterial) => {
@@ -636,6 +809,7 @@ export function openMaterialViewer(material, { onRetry = null } = {}) {
       currentGuidePage = readGuidePosition(currentGuideMaterialId);
     }
     currentMaterial = nextMaterial;
+    if (guideChat) guideChat.setContext({ sectionIndex: currentGuidePage, sectionHeading: parseGuideSections(nextMaterial)[currentGuidePage]?.heading || "Current section", material: nextMaterial });
     const scrollTop = root.scrollTop;
     const previewSectionCount = nextMaterial.previewContent?.sections?.length || 0;
     const count = nextMaterial.items?.length
@@ -690,12 +864,33 @@ export function openMaterialViewer(material, { onRetry = null } = {}) {
     )) {
       renderCurrentGuidePage();
     } else {
+      guideChat?.destroy();
+      guideChat = null;
       renderQuestions(root, nextMaterial);
     }
     root.scrollTop = scrollTop;
   };
 
   render(material);
+  if (material.isRemote && material.type === "Study guide" && material.status === "ready" && material.id) {
+    getGuideProgressApi(material.id, { signal: guideProgressController.signal }).then((result) => {
+      if (!dialog.open || guideProgressController.signal.aborted) return;
+      guideReviewProgress.clear();
+      for (const [index, item] of sectionProgressMap(result)) guideReviewProgress.set(index, item);
+      const scrollTop = root.scrollTop;
+      renderCurrentGuidePage();
+      root.scrollTop = scrollTop;
+    }).catch(() => {
+      if (guideProgressController.signal.aborted || !dialog.open) return;
+      const status = root.querySelector("[data-guide-progress-status]");
+      if (status) status.textContent = "Private review timing could not be loaded. You can still read and use this guide.";
+    });
+  }
+  dialog.addEventListener("close", () => {
+    guideProgressController.abort();
+    guideChat?.destroy();
+    guideChat = null;
+  }, { once: true });
   return {
     dialog,
     close: () => dialog.close(),

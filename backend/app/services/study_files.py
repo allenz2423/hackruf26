@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
+import time
 import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,7 +19,6 @@ from uuid import UUID
 from app.api.schemas import (
     StudyGuideBlock,
     StudyGuideContent,
-    StudyGuideMiniQuiz,
     StudyGuideSectionV2,
     UploadDocumentContent,
 )
@@ -44,6 +46,7 @@ from app.services.study_guide_visual_preview import (
 
 _COMPILATION_LOCK = threading.Semaphore(1)
 _MAX_FILE_BYTES = 20 * 1024 * 1024
+_MAX_COMPILER_OUTPUT_BYTES = 1 * 1024 * 1024
 _MAX_GUIDE_DIAGRAMS = 32
 _MAX_GUIDE_DIAGRAM_BYTES = 16 * 1024 * 1024
 _ESCAPES = {
@@ -1868,7 +1871,6 @@ def render_guide_latex(
         r"\tableofcontents",
         r"\newpage",
     ]
-    mini_quizzes: list[tuple[str, StudyGuideMiniQuiz]] = []
     for section_index, section in enumerate(guide.sections):
         document.append(r"\section{" + escape_latex(section.heading) + "}")
         if isinstance(section, StudyGuideSectionV2) and section.blocks:
@@ -1890,7 +1892,6 @@ def render_guide_latex(
             )
         if isinstance(section, StudyGuideSectionV2) and section.mini_quiz is not None:
             quiz = section.mini_quiz
-            mini_quizzes.append((section.heading, quiz))
             document.extend(
                 [
                     r"\paragraph{Check your understanding}",
@@ -1935,18 +1936,6 @@ def render_guide_latex(
             label = f"[{number}]" + (", " + ", ".join(locator) if locator else "")
             citations.append(r"\hyperref[source:" + str(number) + "]{" + escape_latex(label) + "}")
         document.append(r"\par\textbf{Sources:} " + "; ".join(citations))
-    if mini_quizzes:
-        document.append(r"\section*{Mini-quiz answer key}")
-        for section_heading, quiz in mini_quizzes:
-            document.extend(
-                [
-                    r"\paragraph{" + escape_latex(section_heading) + "}",
-                    r"\textbf{Answer:} "
-                    + _inline(quiz.choices[quiz.correct_index], render_math, strict_math),
-                    r"\par\textbf{Why:} "
-                    + _inline(quiz.explanation, render_math, strict_math),
-                ]
-            )
     if source_map:
         document.extend([r"\section*{Source references}", r"\begin{description}"])
         for source_id, (number, name) in source_map.items():
@@ -2008,7 +1997,9 @@ def compile_guide_pdf(
     executable = compiler_path(settings)
     if not executable:
         raise StudyFileFailure("Install Tectonic to create study-guide PDFs.")
-    _COMPILATION_LOCK.acquire()
+    deadline = time.monotonic() + settings.study_pdf_timeout_seconds
+    if not _COMPILATION_LOCK.acquire(timeout=settings.study_pdf_timeout_seconds):
+        raise StudyFileFailure("Study-guide PDF compilation timed out while waiting for capacity.")
     try:
         with tempfile.TemporaryDirectory(prefix="screen-tutor-guide-") as directory:
             source = Path(directory) / "guide.tex"
@@ -2031,16 +2022,62 @@ def compile_guide_pdf(
             command.append(str(source))
             if shutil.which("prlimit"):
                 command = ["prlimit", f"--fsize={_MAX_FILE_BYTES}", "--", *command]
-            result = subprocess.run(
-                command,
-                cwd=directory,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                check=False,
-            )
+
+            try:
+                process = subprocess.Popen(
+                    command,
+                    cwd=directory,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                raise StudyFileFailure("Study-guide PDF compilation failed.") from exc
+
+            stdout = bytearray()
+            stderr = bytearray()
+
+            def drain(pipe, capture: bytearray) -> None:
+                while chunk := pipe.read(64 * 1024):
+                    remaining = _MAX_COMPILER_OUTPUT_BYTES - len(capture)
+                    if remaining > 0:
+                        capture.extend(chunk[:remaining])
+
+            readers = [
+                threading.Thread(target=drain, args=(process.stdout, stdout), daemon=True),
+                threading.Thread(target=drain, args=(process.stderr, stderr), daemon=True),
+            ]
+            for reader in readers:
+                reader.start()
+
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                timed_out = True
+            else:
+                try:
+                    process.wait(timeout=remaining_seconds)
+                    timed_out = False
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+
+            if timed_out:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    process.kill()
+                process.wait()
+            for reader in readers:
+                reader.join(timeout=2)
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+            if timed_out:
+                raise StudyFileFailure("Study-guide PDF compilation exceeded its time limit.")
+
             pdf = Path(directory) / "guide.pdf"
-            if result.returncode != 0 or not pdf.is_file() or pdf.stat().st_size > _MAX_FILE_BYTES:
-                diagnostics = b"\n".join((result.stdout or b"", result.stderr or b"")).decode(
+            if process.returncode != 0 or not pdf.is_file() or pdf.stat().st_size > _MAX_FILE_BYTES:
+                diagnostics = b"\n".join((bytes(stdout), bytes(stderr))).decode(
                     "utf-8", errors="replace"
                 )
                 # Tectonic prints warnings and errors using the same file:line
@@ -2054,6 +2091,8 @@ def compile_guide_pdf(
                     "Study-guide PDF compilation failed.",
                     line_number=int(error_line[1]) if error_line else None,
                 )
+            if time.monotonic() > deadline:
+                raise StudyFileFailure("Study-guide PDF compilation exceeded its time limit.")
             data = pdf.read_bytes()
             if not data.startswith(b"%PDF-"):
                 raise StudyFileFailure("Study-guide PDF compilation failed.")

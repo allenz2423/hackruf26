@@ -34,9 +34,10 @@ export async function saveUploadedFile(id, file) {
   const database = await openDatabase();
   if (!database) {
     fallbackFiles.set(id, file);
-    return;
+    return "session";
   }
   await transact(database, "readwrite", (store) => store.put({ id, file }));
+  return "persistent";
 }
 
 export async function getUploadedFile(id) {

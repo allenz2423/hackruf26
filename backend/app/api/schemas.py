@@ -789,6 +789,122 @@ class StudyTutorResponse(BaseModel):
     reply: str = Field(min_length=1, max_length=6000)
 
 
+class GuideChatMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+    role: Literal["user", "assistant"]
+    text: str = Field(min_length=1, max_length=6000, strict=True)
+
+    @model_validator(mode="after")
+    def bound_user_text(self) -> GuideChatMessage:
+        if self.role == "user" and len(self.text) > 2000:
+            raise ValueError("Guide chat questions must be at most 2000 characters.")
+        return self
+
+
+class GuideChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    section_index: int = Field(ge=0, le=99, strict=True)
+    block_index: int | None = Field(default=None, ge=0, le=23, strict=True)
+    scope: Literal["section", "guide"] = "section"
+    intent: Literal["explain", "example", "connect", "practice"] = "explain"
+    message: str = Field(min_length=1, max_length=2000, strict=True)
+    history: list[GuideChatMessage] = Field(default_factory=list, max_length=6)
+
+    @model_validator(mode="after")
+    def validate_history(self) -> GuideChatRequest:
+        if self.scope == "guide" and self.block_index is not None:
+            raise ValueError("A selected block can only be used with section scope.")
+        if any(
+            message.role != ("user" if index % 2 == 0 else "assistant")
+            for index, message in enumerate(self.history)
+        ):
+            raise ValueError("Guide chat history must alternate, starting with the user.")
+        if self.history and self.history[-1].role != "assistant":
+            raise ValueError("Guide chat history must end with an assistant message.")
+        if sum(len(message.text) for message in self.history) + len(self.message) > 12_000:
+            raise ValueError("Guide chat history is too long.")
+        return self
+
+
+class GuideChatReference(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+    upload_id: UUID
+    label: str = Field(min_length=1, max_length=200)
+    page: int | None = Field(default=None, ge=1)
+    slide: int | None = Field(default=None, ge=1)
+    timestamp_s: float | None = Field(default=None, ge=0)
+
+
+class GuidePracticeQuestion(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+    prompt: str = Field(min_length=1, max_length=1200)
+    references: list[GuideChatReference] = Field(default_factory=list, max_length=8)
+
+
+class GuideChatResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+    reply: str = Field(min_length=1, max_length=6000)
+    references: list[GuideChatReference] = Field(default_factory=list, max_length=8)
+    source_warnings: list[Literal[
+        "source_changed", "source_missing", "source_context_truncated", "source_evidence_unavailable"
+    ]] = Field(default_factory=list, max_length=4)
+    practice_question: GuidePracticeQuestion | None = None
+
+
+class GuideMiniQuizAttemptRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    operation_id: UUID
+    choice_index: int = Field(ge=0, le=3, strict=True)
+
+
+class GuideMiniQuizAttemptResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+    correct: bool
+    correct_choice: str = Field(min_length=1, max_length=1200)
+    explanation: str = Field(min_length=1, max_length=2000)
+    attempt_count: int = Field(ge=1)
+    last_attempt_at: str
+    next_due_at: str
+    mastery_updated: Literal[False] = False
+
+
+class GuideSectionProgress(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    section_index: int = Field(ge=0, le=99)
+    attempt_count: int = Field(ge=1)
+    last_correct: bool
+    last_attempt_at: str
+    next_due_at: str
+
+
+class GuideProgressResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    sections: list[GuideSectionProgress] = Field(max_length=100)
+
+
+class StudyPerformanceScoreResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    material_id: UUID
+    status: Literal["ready"] = "ready"
+    quiz_score: float | None = Field(default=None, ge=0, le=100)
+    exam_score: float | None = Field(default=None, ge=0, le=100)
+    flashcard_score: float | None = Field(default=None, ge=0, le=100)
+    overall_score: float | None = Field(default=None, ge=0, le=100)
+    quiz_weight: float = Field(ge=0, le=1)
+    exam_weight: float = Field(ge=0, le=1)
+    flashcard_weight: float = Field(ge=0, le=1)
+    evidence_level: Literal["low", "moderate", "high"]
+    explanation: str = Field(min_length=1, max_length=500)
+    quiz_attempts: int = Field(ge=0)
+    exam_attempts: int = Field(ge=0)
+    flashcard_decks: int = Field(ge=0)
+    flashcards_rated: int = Field(ge=0)
+    model_identifier: str = Field(min_length=1, max_length=200)
+    prompt_version: str = Field(min_length=1, max_length=100)
+    created_at: datetime
+
+
 class StudyMaterialFlagCreate(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     question_id: str = Field(min_length=1, max_length=100)
@@ -1759,6 +1875,22 @@ class AIUsageLedgerEntry(BaseModel):
     created_at: datetime
 
 
+class AIUsageMaterialCost(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    material_id: UUID
+    kind: StudyMaterialKind | Literal["companion_notes"]
+    title: str
+    status: Literal["generating", "ready", "failed"]
+    created_at: datetime
+    detail_level: Literal["concise", "balanced", "detailed"] | None = None
+    provider_calls: int = Field(ge=0)
+    known_cost_microusd: int = Field(ge=0)
+    unpriced_calls: int = Field(ge=0)
+    unsuccessful_calls: int = Field(ge=0)
+    cost_status: Literal["complete", "partial", "not_recorded"]
+
+
 class AIUsageLedgerResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -1769,6 +1901,7 @@ class AIUsageLedgerResponse(BaseModel):
     balance_known: bool
     balance_microusd: int | None = None
     entries: list[AIUsageLedgerEntry]
+    materials: list[AIUsageMaterialCost] = Field(default_factory=list)
 
 
 class ProfileUpdate(BaseModel):

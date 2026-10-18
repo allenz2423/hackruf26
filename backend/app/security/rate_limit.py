@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
-from collections import deque
+from collections import OrderedDict, deque
 
 
 class InMemoryRateLimiter:
@@ -14,10 +15,16 @@ class InMemoryRateLimiter:
     Use a shared store or an API gateway when running multiple workers/instances.
     """
 
-    def __init__(self, limit: int, window_seconds: int) -> None:
+    def __init__(
+        self, limit: int, window_seconds: int, *, max_identities: int = 8192
+    ) -> None:
         self._limit = limit
         self._window_seconds = window_seconds
-        self._events: dict[str, deque[float]] = {}
+        self._max_identities = max(1, max_identities)
+        # Hash keys so usernames and other caller-supplied identifiers are not
+        # retained in memory. Bound the map because callers can otherwise create
+        # an unbounded number of unique identities.
+        self._events: OrderedDict[bytes, deque[float]] = OrderedDict()
         self._lock = asyncio.Lock()
         self._checks = 0
 
@@ -25,9 +32,17 @@ class InMemoryRateLimiter:
         """Record an allowed request; return retry delay when over the limit."""
         now = time.monotonic()
         oldest_allowed = now - self._window_seconds
+        identity_key = hashlib.sha256(identity.encode("utf-8", errors="replace")).digest()
 
         async with self._lock:
-            events = self._events.setdefault(identity, deque())
+            events = self._events.get(identity_key)
+            if events is None:
+                if len(self._events) >= self._max_identities:
+                    self._events.popitem(last=False)
+                events = deque()
+                self._events[identity_key] = events
+            else:
+                self._events.move_to_end(identity_key)
             while events and events[0] <= oldest_allowed:
                 events.popleft()
 

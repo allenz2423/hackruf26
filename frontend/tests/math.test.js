@@ -163,6 +163,19 @@ test("formula fields normalize their existing delimiters and Unicode math", () =
   assert.match(mathHtml("$\\text{H₂O}$"), /data-tex="\\text\{H\}_\{2\}\\text\{O\}"/);
 });
 
+test("KaTeX mhchem renders chemical equations instead of exposing raw ce commands", async () => {
+  const module = await import("katex");
+  const katex = module.default ?? module;
+  await import("katex/contrib/mhchem");
+  const rendered = katex.renderToString(String.raw`\ce{2H2 + O2 -> 2H2O}`, {
+    throwOnError: true,
+    trust: false,
+    output: "htmlAndMathml"
+  });
+  assert.match(rendered, /class="katex"/);
+  assert.doesNotMatch(rendered, /class="katex-error"/);
+});
+
 test("text around math is escaped, so HTML in the text cannot run", () => {
   const html = mathHtml('<img src=x onerror=alert(1)> and $x$ & <b>bold</b>');
   assert.ok(!html.includes("<img"));

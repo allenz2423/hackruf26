@@ -44,9 +44,22 @@ You need Python 3.12, Node.js 18 or newer, and a [Gemini API key](https://aistud
    ```bash
    cd backend
    python -m venv .venv
-   .venv/Scripts/pip install -r requirements.txt   # macOS/Linux: .venv/bin/pip
+   ```
+
+   macOS/Linux:
+
+   ```bash
+   .venv/bin/python -m pip install -r requirements.txt
    cd ..
-   backend/.venv/Scripts/python -m uvicorn app.main:app --app-dir backend --reload
+   backend/.venv/bin/python -m uvicorn app.main:app --app-dir backend --reload
+   ```
+
+   Windows PowerShell:
+
+   ```powershell
+   .venv\Scripts\python.exe -m pip install -r requirements.txt
+   cd ..
+   backend/.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --reload
    ```
 
 3. **Start the frontend** in a second terminal:
@@ -73,8 +86,22 @@ The SQLite database and uploaded files live under `backend/.local/`. Optional ex
 ### Tests
 
 ```bash
-cd frontend && npm test
-PYTHONPATH=backend backend/.venv/Scripts/python -m unittest discover -s backend/tests   # from the repo root
+npm --prefix frontend test
+```
+
+Backend tests, macOS/Linux:
+
+```bash
+cd backend
+PYTHONPATH=. .venv/bin/python -m unittest discover -s tests
+```
+
+Backend tests, Windows PowerShell:
+
+```powershell
+cd backend
+$env:PYTHONPATH = "."
+.venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
 The backend tests use in-memory SQLite and fake Live and Lean runners, so they don't call Gemini.

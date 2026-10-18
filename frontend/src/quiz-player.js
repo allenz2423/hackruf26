@@ -7,6 +7,7 @@ import {
 } from "./api.js";
 import { sourceCitationHtml, bindSourceCitations, sourceWarningsHtml } from "./source-citations.js";
 import { generatedStudyQualityNote } from "./study-quality-note.js";
+import { mountStudyPerformanceScore } from "./study-performance-score.js";
 import { StudyTutorPanel } from "./study-tutor.js";
 import { LiveSessionController } from "./live-session.js";
 import { normalizePublicQuizOutcome, normalizePublicQuizRun, publicRunReview, quizOutcomeMarkup } from "./quiz-run.js";
@@ -624,6 +625,7 @@ function renderReasoningQuizPlayer(root, material, options, initialRun) {
     : `<strong>Submitted</strong><span>${feedbackAvailable ? "Feedback is available." : "Feedback is not available yet."}</span>${xpAwardedMarkup}`}
           </div>
         </header>
+        ${material.isRemote && feedbackAvailable ? `<section class="panel study-performance-score" data-ai-study-score aria-label="AI study performance score"></section>` : ""}
         <div class="question-review-list">
           ${material.questions.map((question, index) => {
             const item = attemptByQuestion.get(String(question.id));
@@ -659,6 +661,9 @@ function renderReasoningQuizPlayer(root, material, options, initialRun) {
         </div>
         <div class="assessment-actions"><button class="btn btn-secondary" type="button" data-retake>Try again</button>${material.isRemote ? `<a class="btn btn-secondary" href="#/progress">Review suggested next steps</a>` : ""}<button class="btn btn-primary" type="button" data-back-to-study>Back to study materials</button></div>
       </section>`;
+    if (material.isRemote && feedbackAvailable) {
+      mountStudyPerformanceScore(root.querySelector("[data-ai-study-score]"), material.id);
+    }
     void typesetMath(root);
     bindSourceCitations(root, material);
     root.querySelectorAll("[data-back-to-study]").forEach((button) => button.addEventListener("click", () => {
@@ -1036,6 +1041,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
     : `<strong>${material.isRemote ? "Submitted" : "Results"}</strong><span>${material.isRemote ? (feedbackAvailable ? "Feedback is available." : "Feedback is not available yet.") : "Your answers have been scored."}</span>${xpAwardedMarkup}`}
           </div>
         </header>
+        ${material.isRemote && feedbackAvailable ? `<section class="panel study-performance-score" data-ai-study-score aria-label="AI study performance score"></section>` : ""}
         <div class="question-review-list">
           ${material.questions.map((question, index) => {
             const qId = question.id || `q-${index + 1}`;
@@ -1112,6 +1118,9 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
         </div>
       </section>
     `;
+    if (material.isRemote && feedbackAvailable) {
+      mountStudyPerformanceScore(root.querySelector("[data-ai-study-score]"), material.id);
+    }
     void typesetMath(root);
     bindSourceCitations(root, material);
 

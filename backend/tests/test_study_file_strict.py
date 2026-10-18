@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import subprocess
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -153,13 +152,18 @@ class StrictStudyFileTests(unittest.TestCase):
             b"warning: guide.tex:22: Overfull \\hbox detected\n"
             b"error: guide.tex:63: Undefined control sequence"
         )
+        process = type("FakeProcess", (), {
+            "pid": 1,
+            "returncode": 1,
+            "stdout": io.BytesIO(b""),
+            "stderr": io.BytesIO(diagnostics),
+            "wait": lambda self, timeout=None: self.returncode,
+        })()
         with (
             patch("app.services.study_files.compiler_path", return_value="/fake/tectonic"),
             patch(
-                "app.services.study_files.subprocess.run",
-                return_value=subprocess.CompletedProcess(
-                    args=["tectonic"], returncode=1, stdout=b"", stderr=diagnostics
-                ),
+                "app.services.study_files.subprocess.Popen",
+                return_value=process,
             ),
         ):
             with self.assertRaises(StudyFileFailure) as failure:

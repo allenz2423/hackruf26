@@ -454,6 +454,7 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
         <div class="row-main">
           <button class="file-name" type="button" data-preview="${escapeHtml(upload.id)}" title="Preview ${escapeHtml(upload.name)}">${escapeHtml(upload.name)}</button>
           <span class="row-meta">${escapeHtml(upload.kind)}${upload.isSample ? " - Built-in sample content" : ` - ${formatBytes(upload.size || 0)} - added ${formatDate(upload.createdAt)}`}</span>
+          ${upload.localOnly ? `<span class="field-hint" role="note">Saved on this device only${upload.localCopyStatus === "session" ? " for this browser session" : ""}; not uploaded to Jot.</span>` : upload.localCopyStatus === "unavailable" ? `<span class="field-hint" role="note">The server copy is saved, but this browser could not keep a local recovery copy.</span>` : upload.localCopyStatus === "session" ? `<span class="field-hint" role="note">The server copy is saved; its local recovery copy lasts only for this browser session.</span>` : ""}
           ${upload.summary ? `<span class="row-summary">${escapeHtml(upload.summary)}</span>` : ""}
           ${upload.resourceScope === "student_contribution" ? `<span class="permission-badge">Shared contribution</span>` : ""}
           ${upload.publicationState && upload.resourceScope !== "personal" ? `<span class="permission-badge" data-publication="${escapeHtml(upload.publicationState)}">${upload.publicationState === "scheduled" ? `Scheduled for ${escapeHtml(formatDate(upload.releaseAt))}` : escapeHtml(upload.publicationState)}</span>` : ""}
@@ -507,26 +508,50 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
             createdBy: res.created_by || null,
             publicationState: res.publication_state || "published",
             releaseAt: res.release_at || null,
+            localCopyStatus: "saving",
             isRemote: true
           };
           nextUploads.push(uploadEntry);
-          await saveUploadedFile(uploadEntry.id, file).catch(() => {});
+          try {
+            uploadEntry.localCopyStatus = await saveUploadedFile(uploadEntry.id, file);
+          } catch (storageError) {
+            uploadEntry.localCopyStatus = "unavailable";
+            toast(`Uploaded to Jot, but this browser could not save a recovery copy: ${storageError.message || "local storage failed"}.`, { tone: "error" });
+          }
           pollUploadStatus(uploadEntry.id);
         } catch (err) {
-          toast(`Backend upload failed: ${err.message}. Saving locally.`, { tone: "busy" });
           const localEntry = createLocalUpload(file);
-          await saveUploadedFile(localEntry.id, file).catch(() => {});
-          nextUploads.push(localEntry);
+          try {
+            localEntry.localOnly = true;
+            localEntry.localCopyStatus = await saveUploadedFile(localEntry.id, file);
+            nextUploads.push(localEntry);
+            toast(`Jot upload failed (${err.message}). This file is saved on this device only and has not been uploaded.`, { tone: "busy" });
+          } catch (storageError) {
+            toast(`Jot upload failed (${err.message}), and this browser could not save a local copy (${storageError.message || "local storage failed"}). The file was not added.`, { tone: "error" });
+          }
         }
       } else {
         const localEntry = createLocalUpload(file);
-        await saveUploadedFile(localEntry.id, file).catch(() => {});
-        nextUploads.push(localEntry);
+        try {
+          localEntry.localOnly = true;
+          localEntry.localCopyStatus = await saveUploadedFile(localEntry.id, file);
+          nextUploads.push(localEntry);
+        } catch (storageError) {
+          toast(`This file was not added because local browser storage failed: ${storageError.message || "storage unavailable"}.`, { tone: "error" });
+        }
       }
     }
 
     if (nextUploads.length) {
-      toast(`Added ${nextUploads.length} ${nextUploads.length === 1 ? "file" : "files"} to ${klass.name}.`);
+      const localOnlyCount = nextUploads.filter((upload) => upload.localOnly).length;
+      const uploadedCount = nextUploads.length - localOnlyCount;
+      if (localOnlyCount && uploadedCount) {
+        toast(`Uploaded ${uploadedCount} file${uploadedCount === 1 ? "" : "s"} to Jot; ${localOnlyCount} saved on this device only.`, { tone: "busy" });
+      } else if (localOnlyCount) {
+        toast(`${localOnlyCount} file${localOnlyCount === 1 ? "" : "s"} saved on this device only; not uploaded to Jot.`, { tone: "busy" });
+      } else {
+        toast(`Uploaded ${uploadedCount} ${uploadedCount === 1 ? "file" : "files"} to ${klass.name}.`);
+      }
       onUploadsAdded(nextUploads);
       renderFilters();
       renderUploads();

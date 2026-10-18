@@ -37,6 +37,25 @@ const MIN_STUDY_ITEM_COUNT = 4;
 const MAX_STUDY_ITEM_COUNT = 100;
 const generationOperations = new Map();
 
+function continueStudyKey(classId, userId) {
+  return `jot-study-last-open:${encodeURIComponent(String(userId || "guest"))}:${encodeURIComponent(String(classId || "local"))}`;
+}
+
+export function lastOpenedStudyMaterial(materials, { classId, userId } = {}) {
+  const ready = materials.filter((material) => material.status === "ready");
+  try {
+    const id = globalThis.localStorage?.getItem(continueStudyKey(classId, userId));
+    const previous = ready.find((material) => String(material.id) === id);
+    if (previous) return previous;
+  } catch { /* Browser storage may be unavailable; fall back to the latest ready set. */ }
+  return ready[0] || null;
+}
+
+function rememberOpenedStudyMaterial(materialId, { classId, userId } = {}) {
+  try { globalThis.localStorage?.setItem(continueStudyKey(classId, userId), String(materialId)); }
+  catch { /* Resuming is optional when browser storage is disabled. */ }
+}
+
 function secureOperationId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   if (!globalThis.crypto?.getRandomValues) throw new Error("Secure request IDs are unavailable in this browser.");
@@ -857,12 +876,17 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
       renderFolderToolbar();
       renderOrganizationReview();
       const allMaterials = [...klass.materials].reverse();
-      const latestReady = allMaterials.find((material) => material.status === "ready");
+      const latestReady = lastOpenedStudyMaterial(allMaterials, { classId: backendClassId || klass.id, userId: currentUserId });
+      const lastOpenedId = (() => {
+        try { return globalThis.localStorage?.getItem(continueStudyKey(backendClassId || klass.id, currentUserId)); }
+        catch { return null; }
+      })();
+      const isResuming = Boolean(latestReady && String(latestReady.id) === String(lastOpenedId));
       const nextActionsMarkup = `
         <section class="study-next-actions" aria-label="Study next">
           <div class="study-next-action-primary">
-            <span class="eyebrow">Pick up where you left off</span>
-            ${latestReady ? `<h2>${escapeHtml(displayStudyMaterialTitle(latestReady.title || latestReady.type, klass.name))}</h2><p class="muted">${escapeHtml(latestReady.type || "Study material")} · ${escapeHtml(latestReady.scope || "Class material")}</p><button class="btn btn-primary" type="button" data-open-material="${escapeHtml(latestReady.id)}">${latestReady.type === "Flashcards" ? "Continue flashcards" : "Continue studying"}</button>` : `<h2>No study set yet</h2><p class="muted">Make a study set from ready course sources when you are ready.</p><button class="btn btn-primary" type="button" data-open-customizer>Create study materials</button>`}
+            <span class="eyebrow">${isResuming ? "Pick up where you left off" : "Continue studying"}</span>
+            ${latestReady ? `<h2>${escapeHtml(displayStudyMaterialTitle(latestReady.title || latestReady.type, klass.name))}</h2><p class="muted">${escapeHtml(latestReady.type || "Study material")} · ${escapeHtml(latestReady.scope || "Class material")}${isResuming ? " · Last opened" : " · Latest ready set"}</p><button class="btn btn-primary" type="button" data-open-material="${escapeHtml(latestReady.id)}">${latestReady.type === "Flashcards" ? "Continue flashcards" : "Continue studying"}</button>` : `<h2>No study set yet</h2><p class="muted">Make a study set from ready course sources when you are ready.</p><button class="btn btn-primary" type="button" data-open-customizer>Create study materials</button>`}
           </div>
           <div class="study-next-action-secondary">
             <a class="btn btn-secondary" href="#/progress">Review due topics</a>
@@ -1329,6 +1353,7 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
       if (!material) return;
 
       material.classId = klass.id;
+      rememberOpenedStudyMaterial(material.id, { classId: backendClassId || klass.id, userId: currentUserId });
 
       if (material.isRemote && (material.status !== "ready" || (!material.questions?.length && !material.cards?.length && !material.content))) {
         try {

@@ -15,15 +15,12 @@ export async function getAccessToken() {
   return "";
 }
 
-// Who is logged in? Resolves to the account, or null for a guest.
+// A null user is a confirmed guest response. Transport/server failures remain
+// errors so callers do not mistake an outage for logout and erase local data.
 export async function getCurrentUser() {
-  try {
-    const payload = await apiFetch("/api/auth/me");
-    syncAuthOptions(payload);
-    return payload.user || null;
-  } catch {
-    return null;
-  }
+  const payload = await apiFetch("/api/auth/me");
+  syncAuthOptions(payload);
+  return payload.user || null;
 }
 
 export function getAuthOptions() {
@@ -741,6 +738,30 @@ export async function getStudyMaterialDetailApi(materialId) {
   return await apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}`);
 }
 
+export function sendGuideChatMessageApi(materialId, message, { signal } = {}) {
+  return apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/guide-chat`, {
+    method: "POST",
+    body: JSON.stringify(message),
+    signal
+  });
+}
+
+export function getGuideProgressApi(materialId, { signal } = {}) {
+  return apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/guide-progress`, { signal });
+}
+
+export function clearGuideProgressApi(materialId) {
+  return apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/guide-progress`, { method: "DELETE" });
+}
+
+export function submitGuideMiniQuizApi(materialId, sectionIndex, payload, { signal } = {}) {
+  return apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/guide-sections/${encodeURIComponent(sectionIndex)}/mini-quiz`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+    signal
+  });
+}
+
 export async function retryStudyMaterialApi(materialId) {
   return await apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/retry`, {
     method: "POST"
@@ -787,6 +808,20 @@ export async function deleteStudyMaterialApi(materialId) {
   return await apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}`, {
     method: "DELETE"
   });
+}
+
+export async function createStudyPerformanceScoreApi(materialId) {
+  return await apiFetch(
+    `/api/study-materials/${encodeURIComponent(materialId)}/performance-score`,
+    { method: "POST" }
+  );
+}
+
+export async function clearStudyPerformanceScoresApi(materialId) {
+  return await apiFetch(
+    `/api/study-materials/${encodeURIComponent(materialId)}/performance-score`,
+    { method: "DELETE" }
+  );
 }
 
 // Attempts endpoints

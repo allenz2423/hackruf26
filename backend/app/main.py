@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -21,6 +22,7 @@ from app.api.class_library import router as class_library_router
 from app.api.class_memberships import router as class_memberships_router
 from app.api.class_question_bank import router as class_question_bank_router
 from app.api.errors import ApiError
+from app.api.guide_chat import router as guide_chat_router
 from app.api.learning import router as learning_router
 from app.api.live import router as live_router
 from app.api.mastery_ladders import router as mastery_ladders_router
@@ -28,6 +30,7 @@ from app.api.quiz_attempts import router as quiz_attempts_router
 from app.api.routes import router
 from app.api.schemas import ErrorResponse
 from app.api.study_material_organization import router as study_material_organization_router
+from app.api.study_performance import router as study_performance_router
 from app.api.study_tutor import router as study_tutor_router
 from app.api.tutor_memory import router as tutor_memory_router
 from app.api.upload_documents import router as upload_documents_router
@@ -45,6 +48,7 @@ from app.services.concept_graph import (
 from app.services.database import create_database, recover_interrupted_jobs
 from app.services.gemini_client import LIVE_API_VERSION, create_genai_client
 from app.services.gemini_content import GeminiContentService
+from app.services.guide_chat import GuideChatService
 from app.services.lean_proofs import LeanProofService, LeanRuntimeUnavailable
 from app.services.learning_calibration import (
     enqueue_learning_calibration_refresh,
@@ -64,10 +68,21 @@ from app.services.source_index import (
     recover_source_index_jobs,
 )
 from app.services.storage import LocalPrivateStorage
+from app.services.study_performance import StudyPerformanceScoringService
 from app.services.study_tutor import StudyTutorService
 from app.services.tutor_memory import TutorMemoryService
 
 logger = logging.getLogger("screen_tutor.errors")
+_PRIVATE_GUIDE_ROUTE = re.compile(
+    r"^/api/study-materials/[0-9a-fA-F-]{36}/(?:guide-chat|guide-progress|"
+    r"guide-sections/[0-9]{1,2}/mini-quiz)$"
+)
+
+
+def _private_guide_error_headers(request: Request) -> dict[str, str]:
+    if _PRIVATE_GUIDE_ROUTE.fullmatch(request.url.path):
+        return {"Cache-Control": "private, no-store", "Pragma": "no-cache"}
+    return {}
 
 
 async def _run_source_index_backfill(application: FastAPI) -> None:
@@ -189,6 +204,7 @@ def create_app(
             settings.study_tutor_rate_limit,
             settings.study_tutor_rate_window_seconds,
         )
+        application.state.study_performance_rate_limiter = InMemoryRateLimiter(5, 60)
         application.state.quiz_reasoning_rate_limiter = InMemoryRateLimiter(20, 60)
         application.state.ai_provider_test_rate_limiter = InMemoryRateLimiter(5, 300)
 
@@ -242,6 +258,13 @@ def create_app(
         application.state.study_tutor_service = StudyTutorService(
             openai_client,
             "admin-configured",
+        )
+        application.state.guide_chat_service = GuideChatService(
+            openai_client,
+            "admin-configured",
+        )
+        application.state.study_performance_scoring_service = StudyPerformanceScoringService(
+            openai_client
         )
         application.state.tutor_memory_service = TutorMemoryService(
             application.state.database,
@@ -314,6 +337,8 @@ def create_app(
     application.include_router(upload_documents_router)
     application.include_router(tutor_memory_router)
     application.include_router(study_tutor_router)
+    application.include_router(guide_chat_router)
+    application.include_router(study_performance_router)
     application.include_router(quiz_attempts_router)
     application.include_router(learning_router)
     application.include_router(mastery_ladders_router)
@@ -321,7 +346,7 @@ def create_app(
     @application.exception_handler(ApiError)
     async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:
         request_id = getattr(request.state, "request_id", None)
-        headers = {}
+        headers = _private_guide_error_headers(request)
         if exc.retry_after_seconds is not None:
             headers["Retry-After"] = str(exc.retry_after_seconds)
         body = ErrorResponse(code=exc.code, message=exc.message, request_id=request_id)
@@ -351,7 +376,11 @@ def create_app(
             ),
             request_id=request_id,
         )
-        return JSONResponse(status_code=400, content=body.model_dump(mode="json"))
+        return JSONResponse(
+            status_code=400,
+            content=body.model_dump(mode="json"),
+            headers=_private_guide_error_headers(request),
+        )
 
     @application.exception_handler(StarletteHTTPException)
     async def handle_http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
@@ -363,7 +392,11 @@ def create_app(
         else:
             code, message = "request_rejected", "The request could not be completed."
         body = ErrorResponse(code=code, message=message, request_id=request_id)
-        return JSONResponse(status_code=exc.status_code, content=body.model_dump(mode="json"))
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=body.model_dump(mode="json"),
+            headers=_private_guide_error_headers(request),
+        )
 
     @application.exception_handler(Exception)
     async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
@@ -378,7 +411,11 @@ def create_app(
             message="The server could not complete the request.",
             request_id=request_id,
         )
-        return JSONResponse(status_code=500, content=body.model_dump(mode="json"))
+        return JSONResponse(
+            status_code=500,
+            content=body.model_dump(mode="json"),
+            headers=_private_guide_error_headers(request),
+        )
 
     # CORS is explicit and credential-free. Browser auth, if configured, uses
     # the Authorization header and never wildcard origins.
@@ -394,6 +431,7 @@ def create_app(
     application.add_middleware(
         RequestSizeLimitMiddleware,
         capability_max_bytes=cors_settings.request_body_max_bytes,
+        default_max_bytes=cors_settings.default_request_body_max_bytes,
         lean_max_bytes=cors_settings.lean_request_max_bytes,
         library_json_max_bytes=cors_settings.library_json_body_max_bytes,
         upload_max_bytes=cors_settings.max_upload_bytes,

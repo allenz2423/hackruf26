@@ -78,10 +78,12 @@ class Settings(BaseSettings):
     study_tutor_rate_limit: int = 30
     study_tutor_rate_window_seconds: int = 60
     study_pdf_executable: str = "tectonic"
+    study_pdf_timeout_seconds: float = 45.0
     auth_rate_limit: int = 10
     auth_rate_window_seconds: int = 300
     session_ttl_days: int = 30
     request_body_max_bytes: int = 1024
+    default_request_body_max_bytes: int = 262_144
     library_json_body_max_bytes: int = 1_100_000
     frontend_dist: str = "frontend/dist"
 
@@ -140,8 +142,14 @@ class Settings(BaseSettings):
             raise ValueError("Study tutor rate limit and window must both be positive.")
         if not self.study_pdf_executable.strip():
             raise ValueError("STUDY_PDF_EXECUTABLE cannot be empty.")
+        if not 1 <= self.study_pdf_timeout_seconds <= 180:
+            raise ValueError("STUDY_PDF_TIMEOUT_SECONDS must be between 1 and 180.")
         if not 1 <= self.request_body_max_bytes <= 16_384:
             raise ValueError("REQUEST_BODY_MAX_BYTES must be between 1 and 16384.")
+        if not 1_024 <= self.default_request_body_max_bytes <= 16_777_216:
+            raise ValueError(
+                "DEFAULT_REQUEST_BODY_MAX_BYTES must be between 1024 and 16777216."
+            )
         if not 1_024 <= self.lean_request_max_bytes <= 131_072:
             raise ValueError("LEAN_REQUEST_MAX_BYTES must be between 1024 and 131072.")
         if not 1_024 <= self.library_json_body_max_bytes <= 16_777_216:

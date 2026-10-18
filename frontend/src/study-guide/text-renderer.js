@@ -32,6 +32,17 @@ function fenceLanguage(info) {
   return /^[\w.+#-]{1,24}$/.test(rawLanguage) ? rawLanguage.toLowerCase() : "";
 }
 
+function tableCells(line) {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) return null;
+  return trimmed.replace(/^\|/u, "").replace(/\|$/u, "").split("|").map((cell) => cell.trim());
+}
+
+function isTableSeparator(line) {
+  const cells = tableCells(line);
+  return Boolean(cells?.length > 1 && cells.every((cell) => /^:?-{3,}:?$/u.test(cell)));
+}
+
 /** Render study-guide paragraphs and Markdown fenced code as safe HTML. */
 export function renderStudyGuideText(value) {
   const lines = String(value ?? "").split(/\r?\n/u);
@@ -93,6 +104,22 @@ export function renderStudyGuideText(value) {
       } else {
         output.push(renderCodeBlock(code, language));
       }
+    } else if (tableCells(lines[index]) && isTableSeparator(lines[index + 1] || "")) {
+      flushParagraph();
+      closeList();
+      const headers = tableCells(lines[index]);
+      const rows = [];
+      index += 2;
+      while (index < lines.length && tableCells(lines[index]) && lines[index].includes("|")) {
+        const cells = tableCells(lines[index]);
+        if (!cells || !cells.some(Boolean)) break;
+        rows.push(cells);
+        index += 1;
+      }
+      index -= 1;
+      const headerHtml = headers.map((cell) => `<th scope="col">${inlineMarkdown(cell)}</th>`).join("");
+      const bodyHtml = rows.map((row) => `<tr>${headers.map((_header, cellIndex) => `<td>${inlineMarkdown(row[cellIndex] || "")}</td>`).join("")}</tr>`).join("");
+      output.push(`<div class="guide-table-scroll" role="region" aria-label="Study guide table" tabindex="0"><table class="guide-table"><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div>`);
     } else if (/^\s*(?:[-*+] |\d+[.)] )/u.test(lines[index])) {
       flushParagraph();
       const ordered = /^\s*\d+[.)] /u.test(lines[index]);

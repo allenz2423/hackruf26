@@ -117,7 +117,11 @@ async def login(request: Request, response: Response, payload: LoginRequest) -> 
     """Verify a username-or-email login and start a session."""
     settings: Settings = request.app.state.settings
     await enforce_origin_policy(request, settings, required=True)
-    await _limit_attempts(request, f"login:{_client_host(request)}:{payload.identifier.lower()}")
+    client_host = _client_host(request)
+    # The identifier-specific bucket prevents repeated guessing at one account;
+    # the IP bucket prevents bypassing it by cycling through usernames.
+    await _limit_attempts(request, f"login-ip:{client_host}")
+    await _limit_attempts(request, f"login:{client_host}:{payload.identifier.lower()}")
 
     db = database(request)
     user = await accounts.authenticate(db, payload.identifier, payload.password)

@@ -1,4 +1,4 @@
-"""Enforce route-specific request limits without buffering uploaded files in RAM."""
+"""Enforce request-body limits without buffering uploaded files in RAM."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ ASGIApp = Callable[[dict[str, Any], Callable[..., Awaitable[Any]], Callable[...,
 CLASS_ID_UPLOAD_PATH = re.compile(
     r"^/api/classes/[0-9a-fA-F-]{36}/(?:uploads|assessments)$"
 )
+GUIDE_CHAT_PATH = re.compile(r"^/api/study-materials/[0-9a-fA-F-]{36}/guide-chat$")
 
 
 class _RequestTooLarge(Exception):
@@ -28,9 +29,11 @@ class RequestSizeLimitMiddleware:
         lean_max_bytes: int,
         library_json_max_bytes: int,
         upload_max_bytes: int,
+        default_max_bytes: int = 262_144,
     ) -> None:
         self.app = app
         self.capability_max_bytes = capability_max_bytes
+        self.default_max_bytes = default_max_bytes
         self.lean_max_bytes = lean_max_bytes
         self.library_json_max_bytes = library_json_max_bytes
         self.upload_max_bytes = upload_max_bytes
@@ -44,15 +47,26 @@ class RequestSizeLimitMiddleware:
             return self.capability_max_bytes
         if path == "/api/tools/verify-lean":
             return self.lean_max_bytes
-        if path == "/api/study-tutor":
+        if path == "/api/study-tutor" or GUIDE_CHAT_PATH.fullmatch(path):
             return 262_144
         if method == "POST" and CLASS_ID_UPLOAD_PATH.fullmatch(path):
-            return self.upload_max_bytes + 2 * 1024 * 1024
+            content_type = next(
+                (
+                    value.lower()
+                    for key, value in scope.get("headers", [])
+                    if key.lower() == b"content-type"
+                ),
+                b"",
+            )
+            if content_type.startswith(b"multipart/form-data"):
+                return self.upload_max_bytes + 2 * 1024 * 1024
         if method in {"POST", "PATCH", "PUT", "DELETE"} and path.startswith(
             ("/api/classes", "/api/uploads", "/api/study-materials")
         ):
             return self.library_json_max_bytes
-        return None
+        # Previously auth, admin, learning and several other APIs had no cap.
+        # Apply a conservative general JSON ceiling to every remaining route.
+        return self.default_max_bytes
 
     async def __call__(
         self,
@@ -65,16 +79,21 @@ class RequestSizeLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        content_length = next(
-            (value for key, value in scope.get("headers", []) if key.lower() == b"content-length"),
-            None,
-        )
-        if content_length is not None:
+        content_lengths = [
+            value
+            for key, value in scope.get("headers", [])
+            if key.lower() == b"content-length"
+        ]
+        if content_lengths:
             try:
-                if int(content_length) > limit:
+                parsed_lengths = [int(value) for value in content_lengths]
+                if (
+                    any(value < 0 or value > limit for value in parsed_lengths)
+                    or len(set(parsed_lengths)) > 1
+                ):
                     await self._reject(send, scope)
                     return
-            except ValueError:
+            except (TypeError, ValueError):
                 await self._reject(send, scope)
                 return
 

@@ -21,6 +21,7 @@ from app.services.class_access import (
     is_effectively_published,
     is_private_assessment,
 )
+from app.services.ai_usage_ledger import bind_usage_context, reset_usage_context
 from app.services.database import SQLiteDatabase, json_value
 from app.services.gemini_content import ContentGenerationFailure
 from app.services.study_files import compiler_path, create_guide_files
@@ -153,6 +154,7 @@ async def _create_upload_document_job(
 ) -> None:
     db = application.state.database
     generation_stage = "load_source"
+    usage_token = None
     try:
         row = await db.fetchrow(
             "SELECT d.original_text, d.source_updated_at, n.title, c.name AS "
@@ -168,6 +170,11 @@ async def _create_upload_document_job(
         )
         if row is None:
             return
+        usage_token = bind_usage_context(
+            operation_id=f"upload-document:{upload_id}:{level}",
+            operation_kind="companion_notes",
+            operation_label=f"Companion notes · {level}",
+        )
         text = row["original_text"]
         # Process every chunk. Never silently discard a long document's later pages.
         chunks = source_chunks(text)
@@ -287,14 +294,16 @@ async def _create_upload_document_job(
         )
         await db.execute(
             "UPDATE upload_documents SET status = 'failed', failure_code = "
-            "?4, "
-            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE note_id = ?1 "
+            "?4, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE note_id = ?1 "
             "AND detail_level = ?2 AND job_id = ?3 AND status = 'generating'",
             upload_id,
             level,
             job_id,
             failure_code,
         )
+    finally:
+        if usage_token is not None:
+            reset_usage_context(usage_token)
 
 
 async def create_default_document(application: Any, upload_id: UUID) -> None:

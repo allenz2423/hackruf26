@@ -285,6 +285,83 @@ test("study guides paginate one section at a time with a model-authored mini qui
   }
 });
 
+test("legacy sections get an honest practice fallback and due sections offer fresh unscored practice", async (t) => {
+  class FakeElement {
+    constructor() { this.textContent = ""; this.innerHTML = ""; this.scrollTop = 0; }
+    addEventListener() {}
+    querySelectorAll() { return []; }
+    querySelector() { return null; }
+  }
+  class FakeDialog extends FakeElement {
+    constructor() {
+      super();
+      this.open = false;
+      this.root = new FakeElement();
+      this.title = new FakeElement();
+      this.meta = new FakeElement();
+      this.closeButton = new FakeElement();
+    }
+    setAttribute() {}
+    showModal() { this.open = true; }
+    remove() {}
+    querySelector(selector) {
+      return {
+        "#material-session": this.root,
+        "#material-dialog-title": this.title,
+        "#material-dialog-meta": this.meta,
+        "[data-close]": this.closeButton
+      }[selector] || null;
+    }
+  }
+
+  const priorDocument = globalThis.document;
+  const priorFetch = globalThis.fetch;
+  globalThis.document = { createElement: () => new FakeDialog(), body: { append() {} } };
+  globalThis.fetch = async () => new Response(JSON.stringify({ sections: [{
+    section_index: 0,
+    attempt_count: 1,
+    last_correct: true,
+    last_attempt_at: "2026-10-17T12:00:00Z",
+    next_due_at: "2000-01-01T00:00:00Z"
+  }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+  t.after(() => {
+    if (priorDocument === undefined) delete globalThis.document;
+    else globalThis.document = priorDocument;
+    globalThis.fetch = priorFetch;
+  });
+
+  const legacy = openMaterialViewer({
+    id: "guide-legacy",
+    title: "Legacy guide",
+    type: "Study guide",
+    status: "ready",
+    isRemote: true,
+    sections: [{ heading: "Older section", body: "Readable legacy content." }]
+  });
+  assert.match(legacy.dialog.root.innerHTML, /No independent check yet/);
+  assert.match(legacy.dialog.root.innerHTML, /Ask Jot for a practice question/);
+
+  const due = openMaterialViewer({
+    id: "guide-due",
+    title: "Due guide",
+    type: "Study guide",
+    status: "ready",
+    isRemote: true,
+    sections: [{
+      id: "due-section",
+      heading: "Osmosis",
+      body: "Water moves down its water-potential gradient.",
+      mini_quiz: {
+        question: "Which direction is net movement?",
+        choices: ["Down the gradient", "Up the gradient", "No movement", "Only with ATP"]
+      }
+    }]
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.match(due.dialog.root.innerHTML, /Try a fresh practice question/);
+  assert.match(due.dialog.root.innerHTML, /unscored and will not reset this schedule/);
+});
+
 test("custom SVG animations start at time zero and wait for the learner to play", () => {
   const events = [];
   const svg = {

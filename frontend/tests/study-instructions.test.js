@@ -3,7 +3,7 @@ import test from "node:test";
 import { webcrypto } from "node:crypto";
 
 import { createStudyMaterialApi } from "../src/api.js";
-import { clearStudyMaterialOperationId, getStudyMaterialOperationId, renderStudyTab } from "../src/study.js";
+import { clearStudyMaterialOperationId, getStudyMaterialOperationId, lastOpenedStudyMaterial, renderStudyTab } from "../src/study.js";
 
 function globals(t, values) {
   for (const [key, value] of Object.entries(values)) {
@@ -12,6 +12,19 @@ function globals(t, values) {
     t.after(() => previous ? Object.defineProperty(globalThis, key, previous) : delete globalThis[key]);
   }
 }
+
+test("Continue resumes the last opened ready material within this account and class", (t) => {
+  const store = new Map([["jot-study-last-open:student-1:class-1", "older-guide"]]);
+  globals(t, { localStorage: { getItem: (key) => store.get(key) || null } });
+  const materials = [
+    { id: "latest-quiz", status: "ready" },
+    { id: "older-guide", status: "ready" },
+    { id: "failed-guide", status: "failed" }
+  ];
+  assert.equal(lastOpenedStudyMaterial(materials, { classId: "class-1", userId: "student-1" }).id, "older-guide");
+  assert.equal(lastOpenedStudyMaterial(materials, { classId: "class-2", userId: "student-1" }).id, "latest-quiz");
+  assert.equal(lastOpenedStudyMaterial(materials, { classId: "class-1", userId: "student-2" }).id, "latest-quiz");
+});
 
 test("study-material API sends nonblank guide and assessment preferences", async (t) => {
   const requests = [];

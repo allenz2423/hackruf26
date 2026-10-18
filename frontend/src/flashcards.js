@@ -9,6 +9,7 @@ import {
 } from "./api.js";
 
 import { sourceCitationHtml, bindSourceCitations, sourceWarningsHtml } from "./source-citations.js";
+import { mountStudyPerformanceScore } from "./study-performance-score.js";
 export { formatSourceCitation } from "./source-citations.js";
 
 /**
@@ -67,6 +68,37 @@ export function normalizeCards(material) {
   });
 }
 
+const MAX_REFLECTION_CHARS = 1000;
+
+export function flashcardReflectionHtml(idPrefix, reflection = {}) {
+  const safePrefix = String(idPrefix || "flashcard")
+    .replace(/[^a-zA-Z0-9_-]/gu, "-")
+    .slice(0, 80);
+  const field = (key, label, hint) => {
+    const id = `${safePrefix}-${key}`;
+    const value = String(reflection[key] || "").slice(0, MAX_REFLECTION_CHARS);
+    return `
+      <div class="flashcard-reflection-field">
+        <label for="${id}">${label}</label>
+        <textarea id="${id}" data-reflection-field="${key}" maxlength="${MAX_REFLECTION_CHARS}" rows="3" aria-describedby="${id}-hint ${id}-count">${escapeHtml(value)}</textarea>
+        <div class="flashcard-reflection-field-meta">
+          <span id="${id}-hint" class="field-hint">${hint}</span>
+          <span id="${id}-count" class="flashcard-reflection-count" data-reflection-count>${value.length}/${MAX_REFLECTION_CHARS}</span>
+        </div>
+      </div>`;
+  };
+
+  return `
+    <section class="flashcard-reflection" aria-labelledby="${safePrefix}-title">
+      <div>
+        <h3 id="${safePrefix}-title">Pause and reflect</h3>
+        <p class="muted">A quick note can help you decide what to revisit. Reflections stay in this open study session; they are not sent or saved.</p>
+      </div>
+      ${field("knew", "What did you already know?", "Name the idea you could recall before revealing the answer.")}
+      ${field("unclear", "What was unclear or missing?", "Note a gap, question, or detail to review later.")}
+    </section>`;
+}
+
 function shuffleArray(items) {
   const clone = [...items];
   for (let i = clone.length - 1; i > 0; i--) {
@@ -91,15 +123,22 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
   let privateStateStatus = "loading";
   const reviewState = new Map();
   const sessionRatings = new Map();
+  const reflections = new Map();
   const pendingOperations = new Map();
   let hydrationVersion = 0;
   let clearedHistoryMessage = "";
+  let scoreCleanup = null;
   const canPersist = Boolean(material?.isRemote && material?.id);
 
   function teardown() {
     hydrationVersion += 1;
     document.removeEventListener("keydown", handleKeyNavigation);
+    reflections.clear();
+    reflectionObserver?.disconnect();
+    scoreCleanup?.();
   }
+
+  let reflectionObserver = null;
 
   function handleKeyNavigation(event) {
     if (!root.isConnected || !root.querySelector(".flashcard-player")) {
@@ -130,6 +169,13 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
   }
 
   document.addEventListener("keydown", handleKeyNavigation);
+  if (typeof globalThis.MutationObserver === "function") {
+    reflectionObserver = new MutationObserver(() => {
+      if (!root.isConnected || !root.querySelector(".flashcard-player")) teardown();
+    });
+    reflectionObserver.observe(root, { childList: true, subtree: true });
+  }
+  root.closest?.("dialog")?.addEventListener("close", teardown, { once: true });
 
   function dueCards() {
     const now = Date.now();
@@ -320,6 +366,13 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
     const counts = { recalled: 0, unsure: 0, missed: 0 };
     for (const rating of sessionRatings.values()) counts[rating] += 1;
     const marked = deck.filter((card) => ["unsure", "missed"].includes(sessionRatings.get(card.id)));
+    const reflected = deck.flatMap((card) => {
+      const note = reflections.get(card.id);
+      if (!note || (!note.knew?.trim() && !note.unclear?.trim())) return [];
+      return [{ card, note }];
+    });
+    scoreCleanup?.();
+    scoreCleanup = null;
     const nextDue = [...reviewState.values()]
       .map((item) => item.next_due_at)
       .filter(Boolean)
@@ -338,7 +391,9 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
             <div class="metric"><strong>${counts.unsure}</strong><span>Unsure</span></div>
             <div class="metric"><strong>${counts.missed}</strong><span>Missed</span></div>
           </div>
+          ${canPersist && sessionRatings.size ? `<section class="panel study-performance-score" data-ai-study-score aria-label="AI study performance score"></section><p class="field-hint">Only your saved recalled, unsure, and missed ratings are included. Reflection notes stay in this browser session and are not sent.</p>` : ""}
           ${marked.length ? `<div class="flashcard-review-pile-list"><h4>Worth another look</h4><ul class="preview-list">${marked.map((card) => `<li><strong>${mathHtml(card.front)}</strong> <span class="muted">· ${sessionRatings.get(card.id)}</span></li>`).join("")}</ul></div>` : ""}
+          ${reflected.length ? `<section class="flashcard-reflection-summary" aria-labelledby="flashcard-reflection-summary-title"><h4 id="flashcard-reflection-summary-title">Your reflections from this session</h4><ul>${reflected.map(({ card, note }) => `<li><strong>${mathHtml(card.front)}</strong>${note.knew?.trim() ? `<p><span>Already knew:</span> ${escapeHtml(note.knew.trim())}</p>` : ""}${note.unclear?.trim() ? `<p><span>Still unclear:</span> ${escapeHtml(note.unclear.trim())}</p>` : ""}</li>`).join("")}</ul></section>` : ""}
           ${canPersist && nextDue ? `<p class="field-hint">Next scheduled card review: ${escapeHtml(formatDate(nextDue))}. The starter intervals are simple planning defaults, not a personalized or scientifically optimal schedule.</p>` : ""}
           ${!canPersist ? `<p class="field-hint">This is a local set, so its ratings are only kept during this session.</p>` : `<p class="field-hint">Your account stores your rating and next review date for this set; it does not store your attempted answers or update concept mastery.</p>`}
           ${clearedHistoryMessage ? `<p class="field-hint" role="status">${escapeHtml(clearedHistoryMessage)}</p>` : ""}
@@ -351,6 +406,9 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
           </div>
         </div>
       </section>`;
+    if (canPersist && sessionRatings.size) {
+      scoreCleanup = mountStudyPerformanceScore(root.querySelector("[data-ai-study-score]"), material.id);
+    }
     void typesetMath(root);
     bindSourceCitations(root, material);
     root.querySelectorAll("[data-back]").forEach((button) => button.addEventListener("click", () => {
@@ -384,6 +442,8 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
   }
 
   function render() {
+    scoreCleanup?.();
+    scoreCleanup = null;
     if (!activeCards.length) {
       renderEmptyState();
       return;
@@ -397,6 +457,7 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
     const total = activeCards.length;
     const state = reviewState.get(card.id);
     const rating = sessionRatings.get(card.id);
+    const reflection = reflections.get(card.id) || { knew: "", unclear: "" };
     const pendingAction = pendingOperations.get(card.id)?.action;
     const dueCount = dueCards().length;
     const dueNow = Number.isFinite(Date.parse(state?.next_due_at || ""))
@@ -437,6 +498,7 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
           </button>
           ${card.sources?.length ? `<div class="flashcard-card-sources">${card.sources.map(sourceCitationHtml).join("")}</div>` : ""}
         </div>
+        ${isFlipped ? flashcardReflectionHtml(`flashcard-reflection-${currentIndex + 1}`, reflection) : ""}
         <p id="flashcard-retrieval-hint" class="field-hint" role="note">Take a moment to answer from memory before revealing. After reveal, choose how well you recalled it.</p>
         ${flashcardError ? `<p class="quiz-error" role="alert">${escapeHtml(flashcardError)}</p>` : ""}
         ${isSaving ? `<p class="field-hint" role="status" aria-live="polite">Saving your rating…</p>` : ""}
@@ -474,6 +536,15 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
     root.querySelector("[data-start-due]")?.addEventListener("click", startDueReview);
     root.querySelectorAll("[data-rating]").forEach((button) => button.addEventListener("click", () => void rateCard(button.dataset.rating)));
     root.querySelectorAll("[data-schedule]").forEach((button) => button.addEventListener("click", () => void adjustSchedule(button.dataset.schedule)));
+    root.querySelectorAll("[data-reflection-field]").forEach((textarea) => textarea.addEventListener("input", () => {
+      const current = reflections.get(card.id) || { knew: "", unclear: "" };
+      const key = textarea.dataset.reflectionField;
+      if (key !== "knew" && key !== "unclear") return;
+      current[key] = textarea.value.slice(0, MAX_REFLECTION_CHARS);
+      reflections.set(card.id, current);
+      const counter = textarea.closest(".flashcard-reflection-field")?.querySelector("[data-reflection-count]");
+      if (counter) counter.textContent = `${current[key].length}/${MAX_REFLECTION_CHARS}`;
+    }));
   }
 
   function hydratePrivateState() {
@@ -501,4 +572,5 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
   render();
   focusStudyPlayer(root);
   hydratePrivateState();
+  return teardown;
 }

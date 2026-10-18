@@ -250,46 +250,23 @@ export async function createClass(name) {
   const classes = readClasses();
   const existing = classes.find((c) => c.name.trim().toLowerCase() === trimmed.toLowerCase());
   if (existing) return existing;
-  let created = null;
   const color = CLASS_PALETTE[Math.floor(Math.random() * CLASS_PALETTE.length)];
-
-  try {
-    const remote = await createClassApi(trimmed, { color: colorId(color) });
-    created = {
-      id: remote.id,
-      backendId: remote.id,
-      name: remote.name,
-      color: colorHex(remote.color) || color,
-      glyph: remote.icon || "",
-      icon: remote.name.charAt(0).toUpperCase() || "C",
-      nextExam: "",
-      focus: "",
-      uploads: [],
-      materials: [],
-      isOwner: remote.is_owner !== false,
-      capabilities: remote.capabilities || ["read", "create", "edit", "delete", "invite", "manage_members", "manage_permissions"],
-      updatedAt: remote.updated_at || new Date().toISOString()
-    };
-  } catch (e) {
-    console.warn("Failed to create class via API, falling back to local:", e);
-  }
-
-  if (!created) {
-    created = {
-      id: makeId(trimmed),
-      name: trimmed,
-      color,
-      glyph: "",
-      icon: trimmed.charAt(0).toUpperCase() || "C",
-      nextExam: "",
-      focus: "",
-      uploads: [],
-      materials: [],
-      isOwner: true,
-      capabilities: ["read", "create", "edit", "delete", "invite", "manage_members", "manage_permissions"],
-      updatedAt: new Date().toISOString()
-    };
-  }
+  const remote = await createClassApi(trimmed, { color: colorId(color) });
+  const created = {
+    id: remote.id,
+    backendId: remote.id,
+    name: remote.name,
+    color: colorHex(remote.color) || color,
+    glyph: remote.icon || "",
+    icon: remote.name.charAt(0).toUpperCase() || "C",
+    nextExam: "",
+    focus: "",
+    uploads: [],
+    materials: [],
+    isOwner: remote.is_owner !== false,
+    capabilities: remote.capabilities || ["read", "create", "edit", "delete", "invite", "manage_members", "manage_permissions"],
+    updatedAt: remote.updated_at || new Date().toISOString()
+  };
 
   classes.push(created);
   saveClasses(classes);

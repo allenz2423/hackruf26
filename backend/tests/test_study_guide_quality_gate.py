@@ -15,6 +15,7 @@ from starlette.responses import Response
 from app.api.class_library import (
     STUDY_GUIDE_QUALITY_VERSION,
     _create_material_job,
+    _public_material_content,
     download_study_file,
     get_study_material,
 )
@@ -503,7 +504,7 @@ class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
         ):
             detail = await get_study_material(self.material_id, self.request(), Response())
             self.assertEqual(detail.status, "ready")
-            self.assertEqual(detail.content, legacy)
+            self.assertEqual(detail.content, _public_material_content("study_guide", legacy))
             self.assertEqual(detail.download_urls, {})
             with self.assertRaises(ApiError) as file_error:
                 await download_study_file(self.material_id, "pdf", self.request())
