@@ -167,6 +167,17 @@ class ChemistryGuideActivityTests(unittest.TestCase):
             {
                 "heading": "Chemistry",
                 "sources": [{"upload_id": upload_id}],
+                "mini_quiz": {
+                    "question": "Which idea is presented?",
+                    "choices": [
+                        "A supported idea",
+                        "A reversal",
+                        "An unrelated idea",
+                        "An unsupported claim",
+                    ],
+                    "correct_index": 0,
+                    "explanation": "The first choice is supported by this section.",
+                },
                 "blocks": [{"type": "paragraph", "text": "The source describes molecules."}],
             }
         )
@@ -174,7 +185,7 @@ class ChemistryGuideActivityTests(unittest.TestCase):
             return _StudyGuideSectionBatch(
                 format="study_guide",
                 schema_version=2,
-                sections=[source_section],
+                sections=[source_section.model_dump(mode="json")],
                 requested_tool_ids=requested,
             )
         service = GeminiContentService(

@@ -50,17 +50,6 @@ async def generate_class_assessment(
         raise ApiError(
             503, "question_generation_unavailable", "Question generation is unavailable."
         )
-    limiter = getattr(request.app.state, "generation_rate_limiter", None)
-    if limiter is not None:
-        retry_after = await limiter.check(f"user:{user_id}")
-        if retry_after is not None:
-            raise ApiError(
-                429,
-                "generation_rate_limited",
-                "Too many generation requests. Try again shortly.",
-                retry_after,
-            )
-
     digest = _payload_digest(payload)
     async with db.acquire() as connection:
         async with connection.transaction():

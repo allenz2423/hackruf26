@@ -27,6 +27,7 @@ from app.api.mastery_ladders import router as mastery_ladders_router
 from app.api.quiz_attempts import router as quiz_attempts_router
 from app.api.routes import router
 from app.api.schemas import ErrorResponse
+from app.api.study_material_organization import router as study_material_organization_router
 from app.api.study_tutor import router as study_tutor_router
 from app.api.tutor_memory import router as tutor_memory_router
 from app.api.upload_documents import router as upload_documents_router
@@ -183,10 +184,6 @@ def create_app(
         )
         application.state.source_search_rate_limiter = InMemoryRateLimiter(90, 60)
         application.state.concept_graph_rate_limiter = InMemoryRateLimiter(5, 300)
-        application.state.generation_rate_limiter = InMemoryRateLimiter(
-            settings.generation_rate_limit,
-            settings.generation_rate_window_seconds,
-        )
         application.state.invitation_rate_limiter = InMemoryRateLimiter(12, 60)
         application.state.study_tutor_rate_limiter = InMemoryRateLimiter(
             settings.study_tutor_rate_limit,
@@ -310,6 +307,7 @@ def create_app(
     application.include_router(admin_router)
     application.include_router(live_router)
     application.include_router(class_library_router)
+    application.include_router(study_material_organization_router)
     application.include_router(class_memberships_router)
     application.include_router(class_question_bank_router)
     application.include_router(class_concept_graph_router)

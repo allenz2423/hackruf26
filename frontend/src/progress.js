@@ -4,11 +4,14 @@ import {
   getLearningProgressApi,
   getLearningProgressHistoryApi,
   getLearningRecommendationsApi,
+  startLearningReviewApi,
+  submitLearningReviewAnswerApi,
   updateLearningPreferencesApi,
   updateLearningRecommendationStateApi
 } from "./api.js";
 import { bindSourceCitations, sourceCitationHtml } from "./source-citations.js";
 import { escapeHtml } from "./ui.js";
+import { mathHtml, typesetMath } from "./math.js";
 
 const STATES = new Set(["unassessed", "provisional", "confirmed"]);
 const CORRECTNESS_STATES = new Set(["correct", "incorrect", "unanswered", "pending", "unavailable"]);
@@ -16,10 +19,10 @@ const RECOMMENDATION_TYPES = new Set(["practice", "review", "diagnostic"]);
 const RECOMMENDATION_STATES = new Set(["suggested", "pending", "active", "completed", "dismissed"]);
 const LEARNING_GOALS = new Set(["balanced", "build_foundation", "exam_prep", "review"]);
 const LEARNING_GOAL_LABELS = {
-  balanced: "Balanced practice",
+  balanced: "Understand a new topic",
   build_foundation: "Build foundations",
-  exam_prep: "Prepare for an exam",
-  review: "Review what I know"
+  exam_prep: "Simulate an exam",
+  review: "Remember for next week"
 };
 
 export function normalizeLearningPreferences(dto) {
@@ -695,8 +698,73 @@ export function learningRecommendationsMarkup(recommendations) {
   return `<div class="class-grid">${active.map((item) => `<article class="panel progress-recommendation-card" data-recommendation="${escapeHtml(item.id)}">
     <span class="permission-badge">${escapeHtml(item.type)}</span><h3>${escapeHtml(item.label)}</h3><p>${escapeHtml(item.reason)}</p>
     ${item.resource ? `<p class="row-meta">Suggested resource: ${escapeHtml(item.resource.title)}</p>` : ""}
-    <div class="material-card-actions"><a class="btn btn-primary btn-small" href="${escapeHtml(item.href)}" data-recommendation-start data-recommendation-id="${escapeHtml(item.id)}" aria-label="${item.state === "active" ? "Continue practice" : "Start practice"}: ${escapeHtml(item.label)}">${item.state === "active" ? "Continue practice" : "Start practice"}</a><button class="btn btn-secondary btn-small" type="button" data-recommendation-state="completed" data-recommendation-id="${escapeHtml(item.id)}" aria-label="Mark complete: ${escapeHtml(item.label)}">Mark complete</button><button class="btn btn-ghost btn-small" type="button" data-recommendation-state="dismissed" data-recommendation-id="${escapeHtml(item.id)}" aria-label="Dismiss: ${escapeHtml(item.label)}">Dismiss</button></div>
+    ${item.type === "review" ? `<div class="material-card-actions"><button class="btn btn-primary btn-small" type="button" data-review-start="${escapeHtml(item.id)}">${item.state === "active" ? "Continue short review" : "Start short review"}</button><button class="btn btn-ghost btn-small" type="button" data-recommendation-state="dismissed" data-recommendation-id="${escapeHtml(item.id)}" aria-label="Dismiss: ${escapeHtml(item.label)}">Dismiss</button></div><div data-review-session="${escapeHtml(item.id)}"></div>` : `<div class="material-card-actions"><a class="btn btn-primary btn-small" href="${escapeHtml(item.href)}" data-recommendation-start data-recommendation-id="${escapeHtml(item.id)}" aria-label="${item.state === "active" ? "Continue practice" : "Start practice"}: ${escapeHtml(item.label)}">${item.state === "active" ? "Continue practice" : "Start practice"}</a><button class="btn btn-secondary btn-small" type="button" data-recommendation-state="completed" data-recommendation-id="${escapeHtml(item.id)}" aria-label="Mark complete: ${escapeHtml(item.label)}">Mark complete</button><button class="btn btn-ghost btn-small" type="button" data-recommendation-state="dismissed" data-recommendation-id="${escapeHtml(item.id)}" aria-label="Dismiss: ${escapeHtml(item.label)}">Dismiss</button></div>`}
   </article>`).join("")}</div>`;
+}
+
+function reviewCitation(source) {
+  const locator = source?.locator && typeof source.locator === "object" ? source.locator : {};
+  return {
+    upload_id: source?.material_id || source?.upload_id,
+    name: source?.title || source?.name || "Course source",
+    ...(Number.isInteger(locator.page) ? { page: locator.page } : {}),
+    ...(Number.isInteger(locator.slide) ? { slide: locator.slide } : {}),
+    ...(Number.isFinite(locator.timestamp_start_seconds) ? { timestamp_seconds: locator.timestamp_start_seconds } : {}),
+    ...(Number.isInteger(locator.paragraph) ? { paragraph: locator.paragraph } : {})
+  };
+}
+
+function reviewDateLabel(value) {
+  const time = Date.parse(value || "");
+  return Number.isFinite(time)
+    ? new Date(time).toLocaleDateString(undefined, { month: "long", day: "numeric" })
+    : "a later date";
+}
+
+function renderLearningReview(container, item, session, { onCompleted } = {}) {
+  if (!container || !session) return;
+  const choices = Array.isArray(session.choices) ? session.choices : [];
+  const completed = session.status === "completed";
+  const selected = session.selected_choice_id;
+  const selectedChoice = choices.find((choice) => choice.id === selected);
+  container.innerHTML = `
+    <section class="learning-review-session" aria-labelledby="learning-review-${escapeHtml(session.id)}-prompt">
+      ${completed ? `<p class="permission-badge">${session.correct ? "Correct" : "Review this idea"}</p>` : `<p class="eyebrow">One-question retrieval check</p>`}
+      <h4 id="learning-review-${escapeHtml(session.id)}-prompt">${mathHtml(session.prompt || "")}</h4>
+      ${completed
+        ? `<p class="review-answer">Your response: <strong>${mathHtml(selectedChoice?.text || "Answer saved")}</strong></p><p class="review-answer">Answer: <strong>${mathHtml(session.correct_answer || "")}</strong></p><p>${mathHtml(session.explanation || "")}</p>
+          <div class="source-chips">${(session.citations || []).map((source) => sourceCitationHtml(reviewCitation(source))).join("")}</div>
+          <p class="field-hint">A different source-linked check is scheduled for ${escapeHtml(reviewDateLabel(session.next_due_at))}. This result does not change your mastery estimate.</p>`
+        : `<form data-learning-review-form="${escapeHtml(session.id)}"><fieldset class="answer-options"><legend>Choose an answer from memory before opening the source</legend>${choices.map((choice, index) => `<label><input type="radio" name="learning-review-choice" value="${escapeHtml(choice.id)}" /><span>${mathHtml(choice.text || "")}</span></label>`).join("")}</fieldset><p class="field-hint" data-review-error role="alert" hidden></p><button class="btn btn-primary btn-small" type="submit" disabled>Check answer</button></form><p class="field-hint">Your response is scored separately from concept mastery. Feedback and the cited course source appear after submission.</p>`}
+    </section>`;
+  void typesetMath(container);
+  if (completed) {
+    bindSourceCitations(container, { classId: item.class_id });
+    return;
+  }
+  const form = container.querySelector("[data-learning-review-form]");
+  const submit = form?.querySelector("button[type='submit']");
+  form?.querySelectorAll("input[name='learning-review-choice']").forEach((input) => input.addEventListener("change", () => {
+    submit.disabled = false;
+  }));
+  form?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const choiceId = new FormData(form).get("learning-review-choice");
+    if (typeof choiceId !== "string" || !choiceId) return;
+    submit.disabled = true;
+    submit.textContent = "Checking…";
+    try {
+      const result = await submitLearningReviewAnswerApi(session.id, choiceId);
+      renderLearningReview(container, item, result, { onCompleted });
+      onCompleted?.(result);
+    } catch (error) {
+      const message = form.querySelector("[data-review-error]");
+      message.textContent = error.message || "Your answer could not be checked. Try again.";
+      message.hidden = false;
+      submit.disabled = false;
+      submit.textContent = "Check answer";
+    }
+  });
 }
 
 export async function startLearningRecommendation(item, {
@@ -714,6 +782,31 @@ export async function startLearningRecommendation(item, {
 
 function renderLearningRecommendations(container, recommendations, reload) {
   container.innerHTML = learningRecommendationsMarkup(recommendations);
+  container.querySelectorAll("[data-review-start]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const item = recommendations.items.find((candidate) => candidate.id === button.dataset.reviewStart);
+      const sessionRoot = button.closest("article")?.querySelector("[data-review-session]");
+      if (!item || !sessionRoot || button.disabled) return;
+      button.disabled = true;
+      button.textContent = "Preparing source-linked question…";
+      sessionRoot.innerHTML = `<p class="field-hint" role="status" aria-live="polite">Loading a validated question from your course sources…</p>`;
+      try {
+        const session = await startLearningReviewApi(item.id);
+        button.textContent = session.status === "completed" ? "Review complete" : "Review in progress";
+        if (session.status === "completed") button.textContent = "Review complete";
+        renderLearningReview(sessionRoot, item, session, {
+          onCompleted() {
+            button.textContent = "Review complete";
+            button.disabled = true;
+          }
+        });
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = item.state === "active" ? "Continue short review" : "Start short review";
+        sessionRoot.innerHTML = `<p class="field-hint" role="alert">${escapeHtml(error.message || "A review question is not available yet. Your course materials are unchanged.")}</p>`;
+      }
+    });
+  });
   container.querySelectorAll("[data-recommendation-start]").forEach((link) => {
     link.addEventListener("click", async (event) => {
       const item = recommendations.items.find((candidate) => candidate.id === link.dataset.recommendationId);

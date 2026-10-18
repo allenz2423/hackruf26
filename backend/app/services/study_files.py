@@ -16,6 +16,7 @@ from uuid import UUID
 from app.api.schemas import (
     StudyGuideBlock,
     StudyGuideContent,
+    StudyGuideMiniQuiz,
     StudyGuideSectionV2,
     UploadDocumentContent,
 )
@@ -1867,6 +1868,7 @@ def render_guide_latex(
         r"\tableofcontents",
         r"\newpage",
     ]
+    mini_quizzes: list[tuple[str, StudyGuideMiniQuiz]] = []
     for section_index, section in enumerate(guide.sections):
         document.append(r"\section{" + escape_latex(section.heading) + "}")
         if isinstance(section, StudyGuideSectionV2) and section.blocks:
@@ -1885,6 +1887,21 @@ def render_guide_latex(
             document.append(
                 r"\textbf{Key terms:} "
                 + "; ".join(_inline(term, render_math, strict_math) for term in section.key_terms)
+            )
+        if isinstance(section, StudyGuideSectionV2) and section.mini_quiz is not None:
+            quiz = section.mini_quiz
+            mini_quizzes.append((section.heading, quiz))
+            document.extend(
+                [
+                    r"\paragraph{Check your understanding}",
+                    _inline(quiz.question, render_math, strict_math),
+                    r"\begin{enumerate}",
+                    *[
+                        r"\item " + _inline(choice, render_math, strict_math)
+                        for choice in quiz.choices
+                    ],
+                    r"\end{enumerate}",
+                ]
             )
         source_citations = list(section.sources)
         if isinstance(section, StudyGuideSectionV2):
@@ -1918,6 +1935,18 @@ def render_guide_latex(
             label = f"[{number}]" + (", " + ", ".join(locator) if locator else "")
             citations.append(r"\hyperref[source:" + str(number) + "]{" + escape_latex(label) + "}")
         document.append(r"\par\textbf{Sources:} " + "; ".join(citations))
+    if mini_quizzes:
+        document.append(r"\section*{Mini-quiz answer key}")
+        for section_heading, quiz in mini_quizzes:
+            document.extend(
+                [
+                    r"\paragraph{" + escape_latex(section_heading) + "}",
+                    r"\textbf{Answer:} "
+                    + _inline(quiz.choices[quiz.correct_index], render_math, strict_math),
+                    r"\par\textbf{Why:} "
+                    + _inline(quiz.explanation, render_math, strict_math),
+                ]
+            )
     if source_map:
         document.extend([r"\section*{Source references}", r"\begin{description}"])
         for source_id, (number, name) in source_map.items():

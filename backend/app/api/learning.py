@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import json
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Query, Request, Response
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.admin import _require_admin
 from app.api.dependencies import database, enforce_sqlite_api_policy
 from app.api.errors import ApiError
 from app.services.class_access import (
     class_access,
+    material_access,
     require_resource_access,
 )
 from app.services.concept_graph import concept_graph
@@ -33,6 +35,18 @@ class LearningPreferenceUpdate(BaseModel):
 class RecommendationStateUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     state: Literal["active", "completed", "dismissed"]
+
+
+class LearningReviewAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    choice_id: str = Field(min_length=1, max_length=160)
+
+
+class FlashcardReviewUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    operation_id: UUID
+    card_id: str = Field(min_length=1, max_length=160)
+    rating: Literal["recalled", "unsure", "missed", "snooze", "reset"]
 
 
 def _no_store(response: Response) -> None:
@@ -175,6 +189,22 @@ async def _candidate_recommendation(
     evidence_ids = [str(row["id"]) for row in evidence]
     recent_errors = sum(float(row["correctness"]) < 0.5 for row in evidence)
     cursor = evidence_ids[0] if evidence_ids else "none"
+    review_state = await db.fetchrow(
+        "SELECT due_at,last_session_id,last_family_id FROM learning_review_state "
+        "WHERE owner_id=?1 AND class_id=?2 AND concept_id=?3",
+        owner_id,
+        class_id,
+        concept_id,
+    )
+    review_due = bool(progress_concept.get("review_due"))
+    if review_state is not None:
+        try:
+            due_at = datetime.fromisoformat(str(review_state["due_at"]).replace("Z", "+00:00"))
+            review_due = due_at <= datetime.now(UTC)
+        except (TypeError, ValueError):
+            review_due = True
+        if review_state.get("last_session_id"):
+            cursor = f"review:{review_state['last_session_id']}"
     related = await db.fetch(
         "SELECT e.from_concept_id,e.to_concept_id,e.necessity,c.id,c.canonical_name "
         "FROM class_concept_edges e JOIN class_concepts c ON c.class_id=e.class_id "
@@ -211,13 +241,24 @@ async def _candidate_recommendation(
             f"{prerequisite['canonical_name']} can show whether that foundation needs review; "
             "the downstream result alone does not establish a prerequisite gap."
         )
-    elif bool(progress_concept.get("review_due")) or goal == "review":
+    elif review_due or (goal == "review" and review_state is None):
         rec_type = "review"
         label = f"Review {concept['canonical_name']}"
-        reason = (
-            "A review is due based on the age of your evidence. This is a reminder; time alone "
-            "does not lower your mastery estimate."
-        )
+        if review_state is not None:
+            reason = (
+                "A different source-linked check is due from your review schedule. This reminder "
+                "does not lower your mastery estimate."
+            )
+        elif progress_concept.get("review_due"):
+            reason = (
+                "Your evidence is old enough for a reminder to revisit this topic. Time alone "
+                "does not lower your mastery estimate."
+            )
+        else:
+            reason = (
+                "Your selected goal is to revisit material. Try one short question from a "
+                "different validated question family."
+            )
     else:
         rec_type = "practice"
         label = f"Practice {concept['canonical_name']}"
@@ -260,7 +301,7 @@ async def _candidate_recommendation(
         "evidence_ids": evidence_ids,
         "evidence_cursor": cursor,
         "sort": (
-            0 if progress_concept["status"] == "unassessed" else 1,
+            0 if rec_type == "review" else 1 if progress_concept["status"] == "unassessed" else 2,
             -recent_errors,
             float(progress_concept["estimate"].get("mean") or 0),
             concept_id,
@@ -288,6 +329,599 @@ async def _record_recommendation_event(
         related_attempt_id,
         event_day,
     )
+
+
+async def _learning_review_payload(db: Any, session: dict[str, Any]) -> dict[str, Any]:
+    public = json_value(session["public_snapshot"], {})
+    private = json_value(session["private_snapshot"], {})
+    class_id = str(session["class_id"])
+    owner_id = str(session["owner_id"])
+    await class_access(db, class_id, owner_id, required="read")
+    citations = await _authorized_citations(
+        db,
+        owner_id=owner_id,
+        class_id=class_id,
+        private_snapshot=private,
+    )
+    if not citations:
+        raise ApiError(404, "not_found", "The source for this review is no longer available.")
+
+    result: dict[str, Any] = {
+        "id": str(session["id"]),
+        "status": str(session["status"]),
+        "concept_id": str(session["concept_id"]),
+        "prompt": str(public.get("prompt") or ""),
+        "kind": str(public.get("kind") or "multiple_choice"),
+        "choices": public.get("choices") if isinstance(public.get("choices"), list) else [],
+        "citations": citations if session["status"] == "completed" else [],
+        "mastery_updated": False,
+    }
+    if session["status"] == "completed":
+        result.update(
+            {
+                "correct": bool(session.get("correctness")),
+                "selected_choice_id": session.get("submitted_choice_id"),
+                "correct_answer": str(private.get("correct_answer") or ""),
+                "explanation": str(private.get("explanation") or ""),
+                "completed_at": session.get("completed_at"),
+                "next_due_at": await db.fetchval(
+                    "SELECT due_at FROM learning_review_state WHERE owner_id=?1 "
+                    "AND class_id=?2 AND concept_id=?3",
+                    owner_id,
+                    class_id,
+                    str(session["concept_id"]),
+                ),
+            }
+        )
+    return result
+
+
+@router.post("/api/learning/recommendations/{recommendation_id}/review")
+async def start_learning_review(
+    recommendation_id: UUID, request: Request, response: Response
+) -> dict[str, Any]:
+    owner_id = await enforce_sqlite_api_policy(request, request.app.state.settings)
+    _no_store(response)
+    db = database(request)
+    owner_key = str(owner_id)
+    recommendation = await db.fetchrow(
+        "SELECT * FROM learning_recommendations WHERE id=?1 AND owner_id=?2",
+        recommendation_id,
+        owner_key,
+    )
+    if recommendation is None or recommendation["recommendation_type"] != "review":
+        raise ApiError(404, "not_found", "The requested review suggestion was not found.")
+    if recommendation["state"] in {"completed", "dismissed"}:
+        raise ApiError(409, "recommendation_terminal", "This review suggestion is already closed.")
+    class_id = str(recommendation["class_id"])
+    concept_id = str(recommendation["concept_id"])
+    await class_access(db, class_id, owner_key, required="read")
+    scheduled = await db.fetchrow(
+        "SELECT due_at FROM learning_review_state "
+        "WHERE owner_id=?1 AND class_id=?2 AND concept_id=?3",
+        owner_key,
+        class_id,
+        concept_id,
+    )
+    if scheduled is not None:
+        try:
+            not_due = datetime.fromisoformat(
+                str(scheduled["due_at"]).replace("Z", "+00:00")
+            ) > datetime.now(UTC)
+        except (TypeError, ValueError):
+            not_due = False
+        if not_due:
+            raise ApiError(
+                409, "review_not_due", "This fresh review is scheduled for a later date."
+            )
+
+    # Clear a stale in-progress row in its own committed statement. If it were
+    # changed inside the later creation transaction, a missing replacement item
+    # could roll the abandonment back and trap the learner in the same session.
+    active = await db.fetchrow(
+        "SELECT * FROM learning_review_sessions WHERE owner_id=?1 AND class_id=?2 "
+        "AND concept_id=?3 AND status='in_progress'",
+        owner_key,
+        class_id,
+        concept_id,
+    )
+    if active is not None:
+        try:
+            return await _learning_review_payload(db, active)
+        except ApiError as exc:
+            if exc.status_code != 404:
+                raise
+            await db.execute(
+                "UPDATE learning_review_sessions SET status='abandoned' "
+                "WHERE id=?1 AND status='in_progress'",
+                active["id"],
+            )
+
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            current = await conn.fetchrow(
+                "SELECT * FROM learning_recommendations WHERE id=?1 AND owner_id=?2",
+                recommendation_id,
+                owner_key,
+            )
+            if current is None or current["state"] in {"completed", "dismissed"}:
+                raise ApiError(
+                    409, "recommendation_terminal", "This review suggestion is already closed."
+                )
+            active = await conn.fetchrow(
+                "SELECT * FROM learning_review_sessions WHERE owner_id=?1 AND class_id=?2 "
+                "AND concept_id=?3 AND status='in_progress'",
+                owner_key,
+                class_id,
+                concept_id,
+            )
+            if active is not None:
+                return await _learning_review_payload(conn, active)
+
+            current_schedule = await conn.fetchrow(
+                "SELECT due_at,last_family_id FROM learning_review_state "
+                "WHERE owner_id=?1 AND class_id=?2 AND concept_id=?3",
+                owner_key,
+                class_id,
+                concept_id,
+            )
+            if current_schedule is not None:
+                try:
+                    still_not_due = datetime.fromisoformat(
+                        str(current_schedule["due_at"]).replace("Z", "+00:00")
+                    ) > datetime.now(UTC)
+                except (TypeError, ValueError):
+                    still_not_due = False
+                if still_not_due:
+                    raise ApiError(
+                        409, "review_not_due", "This fresh review is scheduled for a later date."
+                    )
+            last_family_id = (
+                str(current_schedule.get("last_family_id") or "") if current_schedule else ""
+            )
+            candidates = await conn.fetch(
+                "SELECT DISTINCT i.* FROM class_question_bank_items i "
+                "JOIN class_question_bank_concepts c ON c.item_id=i.id AND c.class_id=i.class_id "
+                "WHERE i.class_id=?1 AND i.state='validated' "
+                "AND i.kind IN ('multiple_choice','true_false') "
+                "AND c.concept_id=?2 AND (?3='' OR i.family_id<>?3) "
+                "ORDER BY i.exposure_count ASC,i.created_at ASC,i.id LIMIT 32",
+                class_id,
+                concept_id,
+                last_family_id,
+            )
+            selected: dict[str, Any] | None = None
+            for candidate in candidates:
+                source_rows = await conn.fetch(
+                    "SELECT chunk_revision_id FROM class_question_bank_sources "
+                    "WHERE item_id=?1 AND class_id=?2 ORDER BY source_order,chunk_revision_id",
+                    candidate["id"],
+                    class_id,
+                )
+                source_ids = [str(row["chunk_revision_id"]) for row in source_rows]
+                private_source = {"source_chunk_revision_ids": source_ids}
+                citations = await _authorized_citations(
+                    conn,
+                    owner_id=owner_key,
+                    class_id=class_id,
+                    private_snapshot=private_source,
+                )
+                if not citations:
+                    continue
+                choices = json_value(candidate["choices_json"], [])
+                grading = json_value(candidate["grading_json"], {})
+                if not isinstance(choices, list) or not isinstance(grading, dict):
+                    continue
+                original_answer = str(grading.get("answer") or "")
+                if not original_answer:
+                    continue
+                new_choices: list[dict[str, str]] = []
+                correct_choice: dict[str, str] | None = None
+                for choice in choices:
+                    if not isinstance(choice, dict):
+                        continue
+                    original_id = str(choice.get("id") or "")
+                    text = str(choice.get("text") or "").strip()
+                    if not original_id or not text:
+                        continue
+                    normalized_id = secrets.token_urlsafe(12)
+                    normalized = {"id": normalized_id, "text": text[:1200]}
+                    new_choices.append(normalized)
+                    if original_id == original_answer or (
+                        candidate["kind"] == "true_false"
+                        and (
+                            original_id.casefold() == original_answer.casefold()
+                            or text.casefold() == original_answer.casefold()
+                        )
+                    ):
+                        correct_choice = normalized
+                if correct_choice is None or len(new_choices) < 2:
+                    continue
+                secrets.SystemRandom().shuffle(new_choices)
+                selected = {
+                    "bank_item": candidate,
+                    "source_ids": source_ids,
+                    "choices": new_choices,
+                    "correct_choice": correct_choice,
+                    "grading": grading,
+                }
+                break
+            if selected is None:
+                raise ApiError(
+                    409,
+                    "review_item_unavailable",
+                    "There is no unused, source-checked question for this topic yet. "
+                    "You can review the linked course source or try again after the question "
+                    "bank is expanded.",
+                )
+
+            session_id = str(uuid4())
+            public = {
+                "prompt": str(selected["bank_item"]["prompt"])[:5000],
+                "kind": str(selected["bank_item"]["kind"]),
+                "choices": selected["choices"],
+            }
+            private = {
+                "source_chunk_revision_ids": selected["source_ids"],
+                "correct_choice_id": selected["correct_choice"]["id"],
+                "correct_answer": selected["correct_choice"]["text"],
+                "explanation": str(selected["grading"].get("explanation") or "")[:5000],
+            }
+            await conn.execute(
+                "INSERT INTO learning_review_sessions "
+                "(id,recommendation_id,owner_id,class_id,concept_id,bank_item_id,family_id,"
+                "public_snapshot,private_snapshot) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                session_id,
+                recommendation_id,
+                owner_key,
+                class_id,
+                concept_id,
+                selected["bank_item"]["id"],
+                selected["bank_item"]["family_id"],
+                json.dumps(public, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(private, ensure_ascii=False, separators=(",", ":")),
+            )
+            if current["state"] in {"suggested", "pending"}:
+                await conn.execute(
+                    "UPDATE learning_recommendations SET state='active',updated_at="
+                    "strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 AND owner_id=?2",
+                    recommendation_id,
+                    owner_key,
+                )
+                await _record_recommendation_event(
+                    conn,
+                    recommendation_id=str(recommendation_id),
+                    owner_id=owner_key,
+                    event_type="engaged",
+                )
+            session = await conn.fetchrow(
+                "SELECT * FROM learning_review_sessions WHERE id=?1", session_id
+            )
+    return await _learning_review_payload(db, session)
+
+
+@router.post("/api/learning/reviews/{session_id}/answer")
+async def submit_learning_review_answer(
+    session_id: UUID,
+    payload: LearningReviewAnswer,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    owner_id = await enforce_sqlite_api_policy(request, request.app.state.settings)
+    _no_store(response)
+    db = database(request)
+    owner_key = str(owner_id)
+    source_revoked = False
+    saved: dict[str, Any] | None = None
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            session = await conn.fetchrow(
+                "SELECT * FROM learning_review_sessions WHERE id=?1 AND owner_id=?2",
+                session_id,
+                owner_key,
+            )
+            if session is None:
+                raise ApiError(404, "not_found", "The requested review was not found.")
+            if session["status"] == "abandoned":
+                raise ApiError(
+                    404, "not_found", "The source for this review is no longer available."
+                )
+            public = json_value(session["public_snapshot"], {})
+            private = json_value(session["private_snapshot"], {})
+            await class_access(conn, str(session["class_id"]), owner_key, required="read")
+            citations = await _authorized_citations(
+                conn,
+                owner_id=owner_key,
+                class_id=str(session["class_id"]),
+                private_snapshot=private,
+            )
+            if not citations:
+                if session["status"] == "in_progress":
+                    await conn.execute(
+                        "UPDATE learning_review_sessions SET status='abandoned' "
+                        "WHERE id=?1 AND status='in_progress'",
+                        session_id,
+                    )
+                source_revoked = True
+            else:
+                choice_ids = {
+                    str(choice.get("id"))
+                    for choice in public.get("choices", [])
+                    if isinstance(choice, dict) and choice.get("id")
+                }
+                if payload.choice_id not in choice_ids:
+                    raise ApiError(
+                        422, "invalid_review_choice", "Choose one of the listed answers."
+                    )
+                if session["status"] == "completed":
+                    if session["submitted_choice_id"] != payload.choice_id:
+                        raise ApiError(
+                            409, "review_already_submitted", "This review answer was already saved."
+                        )
+                    saved = session
+
+                if saved is None:
+                    correct = payload.choice_id == private.get("correct_choice_id")
+                    now = datetime.now(UTC)
+                    previous = await conn.fetchrow(
+                        "SELECT interval_days,completed_count FROM learning_review_state "
+                        "WHERE owner_id=?1 AND class_id=?2 AND concept_id=?3",
+                        owner_key,
+                        session["class_id"],
+                        session["concept_id"],
+                    )
+                    if correct:
+                        previous_interval = int(previous["interval_days"]) if previous else 1
+                        interval_days = (
+                            7
+                            if not previous or int(previous["completed_count"]) == 0
+                            else min(30, max(7, previous_interval * 2))
+                        )
+                    else:
+                        interval_days = 1
+                    due_at = (
+                        (now + timedelta(days=interval_days))
+                        .isoformat(timespec="milliseconds")
+                        .replace("+00:00", "Z")
+                    )
+                    completed_at = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                    await conn.execute(
+                        "UPDATE learning_review_sessions SET status='completed', "
+                        "submitted_choice_id=?2,"
+                        "correctness=?3,completed_at=?4 WHERE id=?1 AND status='in_progress'",
+                        session_id,
+                        payload.choice_id,
+                        int(correct),
+                        completed_at,
+                    )
+                    await conn.execute(
+                        "INSERT INTO learning_review_state "
+                        "(owner_id,class_id,concept_id,due_at,interval_days,completed_count,last_session_id,"
+                        "last_family_id,last_correct) VALUES (?1,?2,?3,?4,?5,1,?6,?7,?8) "
+                        "ON CONFLICT(owner_id,class_id,concept_id) DO UPDATE SET "
+                        "due_at=excluded.due_at,"
+                        "interval_days=excluded.interval_days, "
+                        "completed_count=learning_review_state.completed_count+1,"
+                        "last_session_id=excluded.last_session_id,last_family_id=excluded.last_family_id,"
+                        "last_correct=excluded.last_correct,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+                        owner_key,
+                        session["class_id"],
+                        session["concept_id"],
+                        due_at,
+                        interval_days,
+                        session_id,
+                        session["family_id"],
+                        int(correct),
+                    )
+                    await conn.execute(
+                        "UPDATE learning_recommendations SET state='completed',updated_at="
+                        "strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1 AND owner_id=?2 "
+                        "AND state IN ('active','suggested','pending')",
+                        session["recommendation_id"],
+                        owner_key,
+                    )
+                    await _record_recommendation_event(
+                        conn,
+                        recommendation_id=str(session["recommendation_id"]),
+                        owner_id=owner_key,
+                        event_type="completed",
+                    )
+                    saved = await conn.fetchrow(
+                        "SELECT * FROM learning_review_sessions WHERE id=?1", session_id
+                    )
+    if source_revoked:
+        raise ApiError(404, "not_found", "The source for this review is no longer available.")
+    if saved is None:
+        raise ApiError(500, "review_not_saved", "The review answer could not be saved.")
+    return await _learning_review_payload(db, saved)
+
+
+def _flashcard_ids(material: dict[str, Any]) -> set[str]:
+    content = json_value(material.get("content"), {})
+    cards = content.get("cards", []) if isinstance(content, dict) else []
+    return (
+        {
+            str(card["id"])
+            for card in cards
+            if isinstance(card, dict) and isinstance(card.get("id"), str) and card["id"]
+        }
+        if isinstance(cards, list)
+        else set()
+    )
+
+
+async def _owned_flashcard_material(db: Any, material_id: UUID, owner_id: UUID) -> dict[str, Any]:
+    material, _ = await material_access(db, material_id, owner_id)
+    if material["kind"] != "flashcards":
+        raise ApiError(404, "not_found", "The requested flashcard set was not found.")
+    if material["status"] != "ready":
+        raise ApiError(
+            409, "material_not_ready", "Wait for this flashcard set to finish generating."
+        )
+    return material
+
+
+@router.get("/api/study-materials/{material_id}/flashcard-review")
+async def get_flashcard_review_state(
+    material_id: UUID, request: Request, response: Response
+) -> dict[str, Any]:
+    owner_id = await enforce_sqlite_api_policy(request, request.app.state.settings)
+    _no_store(response)
+    db = database(request)
+    material = await _owned_flashcard_material(db, material_id, owner_id)
+    valid_ids = _flashcard_ids(material)
+    rows = await db.fetch(
+        "SELECT card_id,last_rating,next_due_at,reviewed_at,review_count,recalled_streak "
+        "FROM flashcard_review_state WHERE owner_id=?1 AND material_id=?2 ORDER BY card_id",
+        owner_id,
+        material_id,
+    )
+    stale_ids = [str(row["card_id"]) for row in rows if str(row["card_id"]) not in valid_ids]
+    if stale_ids:
+        async with db.acquire() as conn:
+            async with conn.transaction():
+                for card_id in stale_ids:
+                    await conn.execute(
+                        "DELETE FROM flashcard_review_state "
+                        "WHERE owner_id=?1 AND material_id=?2 AND card_id=?3",
+                        owner_id,
+                        material_id,
+                        card_id,
+                    )
+    items = [
+        {
+            "card_id": str(row["card_id"]),
+            "rating": row["last_rating"],
+            "next_due_at": row["next_due_at"],
+            "reviewed_at": row["reviewed_at"],
+            "review_count": int(row["review_count"]),
+            "recalled_streak": int(row["recalled_streak"]),
+        }
+        for row in rows
+        if str(row["card_id"]) in valid_ids
+    ]
+    now = datetime.now(UTC)
+    due_count = sum(
+        1
+        for item in items
+        if datetime.fromisoformat(str(item["next_due_at"]).replace("Z", "+00:00")) <= now
+    )
+    return {"items": items, "due_count": due_count, "mastery_updated": False}
+
+
+@router.put("/api/study-materials/{material_id}/flashcard-review")
+async def update_flashcard_review_state(
+    material_id: UUID,
+    payload: FlashcardReviewUpdate,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    owner_id = await enforce_sqlite_api_policy(request, request.app.state.settings)
+    _no_store(response)
+    db = database(request)
+    material = await _owned_flashcard_material(db, material_id, owner_id)
+    if payload.card_id not in _flashcard_ids(material):
+        raise ApiError(404, "not_found", "The requested flashcard was not found.")
+    owner_key = str(owner_id)
+    material_key = str(material_id)
+    async with db.acquire() as conn:
+        async with conn.transaction():
+            previous = await conn.fetchrow(
+                "SELECT * FROM flashcard_review_state "
+                "WHERE owner_id=?1 AND material_id=?2 AND card_id=?3",
+                owner_key,
+                material_key,
+                payload.card_id,
+            )
+            if previous and previous.get("last_operation_id") == str(payload.operation_id):
+                return {
+                    "card_id": payload.card_id,
+                    "rating": previous["last_rating"],
+                    "next_due_at": previous["next_due_at"],
+                    "reviewed_at": previous["reviewed_at"],
+                    "review_count": int(previous["review_count"]),
+                    "recalled_streak": int(previous["recalled_streak"]),
+                    "mastery_updated": False,
+                }
+            now = datetime.now(UTC)
+            reviewed_at = previous.get("reviewed_at") if previous else None
+            review_count = int(previous["review_count"]) if previous else 0
+            recalled_streak = int(previous["recalled_streak"]) if previous else 0
+            rating = previous.get("last_rating") if previous else None
+            if payload.rating == "reset":
+                due_at = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                rating = None
+                reviewed_at = None
+                review_count = 0
+                recalled_streak = 0
+            elif payload.rating == "snooze":
+                due_at = (
+                    (now + timedelta(days=1))
+                    .isoformat(timespec="milliseconds")
+                    .replace("+00:00", "Z")
+                )
+            else:
+                reviewed_at = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                review_count += 1
+                rating = payload.rating
+                if payload.rating == "missed":
+                    interval_days = 1
+                    recalled_streak = 0
+                elif payload.rating == "unsure":
+                    interval_days = 3
+                    recalled_streak = 0
+                else:
+                    recalled_streak = min(10, recalled_streak + 1)
+                    interval_days = min(30, 7 * (2 ** (recalled_streak - 1)))
+                due_at = (
+                    (now + timedelta(days=interval_days))
+                    .isoformat(timespec="milliseconds")
+                    .replace("+00:00", "Z")
+                )
+            await conn.execute(
+                "INSERT INTO flashcard_review_state "
+                "(owner_id,material_id,card_id,last_rating,next_due_at,reviewed_at,review_count,"
+                "recalled_streak,last_operation_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) "
+                "ON CONFLICT(owner_id,material_id,card_id) DO UPDATE SET "
+                "last_rating=excluded.last_rating,next_due_at=excluded.next_due_at,"
+                "reviewed_at=excluded.reviewed_at,review_count=excluded.review_count,"
+                "recalled_streak=excluded.recalled_streak,last_operation_id=excluded.last_operation_id,"
+                "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+                owner_key,
+                material_key,
+                payload.card_id,
+                rating,
+                due_at,
+                reviewed_at,
+                review_count,
+                recalled_streak,
+                str(payload.operation_id),
+            )
+    return {
+        "card_id": payload.card_id,
+        "rating": rating,
+        "next_due_at": due_at,
+        "reviewed_at": reviewed_at,
+        "review_count": review_count,
+        "recalled_streak": recalled_streak,
+        "mastery_updated": False,
+    }
+
+
+@router.delete("/api/study-materials/{material_id}/flashcard-review", status_code=204)
+async def clear_flashcard_review_state(
+    material_id: UUID, request: Request, response: Response
+) -> Response:
+    owner_id = await enforce_sqlite_api_policy(request, request.app.state.settings)
+    _no_store(response)
+    db = database(request)
+    await _owned_flashcard_material(db, material_id, owner_id)
+    await db.execute(
+        "DELETE FROM flashcard_review_state WHERE owner_id=?1 AND material_id=?2",
+        owner_id,
+        material_id,
+    )
+    return Response(status_code=204, headers={"Cache-Control": "private, no-store"})
 
 
 @router.get("/api/learning/progress")

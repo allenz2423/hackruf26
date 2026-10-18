@@ -1,6 +1,12 @@
 import { icon } from "./icons.js";
 import { mathHtml, typesetMath } from "./math.js";
-import { focusStudyPlayer } from "./ui.js";
+import { escapeHtml, focusStudyPlayer } from "./ui.js";
+import { generatedStudyQualityNote } from "./study-quality-note.js";
+import {
+  clearFlashcardReviewStateApi,
+  getFlashcardReviewStateApi,
+  updateFlashcardReviewStateApi
+} from "./api.js";
 
 import { sourceCitationHtml, bindSourceCitations, sourceWarningsHtml } from "./source-citations.js";
 export { formatSourceCitation } from "./source-citations.js";
@@ -71,20 +77,27 @@ function shuffleArray(items) {
 }
 
 /**
- * Interactive flashcard player component.
- * Supports flipping, prev/next navigation, keyboard shortcuts,
- * Got it / Study again piles, shuffling, progress indicator, and completion summary.
+ * Interactive flashcard player. Ratings are learner self-reports, never mastery
+ * evidence; signed-in remote sets may persist only the rating and review date.
  */
 export function renderFlashcards(root, material, { onBack, onAttemptCompleted } = {}) {
-  let deck = normalizeCards(material);
+  const deck = normalizeCards(material);
   let activeCards = [...deck];
   let currentIndex = 0;
   let isFlipped = false;
-  const masteredIds = new Set();
-  const studyAgainIds = new Set();
   let isCompleted = false;
+  let isSaving = false;
+  let flashcardError = "";
+  let privateStateStatus = "loading";
+  const reviewState = new Map();
+  const sessionRatings = new Map();
+  const pendingOperations = new Map();
+  let hydrationVersion = 0;
+  let clearedHistoryMessage = "";
+  const canPersist = Boolean(material?.isRemote && material?.id);
 
   function teardown() {
+    hydrationVersion += 1;
     document.removeEventListener("keydown", handleKeyNavigation);
   }
 
@@ -93,15 +106,9 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
       teardown();
       return;
     }
-
     const tag = document.activeElement?.tagName;
-    if (["INPUT", "TEXTAREA", "SELECT", "BUTTON", "A"].includes(tag)) {
-      return;
-    }
-
-    if (isCompleted) return;
-
-    if (event.code === "Space" || event.key === " ") {
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(tag) || isCompleted || isSaving) return;
+    if ((event.code === "Space" || event.key === " ") && tag !== "BUTTON") {
       event.preventDefault();
       flipCard();
     } else if (event.key === "ArrowLeft") {
@@ -110,77 +117,154 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
     } else if (event.key === "ArrowRight") {
       event.preventDefault();
       nextCard();
-    } else if (event.key === "1") {
+    } else if (isFlipped && event.key === "1") {
       event.preventDefault();
-      markStudyAgain();
-    } else if (event.key === "2") {
+      void rateCard("missed");
+    } else if (isFlipped && event.key === "2") {
       event.preventDefault();
-      markGotIt();
+      void rateCard("recalled");
+    } else if (isFlipped && event.key === "3") {
+      event.preventDefault();
+      void rateCard("unsure");
     }
   }
 
   document.addEventListener("keydown", handleKeyNavigation);
 
+  function dueCards() {
+    const now = Date.now();
+    return deck.filter((card) => {
+      const date = Date.parse(reviewState.get(card.id)?.next_due_at || "");
+      return Number.isFinite(date) && date <= now;
+    });
+  }
+
   function flipCard() {
+    if (isSaving || !activeCards[currentIndex]) return;
     isFlipped = !isFlipped;
     render();
   }
 
   function prevCard() {
-    if (currentIndex > 0) {
-      currentIndex -= 1;
-      isFlipped = false;
-      render();
-    }
+    if (isSaving || currentIndex <= 0) return;
+    currentIndex -= 1;
+    isFlipped = false;
+    render();
   }
 
   function nextCard() {
+    if (isSaving) return;
     if (currentIndex < activeCards.length - 1) {
       currentIndex += 1;
       isFlipped = false;
+      flashcardError = "";
       render();
     } else {
       finishDeck();
     }
   }
 
-  function markGotIt() {
-    if (!activeCards[currentIndex]) return;
-    const cardId = activeCards[currentIndex].id;
-    masteredIds.add(cardId);
-    studyAgainIds.delete(cardId);
-    nextCard();
+  function operationId() {
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    return `flashcard-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   }
 
-  function markStudyAgain() {
-    if (!activeCards[currentIndex]) return;
-    const cardId = activeCards[currentIndex].id;
-    studyAgainIds.add(cardId);
-    masteredIds.delete(cardId);
-    nextCard();
+  async function rateCard(rating) {
+    const card = activeCards[currentIndex];
+    if (!card || !isFlipped || isSaving || !["recalled", "unsure", "missed"].includes(rating)) return;
+    const pending = pendingOperations.get(card.id);
+    if (pending && pending.action !== rating) {
+      flashcardError = "Retry the same rating to confirm whether it was saved.";
+      render();
+      return;
+    }
+    isSaving = true;
+    flashcardError = "";
+    render();
+    try {
+      let updated = null;
+      if (canPersist) {
+        const operation = pending?.operation_id || operationId();
+        pendingOperations.set(card.id, { operation_id: operation, action: rating });
+        updated = await updateFlashcardReviewStateApi(material.id, {
+          operation_id: operation,
+          card_id: card.id,
+          rating
+        });
+        pendingOperations.delete(card.id);
+        reviewState.set(card.id, updated);
+      }
+      sessionRatings.set(card.id, rating);
+      isSaving = false;
+      nextCard();
+    } catch (error) {
+      isSaving = false;
+      flashcardError = error.message || "This rating could not be saved. Try again.";
+      render();
+    }
+  }
+
+  async function adjustSchedule(action) {
+    const card = activeCards[currentIndex];
+    if (!card || !canPersist || isSaving || !["snooze", "reset"].includes(action)) return;
+    const pending = pendingOperations.get(card.id);
+    if (pending && pending.action !== action) {
+      flashcardError = "Retry the same schedule change to confirm whether it was saved.";
+      render();
+      return;
+    }
+    isSaving = true;
+    flashcardError = "";
+    render();
+    try {
+      const operation = pending?.operation_id || operationId();
+      pendingOperations.set(card.id, { operation_id: operation, action });
+      const updated = await updateFlashcardReviewStateApi(material.id, {
+        operation_id: operation,
+        card_id: card.id,
+        rating: action
+      });
+      pendingOperations.delete(card.id);
+      reviewState.set(card.id, updated);
+      isSaving = false;
+      render();
+    } catch (error) {
+      isSaving = false;
+      flashcardError = error.message || "The review date could not be changed. Try again.";
+      render();
+    }
   }
 
   function shuffleCards() {
+    if (isSaving) return;
     activeCards = shuffleArray(activeCards);
     currentIndex = 0;
     isFlipped = false;
     render();
   }
 
+  function startDueReview() {
+    const due = dueCards();
+    if (!due.length) return;
+    activeCards = due;
+    currentIndex = 0;
+    isFlipped = false;
+    isCompleted = false;
+    sessionRatings.clear();
+    render();
+  }
+
   function finishDeck() {
     isCompleted = true;
-    if (onAttemptCompleted) {
-      const scorePercent = activeCards.length > 0
-        ? Math.round((masteredIds.size / activeCards.length) * 100)
-        : 100;
-      onAttemptCompleted({
-        scorePercent,
-        masteredCount: masteredIds.size,
-        studyAgainCount: studyAgainIds.size,
-        totalCount: activeCards.length,
-        completedAt: new Date().toISOString()
-      });
-    }
+    const counts = { recalled: 0, unsure: 0, missed: 0 };
+    for (const rating of sessionRatings.values()) counts[rating] += 1;
+    onAttemptCompleted?.({
+      ...counts,
+      ratedCount: sessionRatings.size,
+      totalCount: activeCards.length,
+      completedAt: new Date().toISOString(),
+      masteryUpdated: false
+    });
     render();
   }
 
@@ -189,93 +273,101 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
     currentIndex = 0;
     isFlipped = false;
     isCompleted = false;
-    masteredIds.clear();
-    studyAgainIds.clear();
+    sessionRatings.clear();
+    flashcardError = "";
     render();
   }
 
-  function reviewStudyAgainPile() {
-    const subset = deck.filter((c) => studyAgainIds.has(c.id));
-    if (!subset.length) return;
-    activeCards = subset;
+  function reviewMarkedPile() {
+    const marked = deck.filter((card) => ["unsure", "missed"].includes(sessionRatings.get(card.id)));
+    if (!marked.length) return;
+    activeCards = marked;
     currentIndex = 0;
     isFlipped = false;
     isCompleted = false;
-    masteredIds.clear();
-    studyAgainIds.clear();
+    sessionRatings.clear();
     render();
+  }
+
+  function formatDate(value) {
+    const date = Date.parse(value || "");
+    return Number.isFinite(date)
+      ? new Date(date).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+      : "not scheduled";
+  }
+
+  async function clearPrivateHistory(button) {
+    if (!canPersist || isSaving) return;
+    if (!globalThis.confirm?.("Clear your private review schedule for this flashcard set? This does not delete the cards.")) return;
+    button.disabled = true;
+    try {
+      await clearFlashcardReviewStateApi(material.id);
+      hydrationVersion += 1;
+      reviewState.clear();
+      sessionRatings.clear();
+      pendingOperations.clear();
+      clearedHistoryMessage = "Your private review schedule for this set was cleared.";
+      render();
+    } catch (error) {
+      button.disabled = false;
+      flashcardError = error.message || "The review schedule could not be cleared.";
+      render();
+    }
   }
 
   function renderCompletedSummary() {
     const total = activeCards.length;
-    const mastered = masteredIds.size;
-    const studyAgain = studyAgainIds.size;
-    const percent = total > 0 ? Math.round((mastered / total) * 100) : 100;
-    const cardsToReview = deck.filter((c) => studyAgainIds.has(c.id));
-
+    const counts = { recalled: 0, unsure: 0, missed: 0 };
+    for (const rating of sessionRatings.values()) counts[rating] += 1;
+    const marked = deck.filter((card) => ["unsure", "missed"].includes(sessionRatings.get(card.id)));
+    const nextDue = [...reviewState.values()]
+      .map((item) => item.next_due_at)
+      .filter(Boolean)
+      .sort((left, right) => Date.parse(left) - Date.parse(right))[0];
     root.innerHTML = `
       <section class="flashcard-player assessment-view">
         ${sourceWarningsHtml(material)}
+        ${generatedStudyQualityNote(material, "flashcards")}
         ${onBack ? `<button class="back-link assessment-back" type="button" data-back>&larr; Back to study materials</button>` : ""}
         <div class="session-complete">
           <span class="kind-icon" style="color: var(--accent);">${icon("cards", { size: 36 })}</span>
-          <h3>Deck review complete</h3>
-          <p class="muted">You reviewed ${total} ${total === 1 ? "flashcard" : "flashcards"}.</p>
-
-          <div class="metric-strip" style="margin: 1rem 0; width: min(440px, 100%);">
-            <div class="metric">
-              <strong style="color: var(--success);">${mastered}</strong>
-              <span>Got it (${percent}%)</span>
-            </div>
-            <div class="metric">
-              <strong style="color: ${studyAgain > 0 ? "var(--warning)" : "var(--muted);"}">${studyAgain}</strong>
-              <span>Study again</span>
-            </div>
+          <h3>Review complete</h3>
+          <p class="muted">You rated ${sessionRatings.size} of ${total} ${total === 1 ? "card" : "cards"}. These are planning signals, not a mastery score.</p>
+          <div class="metric-strip" style="margin: 1rem 0; width: min(560px, 100%);">
+            <div class="metric"><strong>${counts.recalled}</strong><span>Recalled</span></div>
+            <div class="metric"><strong>${counts.unsure}</strong><span>Unsure</span></div>
+            <div class="metric"><strong>${counts.missed}</strong><span>Missed</span></div>
           </div>
-
-          ${cardsToReview.length > 0 ? `
-            <div class="flashcard-review-pile-list" style="width: min(520px, 100%); margin: 0.5rem 0 1rem; text-align: left;">
-              <h4 style="font-size: 0.9375rem; margin-bottom: 0.5rem; color: var(--muted);">Cards to review again:</h4>
-              <ul class="preview-list" style="margin: 0;">
-                ${cardsToReview.map((c) => `<li><strong>${mathHtml(c.front)}</strong></li>`).join("")}
-              </ul>
-            </div>
-          ` : `
-            <p style="color: var(--success); font-weight: 600; margin-bottom: 1rem;">Great work! You mastered every card in this set.</p>
-          `}
-
-          <div class="study-actions" style="justify-content: center; gap: 0.75rem;">
-            ${cardsToReview.length > 0 ? `
-              <button class="btn btn-primary" type="button" data-study-again-pile>
-                ${icon("refresh", { size: 16 })} Review ${cardsToReview.length} ${cardsToReview.length === 1 ? "card" : "cards"} to study again
-              </button>
-            ` : ""}
-            <button class="btn ${cardsToReview.length > 0 ? "btn-secondary" : "btn-primary"}" type="button" data-restart-all>
-              ${icon("refresh", { size: 16 })} Review again
-            </button>
+          ${marked.length ? `<div class="flashcard-review-pile-list"><h4>Worth another look</h4><ul class="preview-list">${marked.map((card) => `<li><strong>${mathHtml(card.front)}</strong> <span class="muted">· ${sessionRatings.get(card.id)}</span></li>`).join("")}</ul></div>` : ""}
+          ${canPersist && nextDue ? `<p class="field-hint">Next scheduled card review: ${escapeHtml(formatDate(nextDue))}. The starter intervals are simple planning defaults, not a personalized or scientifically optimal schedule.</p>` : ""}
+          ${!canPersist ? `<p class="field-hint">This is a local set, so its ratings are only kept during this session.</p>` : `<p class="field-hint">Your account stores your rating and next review date for this set; it does not store your attempted answers or update concept mastery.</p>`}
+          ${clearedHistoryMessage ? `<p class="field-hint" role="status">${escapeHtml(clearedHistoryMessage)}</p>` : ""}
+          <div class="study-actions" style="justify-content:center;gap:.75rem;">
+            ${marked.length ? `<button class="btn btn-primary" type="button" data-review-marked>${icon("refresh", { size: 16 })} Review ${marked.length} marked ${marked.length === 1 ? "card" : "cards"} now</button>` : ""}
+            ${dueCards().length ? `<button class="btn btn-secondary" type="button" data-review-due>${icon("refresh", { size: 16 })} Review ${dueCards().length} due ${dueCards().length === 1 ? "card" : "cards"}</button>` : ""}
+            <button class="btn ${marked.length ? "btn-secondary" : "btn-primary"}" type="button" data-restart-all>${icon("refresh", { size: 16 })} Review full set</button>
+            ${canPersist ? `<button class="btn btn-ghost" type="button" data-clear-history>Clear my review history</button>` : ""}
             ${onBack ? `<button class="btn btn-ghost" type="button" data-back>Back to study materials</button>` : ""}
           </div>
         </div>
-      </section>
-    `;
+      </section>`;
     void typesetMath(root);
     bindSourceCitations(root, material);
-
-    root.querySelectorAll("[data-back]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        teardown();
-        onBack?.();
-      });
-    });
-
+    root.querySelectorAll("[data-back]").forEach((button) => button.addEventListener("click", () => {
+      teardown();
+      onBack?.();
+    }));
     root.querySelector("[data-restart-all]")?.addEventListener("click", restartAll);
-    root.querySelector("[data-study-again-pile]")?.addEventListener("click", reviewStudyAgainPile);
+    root.querySelector("[data-review-marked]")?.addEventListener("click", reviewMarkedPile);
+    root.querySelector("[data-review-due]")?.addEventListener("click", startDueReview);
+    root.querySelector("[data-clear-history]")?.addEventListener("click", (event) => void clearPrivateHistory(event.currentTarget));
   }
 
   function renderEmptyState() {
     root.innerHTML = `
       <section class="flashcard-player assessment-view">
         ${sourceWarningsHtml(material)}
+        ${generatedStudyQualityNote(material, "flashcards")}
         ${onBack ? `<button class="back-link assessment-back" type="button" data-back>&larr; Back to study materials</button>` : ""}
         <div class="session-complete">
           <span class="kind-icon">${icon("cards", { size: 36 })}</span>
@@ -283,17 +375,12 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
           <p class="muted">This study material does not have any cards to review.</p>
           ${onBack ? `<button class="btn btn-primary" type="button" data-back>Back to study materials</button>` : ""}
         </div>
-      </section>
-    `;
-    void typesetMath(root);
+      </section>`;
     bindSourceCitations(root, material);
-
-    root.querySelectorAll("[data-back]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        teardown();
-        onBack?.();
-      });
-    });
+    root.querySelectorAll("[data-back]").forEach((button) => button.addEventListener("click", () => {
+      teardown();
+      onBack?.();
+    }));
   }
 
   function render() {
@@ -301,7 +388,6 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
       renderEmptyState();
       return;
     }
-
     if (isCompleted) {
       renderCompletedSummary();
       return;
@@ -309,131 +395,110 @@ export function renderFlashcards(root, material, { onBack, onAttemptCompleted } 
 
     const card = activeCards[currentIndex];
     const total = activeCards.length;
-    const isFirst = currentIndex === 0;
-    const isLast = currentIndex === total - 1;
-    const isCurrentMastered = masteredIds.has(card.id);
-    const isCurrentStudyAgain = studyAgainIds.has(card.id);
-
+    const state = reviewState.get(card.id);
+    const rating = sessionRatings.get(card.id);
+    const pendingAction = pendingOperations.get(card.id)?.action;
+    const dueCount = dueCards().length;
+    const dueNow = Number.isFinite(Date.parse(state?.next_due_at || ""))
+      && Date.parse(state.next_due_at) <= Date.now();
+    const nextDueLabel = state?.next_due_at ? formatDate(state.next_due_at) : "not scheduled";
+    const ratingLabel = { recalled: "Recalled", unsure: "Unsure", missed: "Missed" };
     root.innerHTML = `
       <section class="flashcard-player assessment-view">
         ${sourceWarningsHtml(material)}
+        ${generatedStudyQualityNote(material, "flashcards")}
         ${onBack ? `<button class="back-link assessment-back" type="button" data-back>&larr; Back to study materials</button>` : ""}
-
         <header class="flashcard-header">
           <div class="study-progress">
             <span>Card ${currentIndex + 1} of ${total}</span>
-            <progress max="${total}" value="${currentIndex + 1}"></progress>
+            <progress max="${total}" value="${currentIndex + 1}" aria-label="Flashcard progress"></progress>
           </div>
-
           <div class="flashcard-header-actions">
-            <div class="flashcard-piles-indicator" aria-label="Sorting status">
-              <span class="pill" data-tone="good" title="Mastered cards">
-                <strong>✓ ${masteredIds.size}</strong> Got it
-              </span>
-              <span class="pill" data-tone="${studyAgainIds.size > 0 ? "busy" : ""}" title="Cards to review">
-                <strong>↻ ${studyAgainIds.size}</strong> Study again
-              </span>
+            <div class="flashcard-piles-indicator" aria-label="Session ratings">
+              <span class="pill"><strong>${[...sessionRatings.values()].filter((item) => item === "recalled").length}</strong> Recalled</span>
+              <span class="pill"><strong>${[...sessionRatings.values()].filter((item) => item === "unsure").length}</strong> Unsure</span>
+              <span class="pill"><strong>${[...sessionRatings.values()].filter((item) => item === "missed").length}</strong> Missed</span>
             </div>
-            <button class="btn btn-ghost btn-small" type="button" data-shuffle title="Shuffle cards">
-              ${icon("shuffle", { size: 16 })} Shuffle
-            </button>
+            ${dueCount > 0 && dueCount < activeCards.length ? `<button class="btn btn-secondary btn-small" type="button" data-start-due>Review ${dueCount} due</button>` : ""}
+            <button class="btn btn-ghost btn-small" type="button" data-shuffle title="Shuffle cards">${icon("shuffle", { size: 16 })} Shuffle</button>
           </div>
         </header>
-
+        ${privateStateStatus === "loading" && canPersist ? `<p class="field-hint" role="status">Loading your private review schedule…</p>` : ""}
+        ${privateStateStatus === "error" ? `<p class="field-hint" role="status">Your review schedule could not be loaded. You can continue; ratings will still be saved when possible.</p>` : ""}
+        ${canPersist ? `<p class="field-hint">${dueCount ? `${dueCount} ${dueCount === 1 ? "card is" : "cards are"} due for review.` : "Your review dates are saved privately to your account."} ${state ? `This card is marked ${escapeHtml(ratingLabel[state.last_rating] || "for review")} · next review ${escapeHtml(nextDueLabel)}.` : ""}</p>` : ""}
         <div class="flashcard-stage-interactive">
-          <div
-            class="study-flashcard interactive-card ${isFlipped ? "is-flipped" : ""}"
-            role="button"
-            tabindex="0"
-            data-card-flip
-            aria-label="${isFlipped ? "Answer side shown. Click or press Space to show question." : "Question side shown. Click or press Space to reveal answer."}"
-          >
-            <div class="flashcard-side-tag">
-              <div class="flashcard-side-copy">
-                <strong class="flashcard-face-label">${isFlipped ? "Answer" : "Question"}</strong>
-                <span class="flashcard-reveal-hint">Click card or press Space to ${isFlipped ? "flip back" : "reveal"}</span>
-              </div>
-              ${isCurrentMastered ? `<span class="pill" data-tone="good" style="margin-left: auto;">Got it</span>` : ""}
-              ${isCurrentStudyAgain ? `<span class="pill" data-tone="busy" style="margin-left: auto;">Needs review</span>` : ""}
-            </div>
-
-            <div class="flashcard-content">
-              <strong>${mathHtml(isFlipped ? card.back : card.front)}</strong>
-            </div>
-
-          </div>
-            ${card.sources?.length ? `
-              <div class="flashcard-card-sources">
-                ${card.sources.map(sourceCitationHtml).join("")}
-              </div>
-            ` : ""}
+          <button class="study-flashcard interactive-card ${isFlipped ? "is-flipped" : ""}" type="button" data-card-flip aria-pressed="${isFlipped}" aria-describedby="flashcard-retrieval-hint">
+            <span class="flashcard-side-tag">
+              <span class="flashcard-side-copy"><strong class="flashcard-face-label">${isFlipped ? "Answer" : "Question"}</strong><span class="flashcard-reveal-hint">${isFlipped ? "Answer shown" : "Try to recall it, then reveal"}</span></span>
+              ${rating ? `<span class="pill">${ratingLabel[rating]}</span>` : dueNow ? `<span class="pill" data-tone="busy">Due</span>` : ""}
+            </span>
+            <span class="flashcard-content"><strong>${mathHtml(isFlipped ? card.back : card.front)}</strong></span>
+            <span class="flashcard-reveal-hint">${isFlipped ? "Click to hide the answer" : "Reveal answer"}</span>
+          </button>
+          ${card.sources?.length ? `<div class="flashcard-card-sources">${card.sources.map(sourceCitationHtml).join("")}</div>` : ""}
         </div>
-
-        <div class="flashcard-sorting-bar">
-          <span class="field-hint">Sort card:</span>
-          <div class="flashcard-piles-buttons">
-            <button
-              class="btn ${isCurrentStudyAgain ? "btn-secondary" : "btn-secondary"} pile-btn study-again-btn"
-              type="button"
-              data-study-again
-              title="Mark to study again (Shortcut: 1)"
-            >
-              ${icon("refresh", { size: 16 })} Study again <kbd class="kbd-hint">1</kbd>
-            </button>
-            <button
-              class="btn ${isCurrentMastered ? "btn-primary" : "btn-primary"} pile-btn got-it-btn"
-              type="button"
-              data-got-it
-              title="Mark as mastered (Shortcut: 2)"
-            >
-              ${icon("check", { size: 16 })} Got it <kbd class="kbd-hint">2</kbd>
-            </button>
+        <p id="flashcard-retrieval-hint" class="field-hint" role="note">Take a moment to answer from memory before revealing. After reveal, choose how well you recalled it.</p>
+        ${flashcardError ? `<p class="quiz-error" role="alert">${escapeHtml(flashcardError)}</p>` : ""}
+        ${isSaving ? `<p class="field-hint" role="status" aria-live="polite">Saving your rating…</p>` : ""}
+        ${isFlipped ? `
+          <div class="flashcard-sorting-bar" aria-label="Rate your recall">
+            <span class="field-hint">How well did you recall it?</span>
+            <div class="flashcard-piles-buttons">
+              <button class="btn btn-secondary pile-btn" type="button" data-rating="missed" ${isSaving || (pendingAction && pendingAction !== "missed") ? "disabled" : ""}>${pendingAction === "missed" ? "Retry missed" : "Missed"} <kbd class="kbd-hint">1</kbd></button>
+              <button class="btn btn-secondary pile-btn" type="button" data-rating="unsure" ${isSaving || (pendingAction && pendingAction !== "unsure") ? "disabled" : ""}>${pendingAction === "unsure" ? "Retry unsure" : "Unsure"} <kbd class="kbd-hint">3</kbd></button>
+              <button class="btn btn-primary pile-btn" type="button" data-rating="recalled" ${isSaving || (pendingAction && pendingAction !== "recalled") ? "disabled" : ""}>${pendingAction === "recalled" ? "Retry recalled" : "Recalled"} <kbd class="kbd-hint">2</kbd></button>
+            </div>
+            ${canPersist ? `<div class="flashcard-schedule-actions">
+              <button class="btn btn-ghost btn-small" type="button" data-schedule="snooze" ${isSaving || (pendingAction && pendingAction !== "snooze") ? "disabled" : ""}>${pendingAction === "snooze" ? "Retry snooze" : "Snooze 1 day"}</button>
+              ${state ? `<button class="btn btn-ghost btn-small" type="button" data-schedule="reset" ${isSaving || (pendingAction && pendingAction !== "reset") ? "disabled" : ""}>${pendingAction === "reset" ? "Retry reset" : "Reset this card"}</button>` : ""}
+            </div>` : ""}
           </div>
-        </div>
-
+        ` : `<div class="flashcard-sorting-bar"><span class="field-hint">Reveal the answer before rating your recall.</span></div>`}
         <footer class="study-actions flashcard-nav-bar">
-          <button class="btn btn-secondary" type="button" data-prev ${isFirst ? "disabled" : ""}>
-            ${icon("arrowLeft", { size: 16 })} Previous <kbd class="kbd-hint">&larr;</kbd>
-          </button>
-          <button class="btn btn-ghost" type="button" data-flip-btn>
-            Flip card <kbd class="kbd-hint">Space</kbd>
-          </button>
-          <button class="btn btn-primary" type="button" data-next>
-            ${isLast ? "Finish" : "Next card"} <kbd class="kbd-hint">&rarr;</kbd>
-          </button>
+          <button class="btn btn-secondary" type="button" data-prev ${currentIndex === 0 || isSaving ? "disabled" : ""}>${icon("arrowLeft", { size: 16 })} Previous <kbd class="kbd-hint">&larr;</kbd></button>
+          <button class="btn btn-ghost" type="button" data-flip-btn ${isSaving ? "disabled" : ""}>${isFlipped ? "Hide answer" : "Reveal answer"}</button>
+          <button class="btn btn-primary" type="button" data-next ${isSaving ? "disabled" : ""}>${currentIndex === total - 1 ? "Finish" : "Next card"} <kbd class="kbd-hint">&rarr;</kbd></button>
         </footer>
-      </section>
-    `;
+      </section>`;
     void typesetMath(root);
     bindSourceCitations(root, material);
-
-    root.querySelectorAll("[data-back]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        teardown();
-        onBack?.();
-      });
-    });
-
-    const cardElement = root.querySelector("[data-card-flip]");
-    if (cardElement) {
-      cardElement.addEventListener("click", flipCard);
-      cardElement.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          e.stopPropagation();
-          flipCard();
-        }
-      });
-    }
-
+    root.querySelectorAll("[data-back]").forEach((button) => button.addEventListener("click", () => {
+      teardown();
+      onBack?.();
+    }));
+    root.querySelector("[data-card-flip]")?.addEventListener("click", flipCard);
     root.querySelector("[data-flip-btn]")?.addEventListener("click", flipCard);
     root.querySelector("[data-prev]")?.addEventListener("click", prevCard);
     root.querySelector("[data-next]")?.addEventListener("click", nextCard);
-    root.querySelector("[data-got-it]")?.addEventListener("click", markGotIt);
-    root.querySelector("[data-study-again]")?.addEventListener("click", markStudyAgain);
     root.querySelector("[data-shuffle]")?.addEventListener("click", shuffleCards);
+    root.querySelector("[data-start-due]")?.addEventListener("click", startDueReview);
+    root.querySelectorAll("[data-rating]").forEach((button) => button.addEventListener("click", () => void rateCard(button.dataset.rating)));
+    root.querySelectorAll("[data-schedule]").forEach((button) => button.addEventListener("click", () => void adjustSchedule(button.dataset.schedule)));
+  }
+
+  function hydratePrivateState() {
+    if (!canPersist) return;
+    const requestedVersion = ++hydrationVersion;
+    getFlashcardReviewStateApi(material.id).then((result) => {
+      if (requestedVersion !== hydrationVersion || !root.querySelector(".flashcard-player")) return;
+      for (const item of Array.isArray(result?.items) ? result.items : []) {
+        if (typeof item?.card_id === "string"
+          && deck.some((card) => card.id === item.card_id)
+          && !sessionRatings.has(item.card_id)
+          && !pendingOperations.has(item.card_id)) {
+          reviewState.set(item.card_id, item);
+        }
+      }
+      privateStateStatus = "ready";
+      render();
+    }).catch(() => {
+      if (requestedVersion !== hydrationVersion || !root.querySelector(".flashcard-player")) return;
+      privateStateStatus = "error";
+      render();
+    });
   }
 
   render();
   focusStudyPlayer(root);
+  hydratePrivateState();
 }

@@ -75,8 +75,6 @@ class Settings(BaseSettings):
     lean_lake_executable: str = "lake"
     upload_rate_limit: int = 10
     upload_rate_window_seconds: int = 3600
-    generation_rate_limit: int = 10
-    generation_rate_window_seconds: int = 3600
     study_tutor_rate_limit: int = 30
     study_tutor_rate_window_seconds: int = 60
     study_pdf_executable: str = "tectonic"
@@ -138,8 +136,6 @@ class Settings(BaseSettings):
             raise ValueError("LEAN_TIMEOUT_SECONDS must be between 1 and 60.")
         if self.upload_rate_limit < 1 or self.upload_rate_window_seconds < 1:
             raise ValueError("Upload rate limit and window must both be positive.")
-        if self.generation_rate_limit < 1 or self.generation_rate_window_seconds < 1:
-            raise ValueError("Generation rate limit and window must both be positive.")
         if self.study_tutor_rate_limit < 1 or self.study_tutor_rate_window_seconds < 1:
             raise ValueError("Study tutor rate limit and window must both be positive.")
         if not self.study_pdf_executable.strip():

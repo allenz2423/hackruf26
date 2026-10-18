@@ -84,6 +84,7 @@ class FakeElement {
     this.disabled = false;
     this.hidden = false;
     this.isConnected = true;
+    this.classList = { toggle() {} };
     this.listeners = new Map();
   }
 
@@ -161,8 +162,9 @@ test("a class study tab only includes personal guides originating in that class"
   const classView = studyTabElements();
   await renderStudyTab({ root: classView.root, klass, currentUserId: "user-1" });
 
-  assert.match(classView.list.innerHTML, /Computer Science Source Study Guide/);
-  assert.doesNotMatch(classView.list.innerHTML, /Economics Source Study Guide/);
+  assert.match(classView.list.innerHTML, /Source Study Guide/);
+  assert.match(classView.list.innerHTML, /data-open-material="cs-guide"/);
+  assert.doesNotMatch(classView.list.innerHTML, /economics-guide/);
   assert.deepEqual(klass.materials.map((material) => material.id), ["cs-guide"]);
 
   const localClass = { id: "local-only-class", name: "Local class", uploads: [], materials: [] };

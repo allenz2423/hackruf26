@@ -1,4 +1,5 @@
 import "./styles.css";
+import "./study-folders.css";
 import jotMascot from "./assets/jot-mascot.png";
 import { AnnotationController } from "./annotations.js";
 import { AudioController } from "./audio.js";

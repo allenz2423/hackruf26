@@ -182,14 +182,92 @@ function guideSectionSources(section, blocks) {
   });
 }
 
-function renderGuide(root, material, onRetry = null) {
+function guidePageNavigationHtml(currentPage, sectionCount) {
+  if (sectionCount <= 1) return "";
+  return `
+    <nav class="guide-page-nav" aria-label="Study guide pagination">
+      <button class="btn btn-secondary" type="button" data-guide-previous ${currentPage === 0 ? "disabled" : ""}>
+        Previous section
+      </button>
+      <div class="guide-page-position" aria-live="polite">
+        <span>Section ${currentPage + 1} of ${sectionCount}</span>
+        <progress max="${sectionCount}" value="${currentPage + 1}" aria-label="Study guide progress"></progress>
+      </div>
+      <button class="btn btn-primary" type="button" data-guide-next ${currentPage === sectionCount - 1 ? "disabled" : ""}>
+        Next section
+      </button>
+    </nav>
+  `;
+}
+
+function guideMiniQuizHtml(quiz, material, section, sectionIndex, anchorPrefix, quizStates) {
+  if (!quiz || typeof quiz !== "object" || !Array.isArray(quiz.choices) || quiz.choices.length !== 4) {
+    return "";
+  }
+  const quizKey = `${material.id || "local"}:${section.id || sectionIndex}`;
+  const state = quizStates.get(quizKey) || { selected: null, checked: false };
+  const fieldsetId = `${anchorPrefix}-quiz-${sectionIndex + 1}`;
+  const correct = state.checked && state.selected === quiz.correct_index;
+  const choices = quiz.choices.map((choice, index) => `
+    <label class="guide-mini-quiz-choice" for="${fieldsetId}-choice-${index}">
+      <input id="${fieldsetId}-choice-${index}" type="radio" name="${fieldsetId}" value="${index}"
+        ${state.selected === index ? "checked" : ""} ${state.checked ? "disabled" : ""}>
+      <span>${mathHtml(choice)}</span>
+    </label>
+  `).join("");
+  const answerText = state.checked && !correct
+    ? `<p class="guide-mini-quiz-answer">Correct answer: <strong>${mathHtml(quiz.choices[quiz.correct_index] || "")}</strong></p>`
+    : "";
+
+  return `
+    <section class="guide-mini-quiz" aria-labelledby="${fieldsetId}-title" data-guide-mini-quiz>
+      <p class="guide-mini-quiz-kicker">Quick check</p>
+      <h4 id="${fieldsetId}-title">Try this before moving on</h4>
+      <p class="guide-mini-quiz-question">${mathHtml(quiz.question || "")}</p>
+      <fieldset class="guide-mini-quiz-options" ${state.checked ? "disabled" : ""}>
+        <legend class="visually-hidden">Choose one answer</legend>
+        ${choices}
+      </fieldset>
+      <div class="guide-mini-quiz-feedback${correct ? " is-correct" : state.checked ? " is-incorrect" : ""}"
+        data-guide-mini-quiz-feedback role="status" aria-live="polite" ${state.checked ? "" : "hidden"}>
+        ${state.checked ? `
+          <strong>${correct ? "That’s right." : "Not quite yet."}</strong>
+          <p>${mathHtml(quiz.explanation || "")}</p>
+          ${answerText}
+        ` : ""}
+      </div>
+      <button class="btn btn-secondary btn-small" type="button" data-guide-mini-quiz-check
+        ${state.selected === null ? "disabled" : ""}>
+        ${state.checked ? "Try again" : "Check answer"}
+      </button>
+    </section>
+  `;
+}
+
+function renderGuide(root, material, onRetry = null, {
+  currentPage = 0,
+  quizStates = new Map(),
+  onNavigate = null
+} = {}) {
   const sections = parseGuideSections(material);
   const anchorPrefix = `guide-${String(material.id || "local").replace(/[^a-zA-Z0-9_-]/gu, "-")}`;
+  const page = Math.max(0, Math.min(currentPage, Math.max(0, sections.length - 1)));
   const flashcardsAvailable = normalizeCards(material).length > 0;
   const questionsAvailable = (material.items?.length || material.questions?.length || 0) > 0;
+  const section = sections[page];
+  const blocks = section ? normalizeGuideBlocks(section, page) : [];
+  const sources = section ? guideSectionSources(section, blocks) : [];
+  const quizKey = section ? `${material.id || "local"}:${section.id || page}` : null;
+  if (quizKey && !quizStates.has(quizKey)) quizStates.set(quizKey, { selected: null, checked: false });
 
   root.innerHTML = `
     ${sourceWarningsHtml(material)}
+    ${material.isRemote && material.status === "ready" ? `
+      <p class="guide-quality-note" role="note">
+        <strong>AI-generated · document checks passed.</strong>
+        Structure and export were checked; factual claims and diagram meaning are not independently verified. Use the linked course sources to confirm details.
+      </p>
+    ` : ""}
     ${material.status === "generating" ? `
       <div class="generation-preview-banner" role="status" aria-live="polite">
         <strong>Live preview · not checked yet</strong>
@@ -223,30 +301,29 @@ function renderGuide(root, material, onRetry = null) {
       ` : ""}
     </div>
 
-    ${sections.length > 4 ? `
+    ${sections.length > 1 ? `
       <nav class="guide-toc" aria-label="Study guide sections" data-guide-toc>
         <details>
-          <summary><span>Contents</span><span class="guide-toc-count">${sections.length} sections</span></summary>
+          <summary><span>Jump to section</span><span class="guide-toc-count">${sections.length} sections</span></summary>
           <ol class="guide-toc-list">
             ${sections.map((section, idx) => `
-              <li><a href="#${anchorPrefix}-section-${idx + 1}" data-guide-toc-link>
-                ${mathHtml(section.heading || `Section ${idx + 1}`)}
-              </a></li>
+              <li><button type="button" data-guide-page-target="${idx}" ${idx === page ? 'aria-current="page"' : ""}>
+                <span class="guide-toc-number">${idx + 1}</span>
+                <span>${escapeHtml(section.heading || `Section ${idx + 1}`)}</span>
+              </button></li>
             `).join("")}
           </ol>
         </details>
       </nav>
     ` : ""}
 
+    ${guidePageNavigationHtml(page, sections.length)}
     <article class="guide-content">
-      ${sections.length > 0 ? `
+      ${section ? `
         <div class="guide-sections-list">
-          ${sections.map((section, idx) => {
-            const blocks = normalizeGuideBlocks(section, idx);
-            const sources = guideSectionSources(section, blocks);
-            return `
-            <section id="${anchorPrefix}-section-${idx + 1}" class="guide-section" data-guide-section="${escapeHtml(section.id || `section-${idx + 1}`)}" tabindex="-1">
-              <h3 class="guide-section-heading">${mathHtml(section.heading || `Section ${idx + 1}`)}</h3>
+            <section id="${anchorPrefix}-section-${page + 1}" class="guide-section" data-guide-section="${escapeHtml(section.id || `section-${page + 1}`)}" tabindex="-1">
+              <p class="guide-section-overline">Section ${page + 1} of ${sections.length}</p>
+              <h3 class="guide-section-heading">${mathHtml(section.heading || `Section ${page + 1}`)}</h3>
               <div class="guide-section-blocks">
                 ${blocks.map((block) => `<div class="guide-section-block" data-guide-block="${escapeHtml(block.id)}">${renderStudyGuideBlock(block)}</div>`).join("")}
               </div>
@@ -266,9 +343,8 @@ function renderGuide(root, material, onRetry = null) {
                   </div>
                 </div>
               ` : ""}
+              ${guideMiniQuizHtml(section.mini_quiz, material, section, page, anchorPrefix, quizStates)}
             </section>
-          `;
-          }).join("")}
         </div>
       ` : `
         <p class="muted">${material.status === "generating"
@@ -278,13 +354,79 @@ function renderGuide(root, material, onRetry = null) {
             : "This study guide has no written content yet."}</p>
       `}
     </article>
+    ${guidePageNavigationHtml(page, sections.length)}
   `;
-  root.querySelectorAll("[data-guide-toc-link]").forEach((link) => {
-    link.addEventListener("click", () => {
-      const details = link.closest("details");
+  root.querySelectorAll("[data-guide-page-target], [data-guide-previous], [data-guide-next]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (!onNavigate) return;
+      const target = button.hasAttribute("data-guide-page-target")
+        ? Number(button.dataset.guidePageTarget)
+        : page + (button.hasAttribute("data-guide-next") ? 1 : -1);
+      if (!Number.isInteger(target) || target < 0 || target >= sections.length || target === page) return;
+      const details = button.closest("details");
       if (details) details.open = false;
+      onNavigate(target);
     });
   });
+
+  const quiz = section?.mini_quiz;
+  const quizState = quizKey ? quizStates.get(quizKey) : null;
+  const quizFeedback = root.querySelector("[data-guide-mini-quiz-feedback]");
+  const quizFieldset = root.querySelector(".guide-mini-quiz-options");
+  const quizButton = root.querySelector("[data-guide-mini-quiz-check]");
+  root.querySelectorAll("[data-guide-mini-quiz] input[type='radio']").forEach((input) => {
+    input.addEventListener("change", () => {
+      if (!quizState) return;
+      quizState.selected = Number(input.value);
+      quizState.checked = false;
+      if (quizFeedback) {
+        quizFeedback.hidden = true;
+        quizFeedback.innerHTML = "";
+        quizFeedback.className = "guide-mini-quiz-feedback";
+      }
+      if (quizFieldset) quizFieldset.disabled = false;
+      if (quizButton) {
+        quizButton.disabled = false;
+        quizButton.textContent = "Check answer";
+      }
+    });
+  });
+  quizButton?.addEventListener("click", () => {
+    if (!quizState || !quiz) return;
+    if (quizState.checked) {
+      quizState.selected = null;
+      quizState.checked = false;
+      root.querySelectorAll("[data-guide-mini-quiz] input[type='radio']").forEach((input) => {
+        input.checked = false;
+      });
+      if (quizFeedback) {
+        quizFeedback.hidden = true;
+        quizFeedback.innerHTML = "";
+        quizFeedback.className = "guide-mini-quiz-feedback";
+      }
+      if (quizFieldset) quizFieldset.disabled = false;
+      quizButton.disabled = true;
+      quizButton.textContent = "Check answer";
+      return;
+    }
+    if (!Number.isInteger(quizState.selected)) return;
+    quizState.checked = true;
+    const isCorrect = quizState.selected === quiz.correct_index;
+    if (quizFieldset) quizFieldset.disabled = true;
+    if (quizFeedback) {
+      quizFeedback.hidden = false;
+      quizFeedback.className = `guide-mini-quiz-feedback ${isCorrect ? "is-correct" : "is-incorrect"}`;
+      quizFeedback.innerHTML = `
+        <strong>${isCorrect ? "That’s right." : "Not quite yet."}</strong>
+        <p>${mathHtml(quiz.explanation || "")}</p>
+        ${isCorrect ? "" : `<p class="guide-mini-quiz-answer">Correct answer: <strong>${mathHtml(quiz.choices[quiz.correct_index] || "")}</strong></p>`}
+      `;
+      void typesetMath(quizFeedback);
+    }
+    quizButton.disabled = false;
+    quizButton.textContent = "Try again";
+  });
+
   mountStudyGuideBlocks(root);
   void typesetMath(root);
   bindSourceCitations(root, material);
@@ -331,11 +473,15 @@ function renderGuide(root, material, onRetry = null) {
   }));
 
   root.querySelector("[data-flashcards]")?.addEventListener("click", () => {
-    renderFlashcards(root, material, { onBack: () => renderGuide(root, material, onRetry) });
+    renderFlashcards(root, material, {
+      onBack: () => renderGuide(root, material, onRetry, { currentPage: page, quizStates, onNavigate })
+    });
   });
 
   root.querySelector("[data-practice]")?.addEventListener("click", () => {
-    renderQuestions(root, material, () => renderGuide(root, material, onRetry));
+    renderQuestions(root, material, () => renderGuide(root, material, onRetry, {
+      currentPage: page, quizStates, onNavigate
+    }));
   });
 }
 
@@ -443,8 +589,52 @@ export function openMaterialViewer(material, { onRetry = null } = {}) {
   const dialog = addDialog(material.type || "Study material", { resizable: material.type === "Study guide" });
   const root = dialog.querySelector("#material-session");
   let currentMaterial = material;
+  const guidePositionKey = (materialId) => `jot-guide-position:${String(materialId || "local")}`;
+  const readGuidePosition = (materialId) => {
+    try {
+      const value = Number(window.localStorage?.getItem(guidePositionKey(materialId)) || 0);
+      return Number.isInteger(value) && value >= 0 ? value : 0;
+    } catch {
+      return 0;
+    }
+  };
+  const saveGuidePosition = (materialId, page) => {
+    try { window.localStorage?.setItem(guidePositionKey(materialId), String(page)); }
+    catch { /* browser storage may be disabled */ }
+  };
+  let currentGuideMaterialId = String(material.id || "local");
+  let currentGuidePage = readGuidePosition(currentGuideMaterialId);
+  const miniQuizStates = new Map();
+
+  const renderCurrentGuidePage = () => {
+    const sectionCount = parseGuideSections(currentMaterial).length;
+    currentGuidePage = Math.max(0, Math.min(currentGuidePage, Math.max(0, sectionCount - 1)));
+    renderGuide(
+      root,
+      currentMaterial,
+      typeof onRetry === "function"
+        ? (failedMaterial) => onRetry(failedMaterial, render)
+        : null,
+      {
+        currentPage: currentGuidePage,
+        quizStates: miniQuizStates,
+        onNavigate(page) {
+          currentGuidePage = page;
+          saveGuidePosition(currentGuideMaterialId, page);
+          renderCurrentGuidePage();
+          root.scrollTop = 0;
+          root.querySelector(".guide-section")?.focus?.({ preventScroll: true });
+        }
+      }
+    );
+  };
 
   const render = (nextMaterial) => {
+    const nextGuideMaterialId = String(nextMaterial.id || "local");
+    if (nextGuideMaterialId !== currentGuideMaterialId) {
+      currentGuideMaterialId = nextGuideMaterialId;
+      currentGuidePage = readGuidePosition(currentGuideMaterialId);
+    }
     currentMaterial = nextMaterial;
     const scrollTop = root.scrollTop;
     const previewSectionCount = nextMaterial.previewContent?.sections?.length || 0;
@@ -465,7 +655,13 @@ export function openMaterialViewer(material, { onRetry = null } = {}) {
     const title = dialog.querySelector("#material-dialog-title");
     title.textContent = nextMaterial.title || nextMaterial.type || "Study material";
     const meta = dialog.querySelector("#material-dialog-meta");
-    meta.textContent = `${nextMaterial.scope || "Class review"} - ${countLabel} - ${label}`;
+    const guideSectionCount = nextMaterial.type === "Study guide"
+      ? parseGuideSections(nextMaterial).length
+      : null;
+    const guideCountLabel = guideSectionCount === null
+      ? countLabel
+      : `${guideSectionCount} ${guideSectionCount === 1 ? "section" : "sections"}`;
+    meta.textContent = `${nextMaterial.scope || "Class review"} - ${guideCountLabel} - ${label}`;
 
     const fullscreenButton = dialog.querySelector("[data-fullscreen]");
     if (fullscreenButton) fullscreenButton.hidden = nextMaterial.type !== "Study guide";
@@ -492,9 +688,7 @@ export function openMaterialViewer(material, { onRetry = null } = {}) {
       nextMaterial.content || nextMaterial.sections || nextMaterial.previewContent
       || ["generating", "failed"].includes(nextMaterial.status)
     )) {
-      renderGuide(root, nextMaterial, typeof onRetry === "function"
-        ? (failedMaterial) => onRetry(failedMaterial, render)
-        : null);
+      renderCurrentGuidePage();
     } else {
       renderQuestions(root, nextMaterial);
     }

@@ -850,7 +850,22 @@ async def learning_progress(
     outcomes = []
     xp_rows = []
     projection_rows = []
+    scheduled_review_due: dict[tuple[str, str], bool] = {}
     if class_ids:
+        review_slots = ",".join(f"?{index + 2}" for index in range(len(class_ids)))
+        scheduled_reviews = await db.fetch(
+            "SELECT class_id,concept_id,due_at FROM learning_review_state "
+            f"WHERE owner_id=?1 AND class_id IN ({review_slots})",
+            owner_id,
+            *class_ids,
+        )
+        for review in scheduled_reviews:
+            try:
+                due_at = datetime.fromisoformat(str(review["due_at"]).replace("Z", "+00:00"))
+                is_due = due_at <= now
+            except (TypeError, ValueError):
+                is_due = True
+            scheduled_review_due[(str(review["class_id"]), str(review["concept_id"]))] = is_due
         outcomes = await db.fetch(
             "SELECT o.*,r.feedback_release_policy,r.status AS run_status "
             "FROM assessment_outcomes o JOIN quiz_runs r ON r.id=o.run_id "
@@ -926,6 +941,9 @@ async def learning_progress(
     ):
         rows = grouped.get(concept_id, [])
         assessed = [row for row in rows if int(row["evidence_count"]) > 0]
+        concept_class_id = str(catalog_entry.get("class_id") or "")
+        has_scheduled_review = (concept_class_id, concept_id) in scheduled_review_due
+        is_review_due = scheduled_review_due.get((concept_class_id, concept_id), False)
         if not assessed:
             concepts.append(
                 {
@@ -950,13 +968,12 @@ async def learning_progress(
                     "historical_peak": None,
                     "recent_growth": None,
                     "last_assessed_at": None,
-                    "review_due": False,
+                    "review_due": is_review_due if has_scheduled_review else False,
                 }
             )
             continue
         selected = max(assessed, key=lambda row: int(row["level"]))
         confirmed = [int(row["level"]) for row in rows if int(row["current_confirmed"])]
-        concept_class_id = str(catalog_entry.get("class_id") or "")
         latest = await db.fetchrow(
             "SELECT level,correctness FROM mastery_evidence WHERE owner_id=?1 "
             "AND concept_id=?2 AND class_id=?3 AND correctness>=0.5 "
@@ -1039,7 +1056,9 @@ async def learning_progress(
                 ),
                 "recent_growth": recent_growth,
                 "last_assessed_at": selected["last_assessed_at"],
-                "review_due": bool(selected["review_due"]),
+                "review_due": (
+                    is_review_due if has_scheduled_review else bool(selected["review_due"])
+                ),
             }
         )
     return {

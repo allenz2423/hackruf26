@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import re
+import sqlite3
 import unicodedata
 import zipfile
 from datetime import UTC, datetime
@@ -43,6 +44,10 @@ from app.api.schemas import (
     StudyGuideContent,
     StudyMaterialCreate,
     StudyMaterialFlagCreate,
+    StudyMaterialFolderAssignment,
+    StudyMaterialFolderCreate,
+    StudyMaterialFolderRename,
+    StudyMaterialFolderSummary,
     SyllabusOutline,
     SyllabusOutlineUpdate,
     UploadDetail,
@@ -52,6 +57,7 @@ from app.api.schemas import (
 from app.api.upload_documents import create_default_document, document_detail
 from app.config import Settings
 from app.services.ai_usage_ledger import bind_usage_context, reset_usage_context
+from app.services.assessment_choices import balance_guide_mini_quiz_positions
 from app.services.class_access import (
     can_view_assessment_key,
     can_view_unreleased,
@@ -65,6 +71,8 @@ from app.services.class_access import (
 )
 from app.services.database import SQLiteConnection, SQLiteDatabase, json_value
 from app.services.gemini_content import (
+    LEGACY_STUDY_GUIDE_CHECKPOINT_VERSION,
+    LEGACY_STUDY_GUIDE_CHECKPOINT_VERSIONS,
     MAX_NOTE_CONTEXT_CHARS,
     STUDY_GUIDE_CHECKPOINT_VERSION,
     ContentGenerationFailure,
@@ -289,7 +297,11 @@ def _requested_guide_section_count(material: dict[str, Any]) -> int | None:
 
 
 def _study_guide_checkpoint_fingerprint(
-    *, material: dict[str, Any], sources: list[dict], model_name: str
+    *,
+    material: dict[str, Any],
+    sources: list[dict],
+    model_name: str,
+    checkpoint_version: int = STUDY_GUIDE_CHECKPOINT_VERSION,
 ) -> str:
     """Bind reusable work to every input that can change authored guide content."""
     source_fingerprints: list[dict[str, object]] = []
@@ -324,7 +336,7 @@ def _study_guide_checkpoint_fingerprint(
             }
         )
     payload = {
-        "checkpoint_version": STUDY_GUIDE_CHECKPOINT_VERSION,
+        "checkpoint_version": checkpoint_version,
         "material_kind": material.get("kind"),
         "class_name": material.get("class_name"),
         "scope": json_value(material.get("scope"), {}),
@@ -346,15 +358,26 @@ def _validated_guide_checkpoint_sections(
     row: dict[str, Any],
     *,
     fingerprint: str,
+    legacy_fingerprint: str | None = None,
+    legacy_fingerprints: dict[int, str] | None = None,
     requested_count: int | None,
     source_ids: set[str],
     require_interaction: bool,
 ) -> list[dict] | None:
     """Return a safe completed prefix, or reject a stale/corrupt checkpoint."""
+    checkpoint_version = int(row.get("checkpoint_version") or 0)
+    expected_fingerprint = fingerprint if checkpoint_version == STUDY_GUIDE_CHECKPOINT_VERSION else (
+        (legacy_fingerprints or {}).get(checkpoint_version)
+        or (
+            legacy_fingerprint
+            if checkpoint_version == LEGACY_STUDY_GUIDE_CHECKPOINT_VERSION
+            else None
+        )
+    )
     if (
         requested_count is None
-        or row.get("fingerprint") != fingerprint
-        or int(row.get("checkpoint_version") or 0) != STUDY_GUIDE_CHECKPOINT_VERSION
+        or expected_fingerprint is None
+        or row.get("fingerprint") != expected_fingerprint
     ):
         return None
     try:
@@ -362,13 +385,19 @@ def _validated_guide_checkpoint_sections(
         parsed = StudyGuideContent.model_validate(content)
         if parsed.schema_version != 2:
             return None
-        sections = [section.model_dump(mode="json", exclude_none=True) for section in parsed.sections]
+        sections = [
+            section.model_dump(mode="json", exclude_none=True) for section in parsed.sections
+        ]
         completed = len(sections)
         if (
             completed == 0
             or completed > requested_count
             or int(row.get("completed_sections") or 0) != completed
             or (completed % 4 != 0 and completed != requested_count)
+            or (
+                checkpoint_version == STUDY_GUIDE_CHECKPOINT_VERSION
+                and any(section.get("mini_quiz") is None for section in sections)
+            )
         ):
             return None
         if _guide_citation_validation_issues(sections, source_ids):
@@ -426,11 +455,32 @@ def _material_summary(row: dict[str, Any]) -> MaterialSummary:
             ) if values.get(column)
         ],
         origin_class_id=row.get("origin_class_id"),
+        folder_id=row.get("folder_id"),
         resource_scope=row.get("resource_scope", "class_owned"),
         created_by=row.get("created_by"),
         publication_state=row.get("publication_state", "published"),
         release_at=row.get("release_at"),
         feedback_release_policy=row.get("feedback_release_policy", "after_completion"),
+    )
+
+
+def _normalized_folder_name(name: str) -> tuple[str, str]:
+    display_name = " ".join(unicodedata.normalize("NFKC", name).split())
+    normalized_name = display_name.casefold()
+    if not display_name or len(normalized_name) > 160:
+        raise ApiError(
+            422,
+            "invalid_folder_name",
+            "Choose a folder name with at most 80 characters.",
+        )
+    return display_name, normalized_name
+
+
+def _is_folder_name_conflict(error: sqlite3.IntegrityError) -> bool:
+    message = str(error)
+    return (
+        "UNIQUE constraint failed:" in message
+        and "study_material_folders.normalized_name" in message
     )
 
 
@@ -606,6 +656,7 @@ def _validate_and_export_study_guide(
     content: object,
     sources: list[dict],
     requested_section_count: int | None = None,
+    require_section_mini_quizzes: bool = False,
 ) -> tuple[dict, dict[str, bytes]]:
     """Validate the authored structure and export it without a reviewer-model pass."""
     try:
@@ -617,6 +668,41 @@ def _validate_and_export_study_guide(
             code="invalid_model_response",
             diagnostic_code="quality_guide_schema_invalid",
         ) from exc
+
+    if require_section_mini_quizzes and parsed.schema_version != 2:
+        raise ContentGenerationFailure(
+            "A newly generated study guide must use the section-check format.",
+            code="study_guide_quality_failed",
+            diagnostic_code="guide_schema_version_missing_mini_quizzes",
+        )
+
+    if require_section_mini_quizzes and parsed.schema_version == 2:
+        sections = [
+            section.model_dump(mode="json", exclude_none=True)
+            for section in parsed.sections
+        ]
+        if any(section.get("mini_quiz") is None for section in sections):
+            completer = getattr(service, "complete_study_guide_mini_quizzes", None)
+            if not callable(completer):
+                raise ContentGenerationFailure(
+                    "A newly generated study guide is missing section mini-quizzes.",
+                    code="study_guide_quality_failed",
+                    diagnostic_code="guide_mini_quiz_repair_unavailable",
+                )
+            sections = completer(sections, sources)
+            if any(section.get("mini_quiz") is None for section in sections):
+                raise ContentGenerationFailure(
+                    "A newly generated study guide is still missing section mini-quizzes.",
+                    code="study_guide_quality_failed",
+                    diagnostic_code="guide_mini_quiz_missing",
+                )
+        sections = balance_guide_mini_quiz_positions(
+            sections, seed=str(material_id)
+        )
+        parsed = StudyGuideContent.model_validate(
+            {"format": "study_guide", "schema_version": 2, "sections": sections}
+        )
+        normalized = parsed.model_dump(mode="json", exclude_none=True)
 
     if parsed.schema_version == 2 and service is not None:
         normalizer = getattr(service, "normalize_study_guide", None)
@@ -1106,7 +1192,6 @@ async def create_assessment(
         )
     access = await _owned_class(database, class_id, user_id, required="create")
     await _rate_limit(request, "upload_rate_limiter", user_id)
-    await _rate_limit(request, "generation_rate_limiter", user_id)
     upload_count = await database.fetchval(
         "SELECT count(*) FROM course_notes WHERE class_id = ?1",
         class_id,
@@ -2390,6 +2475,15 @@ async def _create_material_job(
                 sources=sources,
                 model_name=model_name,
             )
+            legacy_checkpoint_fingerprints = {
+                version: _study_guide_checkpoint_fingerprint(
+                    material=material,
+                    sources=sources,
+                    model_name=model_name,
+                    checkpoint_version=version,
+                )
+                for version in LEGACY_STUDY_GUIDE_CHECKPOINT_VERSIONS
+            }
             raw_styles = material_options.get("guide_styles")
             if isinstance(raw_styles, list):
                 require_interaction = "interactive" in raw_styles
@@ -2404,6 +2498,7 @@ async def _create_material_job(
                 restored = _validated_guide_checkpoint_sections(
                     checkpoint,
                     fingerprint=checkpoint_fingerprint,
+                    legacy_fingerprints=legacy_checkpoint_fingerprints,
                     requested_count=_requested_guide_section_count(material),
                     source_ids={str(source["id"]) for source in sources},
                     require_interaction=require_interaction,
@@ -2592,6 +2687,7 @@ async def _create_material_job(
                 content=content,
                 sources=sources,
                 requested_section_count=_requested_guide_section_count(material),
+                require_section_mini_quizzes=True,
             )
             quality_review_version = STUDY_GUIDE_QUALITY_VERSION
         generation_stage = "persist"
@@ -2672,7 +2768,6 @@ async def create_study_material(
         )
     if payload.kind == "study_guide" and not compiler_path(settings):
         raise ApiError(503, "pdf_export_unavailable", "Study-guide PDF generation is unavailable.")
-    await _rate_limit(request, "generation_rate_limiter", user_id)
     scope = payload.scope.model_dump(mode="json")
     options = payload.options.model_dump(mode="json", exclude_none=True)
     if payload.kind == "study_guide":
@@ -2989,6 +3084,8 @@ async def list_study_materials(
     access = await _owned_class(database, class_id, user_id)
     rows = await database.fetch(
         "SELECT m.*, COALESCE(json_extract(m.options, '$.count'), 0) AS requested_count, "
+        "(SELECT a.folder_id FROM study_material_folder_assignments a "
+        "WHERE a.owner_id=?2 AND a.class_id=?1 AND a.material_id=m.id) AS folder_id, "
         "(SELECT a.score_percent FROM study_material_attempts a "
         "WHERE a.material_id = m.id AND a.owner_id=?2 "
         "ORDER BY a.completed_at DESC LIMIT 1) AS latest_score, "
@@ -2998,7 +3095,8 @@ async def list_study_materials(
         ",(SELECT 1 FROM study_material_feedback_releases f "
         "WHERE f.material_id=m.id) AS feedback_released "
         "FROM study_materials m "
-        "WHERE (m.class_id = ?1 OR (m.resource_scope='personal' AND m.origin_class_id=?1 AND m.owner_id=?2)) "
+        "WHERE (m.class_id = ?1 OR "
+        "(m.resource_scope='personal' AND m.origin_class_id=?1 AND m.owner_id=?2)) "
         "ORDER BY m.created_at DESC, m.id",
         class_id,
         user_id,
@@ -3015,11 +3113,169 @@ async def list_study_materials(
     return {"items": visible}
 
 
+@router.get("/api/classes/{class_id}/study-material-folders")
+async def list_study_material_folders(
+    class_id: UUID, request: Request
+) -> dict[str, list[StudyMaterialFolderSummary]]:
+    user_id, database, _ = await _authorize(request)
+    await _owned_class(database, class_id, user_id)
+    rows = await database.fetch(
+        "SELECT id,class_id,name,created_at,updated_at FROM study_material_folders "
+        "WHERE owner_id=?1 AND class_id=?2 ORDER BY name COLLATE NOCASE,id",
+        user_id,
+        class_id,
+    )
+    return {"items": [StudyMaterialFolderSummary(**row) for row in rows]}
+
+
+@router.post("/api/classes/{class_id}/study-material-folders")
+async def create_study_material_folder(
+    class_id: UUID, payload: StudyMaterialFolderCreate, request: Request
+) -> StudyMaterialFolderSummary:
+    user_id, database, _ = await _authorize(request)
+    await _owned_class(database, class_id, user_id)
+    name, normalized_name = _normalized_folder_name(payload.name)
+    try:
+        async with database.acquire() as connection:
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    "INSERT INTO study_material_folders "
+                    "(id,owner_id,class_id,name,normalized_name) VALUES (?1,?2,?3,?4,?5) "
+                    "RETURNING id,class_id,name,created_at,updated_at",
+                    uuid4(),
+                    user_id,
+                    class_id,
+                    name,
+                    normalized_name,
+                )
+    except sqlite3.IntegrityError as exc:
+        if _is_folder_name_conflict(exc):
+            raise ApiError(
+                409, "folder_name_conflict", "A folder with that name already exists."
+            ) from exc
+        raise
+    return StudyMaterialFolderSummary(**row)
+
+
+@router.patch("/api/classes/{class_id}/study-material-folders/{folder_id}")
+async def rename_study_material_folder(
+    class_id: UUID,
+    folder_id: UUID,
+    payload: StudyMaterialFolderRename,
+    request: Request,
+) -> StudyMaterialFolderSummary:
+    user_id, database, _ = await _authorize(request)
+    await _owned_class(database, class_id, user_id)
+    name, normalized_name = _normalized_folder_name(payload.name)
+    try:
+        async with database.acquire() as connection:
+            async with connection.transaction():
+                existing = await connection.fetchrow(
+                    "SELECT id FROM study_material_folders "
+                    "WHERE id=?1 AND owner_id=?2 AND class_id=?3",
+                    folder_id,
+                    user_id,
+                    class_id,
+                )
+                if existing is None:
+                    raise ApiError(404, "not_found", "The requested folder was not found.")
+                row = await connection.fetchrow(
+                    "UPDATE study_material_folders SET name=?4,normalized_name=?5, "
+                    "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                    "WHERE id=?1 AND owner_id=?2 AND class_id=?3 "
+                    "RETURNING id,class_id,name,created_at,updated_at",
+                    folder_id,
+                    user_id,
+                    class_id,
+                    name,
+                    normalized_name,
+                )
+    except sqlite3.IntegrityError as exc:
+        if _is_folder_name_conflict(exc):
+            raise ApiError(
+                409, "folder_name_conflict", "A folder with that name already exists."
+            ) from exc
+        raise
+    return StudyMaterialFolderSummary(**row)
+
+
+@router.delete("/api/classes/{class_id}/study-material-folders/{folder_id}")
+async def delete_study_material_folder(
+    class_id: UUID, folder_id: UUID, request: Request
+) -> dict[str, bool]:
+    user_id, database, _ = await _authorize(request)
+    await _owned_class(database, class_id, user_id)
+    deleted = await database.fetchrow(
+        "DELETE FROM study_material_folders WHERE id=?1 AND owner_id=?2 AND class_id=?3 "
+        "RETURNING id",
+        folder_id,
+        user_id,
+        class_id,
+    )
+    if deleted is None:
+        raise ApiError(404, "not_found", "The requested folder was not found.")
+    return {"deleted": True}
+
+
+@router.put("/api/classes/{class_id}/study-materials/{material_id}/folder")
+async def assign_study_material_folder(
+    class_id: UUID,
+    material_id: UUID,
+    payload: StudyMaterialFolderAssignment,
+    request: Request,
+) -> dict[str, str | None]:
+    user_id, database, _ = await _authorize(request)
+    await _owned_class(database, class_id, user_id)
+    material, _ = await material_access(database, material_id, user_id)
+    material_class_id = (
+        material.get("origin_class_id")
+        if material.get("resource_scope") == "personal"
+        else material.get("class_id")
+    )
+    if str(material_class_id or "") != str(class_id):
+        raise ApiError(404, "not_found", "The requested material was not found in this class.")
+
+    async with database.acquire() as connection:
+        async with connection.transaction():
+            if payload.folder_id is None:
+                await connection.execute(
+                    "DELETE FROM study_material_folder_assignments "
+                    "WHERE owner_id=?1 AND class_id=?2 AND material_id=?3",
+                    user_id,
+                    class_id,
+                    material_id,
+                )
+            else:
+                assignment = await connection.fetchrow(
+                    "INSERT INTO study_material_folder_assignments "
+                    "(owner_id,class_id,material_id,folder_id) "
+                    "SELECT ?1,?2,?3,f.id FROM study_material_folders f "
+                    "WHERE f.id=?4 AND f.owner_id=?1 AND f.class_id=?2 "
+                    "ON CONFLICT(owner_id,material_id) DO UPDATE SET "
+                    "class_id=excluded.class_id,folder_id=excluded.folder_id, "
+                    "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                    "RETURNING folder_id",
+                    user_id,
+                    class_id,
+                    material_id,
+                    payload.folder_id,
+                )
+                if assignment is None:
+                    raise ApiError(404, "not_found", "The requested folder was not found.")
+    return {
+        "material_id": str(material_id),
+        "folder_id": str(payload.folder_id) if payload.folder_id else None,
+    }
+
+
 @router.get("/api/me/study-materials")
 async def list_personal_study_materials(request: Request) -> dict[str, list[MaterialSummary]]:
     user_id, database, _ = await _authorize(request)
     rows = await database.fetch(
         "SELECT m.*,COALESCE(json_extract(m.options,'$.count'),0) AS requested_count, "
+        "(SELECT a.folder_id FROM study_material_folder_assignments a "
+        "WHERE a.owner_id=?1 AND a.material_id=m.id "
+        "AND a.class_id=m.origin_class_id) AS folder_id, "
         "(SELECT a.score_percent FROM study_material_attempts a "
         "WHERE a.material_id=m.id "
         "AND a.owner_id=?1 ORDER BY a.completed_at DESC LIMIT 1) AS latest_score, "
@@ -3043,6 +3299,9 @@ async def get_study_material(
     material, access = await material_access(database, material_id, user_id)
     row = await database.fetchrow(
         "SELECT m.*,COALESCE(json_extract(m.options,'$.count'),0) AS requested_count, "
+        "(SELECT a.folder_id FROM study_material_folder_assignments a "
+        "WHERE a.owner_id=?2 AND a.material_id=m.id "
+        "AND a.class_id=COALESCE(m.class_id,m.origin_class_id)) AS folder_id, "
         "(SELECT a.score_percent FROM study_material_attempts a "
         "WHERE a.material_id=m.id "
         "AND a.owner_id=?2 ORDER BY a.completed_at DESC LIMIT 1) AS latest_score, "
@@ -3143,7 +3402,6 @@ async def retry_study_guide_generation(
         )
     if not compiler_path(settings):
         raise ApiError(503, "pdf_export_unavailable", "Study-guide PDF generation is unavailable.")
-    await _rate_limit(request, "generation_rate_limiter", user_id)
 
     async with database.acquire() as connection:
         async with connection.transaction():

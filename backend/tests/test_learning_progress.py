@@ -484,6 +484,246 @@ class LearningProgressApiTests(unittest.TestCase):
         )
         self.assertEqual(evidence["quality_weight"], 0.25)
 
+    def seed_review_question(self, *, family_id: str) -> str:
+        item_id = str(uuid4())
+        self.client.portal.call(
+            self.db.execute,
+            "INSERT INTO class_question_bank_items "
+            "(id,class_id,family_id,family_signature,prompt,kind,level,language,choices_json,"
+            "grading_json,state,validator_version,generation_model,generation_version,created_by) "
+            "VALUES (?1,?2,?3,?4,?5,'multiple_choice',1,'en',?6,?7,'validated','test-v1',"
+            "'test-model','test-generation-v1',?8)",
+            item_id,
+            self.class_id,
+            family_id,
+            f"signature-{family_id}",
+            f"Which statement describes cellular energy? {family_id}",
+            json.dumps(
+                [
+                    {"id": "a", "text": "Mitochondria support ATP production."},
+                    {"id": "b", "text": "Ribosomes store all cellular energy."},
+                ]
+            ),
+            json.dumps(
+                {
+                    "answer": "a",
+                    "explanation": "Mitochondria support cellular respiration and ATP production.",
+                }
+            ),
+            self.owner["id"],
+        )
+        self.client.portal.call(
+            self.db.execute,
+            "INSERT INTO class_question_bank_concepts(item_id,class_id,concept_id,relation) "
+            "VALUES (?1,?2,?3,'primary')",
+            item_id,
+            self.class_id,
+            self.concept["id"],
+        )
+        self.client.portal.call(
+            self.db.execute,
+            "INSERT INTO class_question_bank_sources("
+            "item_id,class_id,chunk_revision_id,source_order) "
+            "VALUES (?1,?2,?3,0)",
+            item_id,
+            self.class_id,
+            self.chunk_id,
+        )
+        return item_id
+
+    def seed_review_recommendation(self, evidence_cursor: str) -> str:
+        recommendation_id = str(uuid4())
+        self.client.portal.call(
+            self.db.execute,
+            "INSERT INTO learning_recommendations "
+            "(id,owner_id,class_id,concept_id,recommendation_type,chosen_goal,label,reason,"
+            "supporting_evidence_ids,evidence_cursor) "
+            "VALUES (?1,?2,?3,?4,'review','review','Review cellular energy',"
+            "'Short source-linked review','[]',?5)",
+            recommendation_id,
+            self.reader["id"],
+            self.class_id,
+            self.concept["id"],
+            evidence_cursor,
+        )
+        return recommendation_id
+
+    def test_short_learning_review_hides_answer_persists_due_date_and_uses_new_family(self) -> None:
+        first_item = self.seed_review_question(family_id="review-family-a")
+        recommendation_id = self.seed_review_recommendation("initial-review")
+        response = self.call(
+            "post",
+            f"/api/learning/recommendations/{recommendation_id}/review",
+            "progress_reader",
+            json={},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        session = response.json()
+        public_json = json.dumps(session).casefold()
+        self.assertEqual(session["status"], "in_progress")
+        self.assertFalse(session["mastery_updated"])
+        self.assertEqual(session["citations"], [])
+        self.assertNotIn("correct_answer", public_json)
+        self.assertNotIn("explanation", public_json)
+        self.assertNotIn(first_item, public_json)
+        correct_choice = self.client.portal.call(
+            self.db.fetchval,
+            "SELECT json_extract(private_snapshot,'$.correct_choice_id') "
+            "FROM learning_review_sessions WHERE id=?1",
+            session["id"],
+        )
+        before_evidence = self.client.portal.call(
+            self.db.fetchval,
+            "SELECT count(*) FROM mastery_evidence WHERE owner_id=?1 AND concept_id=?2",
+            self.reader["id"],
+            self.concept["id"],
+        )
+        answered = self.call(
+            "post",
+            f"/api/learning/reviews/{session['id']}/answer",
+            "progress_reader",
+            json={"choice_id": correct_choice},
+        )
+        self.assertEqual(answered.status_code, 200, answered.text)
+        self.assertTrue(answered.json()["correct"])
+        self.assertFalse(answered.json()["mastery_updated"])
+        self.assertTrue(answered.json()["correct_answer"])
+        self.assertTrue(answered.json()["citations"])
+        self.assertGreater(
+            datetime.fromisoformat(answered.json()["next_due_at"].replace("Z", "+00:00")),
+            datetime.now(UTC),
+        )
+        after_evidence = self.client.portal.call(
+            self.db.fetchval,
+            "SELECT count(*) FROM mastery_evidence WHERE owner_id=?1 AND concept_id=?2",
+            self.reader["id"],
+            self.concept["id"],
+        )
+        self.assertEqual(after_evidence, before_evidence)
+
+        second_item = self.seed_review_question(family_id="review-family-b")
+        self.assertNotEqual(first_item, second_item)
+        self.client.portal.call(
+            self.db.execute,
+            "UPDATE learning_review_state SET due_at='2000-01-01T00:00:00Z' "
+            "WHERE owner_id=?1 AND class_id=?2 AND concept_id=?3",
+            self.reader["id"],
+            self.class_id,
+            self.concept["id"],
+        )
+        second_recommendation = self.seed_review_recommendation(f"review:{session['id']}")
+        second = self.call(
+            "post",
+            f"/api/learning/recommendations/{second_recommendation}/review",
+            "progress_reader",
+            json={},
+        )
+        self.assertEqual(second.status_code, 200, second.text)
+        selected_family = self.client.portal.call(
+            self.db.fetchval,
+            "SELECT family_id FROM learning_review_sessions WHERE id=?1",
+            second.json()["id"],
+        )
+        self.assertNotEqual(selected_family, "review-family-a")
+        self.assertEqual(selected_family, "review-family-b")
+
+    def test_revoked_source_commits_review_abandonment_and_is_owner_scoped(self) -> None:
+        self.seed_review_question(family_id="revoked-review-family")
+        recommendation_id = self.seed_review_recommendation("revoked-review")
+        started = self.call(
+            "post",
+            f"/api/learning/recommendations/{recommendation_id}/review",
+            "progress_reader",
+            json={},
+        )
+        self.assertEqual(started.status_code, 200, started.text)
+        session_id = started.json()["id"]
+        stranger = self.call(
+            "post",
+            f"/api/learning/reviews/{session_id}/answer",
+            "progress_owner",
+            json={"choice_id": started.json()["choices"][0]["id"]},
+        )
+        self.assertEqual(stranger.status_code, 404, stranger.text)
+        self.client.portal.call(
+            self.db.execute,
+            "UPDATE course_notes SET status='failed' WHERE id=?1",
+            self.note_id,
+        )
+        revoked = self.call(
+            "post",
+            f"/api/learning/reviews/{session_id}/answer",
+            "progress_reader",
+            json={"choice_id": started.json()["choices"][0]["id"]},
+        )
+        self.assertEqual(revoked.status_code, 404, revoked.text)
+        status = self.client.portal.call(
+            self.db.fetchval,
+            "SELECT status FROM learning_review_sessions WHERE id=?1",
+            session_id,
+        )
+        self.assertEqual(status, "abandoned")
+
+    def test_flashcard_review_state_is_private_idempotent_and_clearable(self) -> None:
+        material_id = str(uuid4())
+        self.client.portal.call(
+            self.db.execute,
+            "INSERT INTO study_materials("
+            "id,resource_scope,owner_id,created_by,kind,title,status,content) "
+            "VALUES (?1,'personal',?2,?2,'flashcards','Private cards','ready',?3)",
+            material_id,
+            self.reader["id"],
+            json.dumps(
+                {
+                    "format": "flashcards",
+                    "cards": [
+                        {"id": "card-1", "front": "ATP?", "back": "Cellular energy currency."}
+                    ],
+                }
+            ),
+        )
+        empty = self.call(
+            "get", f"/api/study-materials/{material_id}/flashcard-review", "progress_reader"
+        )
+        self.assertEqual(empty.status_code, 200, empty.text)
+        self.assertEqual(empty.json()["items"], [])
+        self.assertFalse(empty.json()["mastery_updated"])
+        operation_id = str(uuid4())
+        saved = self.call(
+            "put",
+            f"/api/study-materials/{material_id}/flashcard-review",
+            "progress_reader",
+            json={"operation_id": operation_id, "card_id": "card-1", "rating": "missed"},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()["rating"], "missed")
+        self.assertFalse(saved.json()["mastery_updated"])
+        replay = self.call(
+            "put",
+            f"/api/study-materials/{material_id}/flashcard-review",
+            "progress_reader",
+            json={"operation_id": operation_id, "card_id": "card-1", "rating": "recalled"},
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["rating"], "missed")
+        forbidden = self.call(
+            "get", f"/api/study-materials/{material_id}/flashcard-review", "progress_owner"
+        )
+        self.assertEqual(forbidden.status_code, 404, forbidden.text)
+        cleared = self.call(
+            "delete", f"/api/study-materials/{material_id}/flashcard-review", "progress_reader"
+        )
+        self.assertEqual(cleared.status_code, 204, cleared.text)
+        self.assertEqual(
+            self.client.portal.call(
+                self.db.fetchval,
+                "SELECT count(*) FROM flashcard_review_state WHERE owner_id=?1 AND material_id=?2",
+                self.reader["id"],
+                material_id,
+            ),
+            0,
+        )
+
     async def _quality_weight(self, owner_id: str, private: dict) -> float:
         async with self.db.acquire() as connection:
             return await _quality_weight_for_outcome(

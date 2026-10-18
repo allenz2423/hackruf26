@@ -130,7 +130,7 @@ test("learning-goal preferences are allowlisted and exposed through an accessibl
   });
   assert.match(selector, /<label for="learning-goal-select">Choose your practice goal<\/label>/);
   assert.match(selector, /aria-describedby="learning-goal-status"/);
-  assert.match(selector, /value="exam_prep" selected>Prepare for an exam/);
+  assert.match(selector, /value="exam_prep" selected>Simulate an exam/);
   assert.match(selector, /role="status" aria-live="polite">Saved\./);
   const unavailable = learningGoalControlMarkup({
     chosenGoal: "balanced", available: false, status: "<script>hidden<\/script>", statusRole: "alert"
@@ -243,7 +243,7 @@ test("history is filtered to the requested concept and recommendations escape pr
   assert.throws(() => normalizeLearningHistory({ concept_id: "another-student-concept", snapshots: [] }, "c1"), /expected format/);
 
   const recommendations = normalizeLearningRecommendations({ chosen_goal: "balanced", items: [{
-    id: "r1", type: "review", concept_id: "c1", label: "Review cell division",
+    id: "r1", type: "practice", concept_id: "c1", label: "Practice cell division",
     reason: '<img src=x onerror="alert(1)">', evidence_ids: ["private"],
     resource: { type: "quiz", id: "q1", title: "Quiz 1", answer_key: "private" },
     state: "suggested", created_at: "2026-10-14T12:00:00Z", owner_id: "private",
@@ -267,6 +267,18 @@ test("history is filtered to the requested concept and recommendations escape pr
     "engagement:r1:active",
     "navigate:#/classes/class-1/study"
   ]);
+  const reviewMarkup = learningRecommendationsMarkup(normalizeLearningRecommendations({
+    chosen_goal: "review",
+    items: [{
+      id: "r2", type: "review", concept_id: "c1", label: "Review cell division",
+      reason: "Try a short source-linked check.", state: "suggested",
+      created_at: "2026-10-14T12:00:00Z", class_id: "class-1",
+      href: "#/classes/class-1/study"
+    }]
+  }));
+  assert.match(reviewMarkup, /data-review-start="r2">Start short review/);
+  assert.match(reviewMarkup, /data-review-session="r2"/);
+  assert.doesNotMatch(reviewMarkup, /Mark complete/);
   const activeRecommendation = normalizeLearningRecommendations({ chosen_goal: "review", items: [{
     id: "r-active", type: "practice", label: "Keep practicing", reason: "Continue your current set",
     state: "active", created_at: "2026-10-14T12:00:00Z", class_id: "class-2", href: "#/classes/class-2/study"

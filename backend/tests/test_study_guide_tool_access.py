@@ -28,6 +28,17 @@ def section(upload_id: str, text: str = "A source-grounded explanation.") -> Stu
             "heading": "Core idea",
             "sources": [{"upload_id": upload_id}],
             "blocks": [{"type": "paragraph", "text": text}],
+            "mini_quiz": {
+                "question": "Which statement best matches this section?",
+                "choices": [
+                    "The source-grounded explanation",
+                    "A reversal",
+                    "An unrelated idea",
+                    "An unsupported claim",
+                ],
+                "correct_index": 0,
+                "explanation": "The first choice matches the explanation above.",
+            },
         }
     )
 
@@ -36,7 +47,7 @@ def batch(upload_id: str, *, request: list[str] | None = None, text: str = "Draf
     return _StudyGuideSectionBatch(
         format="study_guide",
         schema_version=2,
-        sections=[section(upload_id, text)],
+        sections=[section(upload_id, text).model_dump(mode="json")],
         requested_tool_ids=request or [],
     )
 
@@ -69,6 +80,8 @@ class StudyGuideToolAccessTests(unittest.TestCase):
 
         self.assertIn("360-unit-wide viewBox", prompt)
         self.assertIn("18–22 units for primary labels", prompt)
+        self.assertIn("12 rendered CSS pixels", prompt)
+        self.assertIn("deterministic phone-text finding", prompt)
         self.assertIn("<animate attributeName=", prompt)
         self.assertIn(
             "include at least four such activities in distinct sections",
@@ -231,6 +244,19 @@ class StudyGuideToolAccessTests(unittest.TestCase):
                     {
                         "heading": "Cell structure",
                         "sources": [{"upload_id": self.upload_id}],
+                        "mini_quiz": {
+                            "question": "What does the highlighted structure do?",
+                            "choices": [
+                                "Stores genetic information",
+                                "Produces light",
+                                "Digests food outside the cell",
+                                "A claim not supported here",
+                            ],
+                            "correct_index": 0,
+                            "explanation": (
+                                "The section explains that the nucleus stores genetic information."
+                            ),
+                        },
                         "blocks": [
                             {
                                 "type": "labeled_diagram",
@@ -245,7 +271,7 @@ class StudyGuideToolAccessTests(unittest.TestCase):
                             },
                         ],
                     }
-                )
+                ).model_dump(mode="json")
             ],
         )
         self.service._generate_json = Mock(

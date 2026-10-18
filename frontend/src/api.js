@@ -288,6 +288,34 @@ export function updateLearningRecommendationStateApi(recommendationId, state) {
   });
 }
 
+export function startLearningReviewApi(recommendationId) {
+  return apiFetch(`/api/learning/recommendations/${encodeURIComponent(recommendationId)}/review`, {
+    method: "POST", body: "{}"
+  });
+}
+
+export function submitLearningReviewAnswerApi(sessionId, choiceId) {
+  return apiFetch(`/api/learning/reviews/${encodeURIComponent(sessionId)}/answer`, {
+    method: "POST", body: JSON.stringify({ choice_id: choiceId })
+  });
+}
+
+export function getFlashcardReviewStateApi(materialId, { signal } = {}) {
+  return apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/flashcard-review`, { signal });
+}
+
+export function updateFlashcardReviewStateApi(materialId, payload) {
+  return apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/flashcard-review`, {
+    method: "PUT", body: JSON.stringify(payload)
+  });
+}
+
+export function clearFlashcardReviewStateApi(materialId) {
+  return apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/flashcard-review`, {
+    method: "DELETE"
+  });
+}
+
 export function createMasteryLadderApi(payload) {
   return apiFetch("/api/mastery-ladders", { method: "POST", body: JSON.stringify(payload) });
 }
@@ -615,8 +643,66 @@ export async function updateSyllabusApi(classId, outline) {
 
 // Study Materials endpoints
 export async function getStudyMaterialsApi(classId) {
-  const res = await apiFetch(`/api/classes/${encodeURIComponent(classId)}/study-materials`);
+  const classPath = `/api/classes/${encodeURIComponent(classId)}`;
+  const [res, folderResponse] = await Promise.all([
+    apiFetch(`${classPath}/study-materials`),
+    apiFetch(`${classPath}/study-material-organization/assignments`)
+  ]);
+  const assignments = folderResponse.assignments || {};
+  return (res.items || []).map((item) => ({
+    ...item,
+    folder_id: assignments[item.id] || item.folder_id || null
+  }));
+}
+
+export async function getStudyMaterialFoldersApi(classId) {
+  const res = await apiFetch(`/api/classes/${encodeURIComponent(classId)}/study-material-organization/folders`);
   return res.items || [];
+}
+
+export async function createStudyMaterialFolderApi(classId, name) {
+  return apiFetch(`/api/classes/${encodeURIComponent(classId)}/study-material-organization/folders`, {
+    method: "POST",
+    body: JSON.stringify({ name })
+  });
+}
+
+export async function renameStudyMaterialFolderApi(classId, folderId, name) {
+  return apiFetch(
+    `/api/classes/${encodeURIComponent(classId)}/study-material-organization/folders/${encodeURIComponent(folderId)}`,
+    { method: "PATCH", body: JSON.stringify({ name }) }
+  );
+}
+
+export async function deleteStudyMaterialFolderApi(classId, folderId) {
+  return apiFetch(
+    `/api/classes/${encodeURIComponent(classId)}/study-material-organization/folders/${encodeURIComponent(folderId)}`,
+    { method: "DELETE" }
+  );
+}
+
+export async function assignStudyMaterialFolderApi(classId, materialId, folderId = null) {
+  return apiFetch(
+    `/api/classes/${encodeURIComponent(classId)}/study-material-organization/materials/${encodeURIComponent(materialId)}/folder`,
+    { method: "PUT", body: JSON.stringify({ folder_id: folderId }) }
+  );
+}
+
+export async function proposeStudyMaterialOrganizationApi(classId) {
+  return apiFetch(
+    `/api/classes/${encodeURIComponent(classId)}/study-material-organization/propose`,
+    { method: "POST", body: "{}" }
+  );
+}
+
+export async function applyStudyMaterialOrganizationApi(classId, folders, unfiledMaterialIds = []) {
+  return apiFetch(
+    `/api/classes/${encodeURIComponent(classId)}/study-material-organization/apply`,
+    {
+      method: "POST",
+      body: JSON.stringify({ folders, unfiled_material_ids: unfiledMaterialIds })
+    }
+  );
 }
 
 export async function getMyStudyMaterialsApi() {

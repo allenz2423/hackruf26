@@ -337,16 +337,6 @@ async def create_upload_document(
         raise ApiError(
             503, "document_generation_unavailable", "Upload document generation is unavailable."
         )
-    retry_after = await request.app.state.generation_rate_limiter.check(
-        str(await enforce_sqlite_api_policy(request, request.app.state.settings))
-    )
-    if retry_after is not None:
-        raise ApiError(
-            429,
-            "generation_rate_limited",
-            "Too many requests. Please wait before trying again.",
-            retry_after,
-        )
     job_id, created = await _reserve_document(db, upload_id, payload.detail_level)
     if created:
         background_tasks.add_task(

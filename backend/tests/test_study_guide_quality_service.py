@@ -60,6 +60,17 @@ def section(upload_id, *, heading: str = "Traction", text: str = "Traction is a 
             "key_terms": ["traction"],
             "sources": [{"upload_id": str(upload_id), "page": 2}],
             "blocks": [{"type": "paragraph", "text": text}],
+            "mini_quiz": {
+                "question": "What does traction describe?",
+                "choices": [
+                    "Stress acting on a plane",
+                    "A material's color",
+                    "A chemical reaction",
+                    "An unrelated measurement",
+                ],
+                "correct_index": 0,
+                "explanation": "Traction is the stress vector acting on a plane.",
+            },
         }
     )
 
@@ -2098,7 +2109,11 @@ class StudyGuideQualityServiceTests(unittest.TestCase):
         self.service._generate_json = Mock(
             return_value=_StudyGuideRepairBatch(
                 format="study_guide",
-                sections=[section(self.upload_id, heading="Traction and stress")],
+                sections=[
+                    section(self.upload_id, heading="Traction and stress").model_dump(
+                        mode="json"
+                    )
+                ],
             )
         )
         old = {

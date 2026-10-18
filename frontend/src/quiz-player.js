@@ -6,6 +6,7 @@ import {
   submitReasoningAnswerApi, retryReasoningFeedbackApi
 } from "./api.js";
 import { sourceCitationHtml, bindSourceCitations, sourceWarningsHtml } from "./source-citations.js";
+import { generatedStudyQualityNote } from "./study-quality-note.js";
 import { StudyTutorPanel } from "./study-tutor.js";
 import { LiveSessionController } from "./live-session.js";
 import { normalizePublicQuizOutcome, normalizePublicQuizRun, publicRunReview, quizOutcomeMarkup } from "./quiz-run.js";
@@ -233,28 +234,76 @@ function writeReasoningDraft(runId, questionId, draft) {
   catch { /* storage may be disabled */ }
 }
 
-function renderRemoteQuizStart(root, material, options, { preferredMode = "standard", forceNewRun = false } = {}) {
+function renderRemoteQuizStart(root, material, options, {
+  preferredMode = "standard",
+  forceNewRun = false,
+  timed = false
+} = {}) {
+  const isExamSimulation = material.type === "Practice test";
+  const configuredTimeLimit = material.timeLimitMinutes || material.examTimeLimitMinutes || null;
+  const timerChoices = [...new Set([15, 30, 45, 60, 90, 120, configuredTimeLimit]
+    .filter((value) => Number.isInteger(value) && value > 0 && value <= 300))].sort((a, b) => a - b);
   root.innerHTML = `
     <section class="assessment-view quiz-mode-start">
+      ${sourceWarningsHtml(material)}
+      ${generatedStudyQualityNote(material, isExamSimulation ? "practice test" : "quiz")}
       <button class="back-link assessment-back" type="button" data-start-back>&larr; Back to study materials</button>
       <header class="assessment-header">
-        <div><p class="eyebrow">Start quiz</p><h2>${escapeHtml(material.title || material.type)}</h2></div>
+        <div><p class="eyebrow">${isExamSimulation ? "Practice or exam simulation" : "Start practice quiz"}</p><h2>${escapeHtml(material.title || material.type)}</h2></div>
       </header>
-      <p class="muted">Choose how you want to take this quiz. Standard mode works as usual. Reasoning Mode asks you to explain your thinking before final submission.${material.timeLimitMinutes ? " Reasoning Mode is untimed; choose Standard mode to keep the existing timer." : ""}</p>
+      <p class="muted">${isExamSimulation ? "Practice mode is untimed and gives feedback after you finish. Exam simulation uses a timer; you can adjust it or turn it off." : "Practice at your own pace. You can choose optional Reasoning Mode, which asks you to explain your thinking before final submission."}</p>
       <fieldset class="quiz-mode-options">
-        <legend>Quiz mode</legend>
-        <label class="practice-option"><input type="radio" name="quiz-mode" value="standard" ${preferredMode === "standard" ? "checked" : ""}><span><strong>Standard quiz</strong><br>Answer and submit questions as usual.</span></label>
+        <legend>${isExamSimulation ? "Practice mode" : "Quiz mode"}</legend>
+        <label class="practice-option"><input type="radio" name="quiz-mode" value="standard" ${preferredMode === "standard" ? "checked" : ""}><span><strong>${isExamSimulation ? "Practice mode" : "Standard quiz"}</strong><br>${isExamSimulation ? "Untimed questions with feedback after submission." : "Answer and submit questions as usual."}</span></label>
         <label class="practice-option"><input type="radio" name="quiz-mode" value="reasoning" ${preferredMode === "reasoning" ? "checked" : ""}><span><strong>Reasoning Mode</strong><br>Meaningful reasoning unlocks submission; correctness is graded separately.</span></label>
       </fieldset>
+      ${isExamSimulation ? `<fieldset class="quiz-mode-options exam-timing-options"><legend>Time limit</legend><label class="practice-option"><input type="radio" name="exam-timing" value="untimed" ${timed ? "" : "checked"}><span><strong>Untimed practice</strong><br>Take as long as you need.</span></label><label class="practice-option"><input type="radio" name="exam-timing" value="timed" ${timed ? "checked" : ""}><span><strong>Timed exam simulation</strong><br><span data-timer-summary>${configuredTimeLimit || 15} minutes; a reminder appears with one minute left.</span></span></label><label class="field"><span>Timer length</span><select name="exam-time-limit" ${timed ? "" : "disabled"}>${timerChoices.map((minutes) => `<option value="${minutes}" ${configuredTimeLimit === minutes ? "selected" : ""}>${minutes} minutes</option>`).join("")}</select></label></fieldset>` : ""}
       <p class="quiz-start-error" role="alert" hidden></p>
-      <div class="assessment-actions"><button class="btn btn-secondary" type="button" data-start-back>Cancel</button><button class="btn btn-primary" type="button" data-start-quiz>Start quiz</button></div>
+      <div class="assessment-actions"><button class="btn btn-secondary" type="button" data-start-back>Cancel</button><button class="btn btn-primary" type="button" data-start-quiz>${preferredMode === "reasoning" ? "Start Reasoning Mode" : isExamSimulation ? (timed ? "Start timed simulation" : "Start untimed practice") : "Start quiz"}</button></div>
     </section>`;
   root.querySelectorAll("[data-start-back]").forEach((button) => button.addEventListener("click", () => options.onBack?.()));
   focusStudyPlayer(root);
   const startButton = root.querySelector("[data-start-quiz]");
   const errorNode = root.querySelector(".quiz-start-error");
+  const updateStartLabel = () => {
+    const mode = root.querySelector('input[name="quiz-mode"]:checked')?.value;
+    const timing = root.querySelector('input[name="exam-timing"]:checked')?.value;
+    if (mode === "reasoning") startButton.textContent = "Start Reasoning Mode";
+    else if (isExamSimulation) startButton.textContent = timing === "timed" ? "Start timed simulation" : "Start untimed practice";
+    else startButton.textContent = "Start quiz";
+  };
+  const updateTimerSummary = () => {
+    const summary = root.querySelector("[data-timer-summary]");
+    const minutes = Number(root.querySelector('select[name="exam-time-limit"]')?.value);
+    if (summary && Number.isInteger(minutes)) {
+      summary.textContent = `${minutes} minutes; a reminder appears with one minute left.`;
+    }
+  };
+  root.querySelectorAll('input[name="exam-timing"]').forEach((input) => input.addEventListener("change", () => {
+    const timedSelected = root.querySelector('input[name="exam-timing"]:checked')?.value === "timed";
+    const timerSelect = root.querySelector('select[name="exam-time-limit"]');
+    if (timerSelect) timerSelect.disabled = !timedSelected;
+    updateStartLabel();
+    updateTimerSummary();
+  }));
+  root.querySelector('select[name="exam-time-limit"]')?.addEventListener("change", updateTimerSummary);
+  root.querySelectorAll('input[name="quiz-mode"]').forEach((input) => input.addEventListener("change", () => {
+    const reasoningSelected = root.querySelector('input[name="quiz-mode"]:checked')?.value === "reasoning";
+    const timingSelected = root.querySelector('input[name="exam-timing"]:checked')?.value === "timed";
+    const timingControls = root.querySelectorAll('input[name="exam-timing"], select[name="exam-time-limit"]');
+    timingControls.forEach((control) => { control.disabled = reasoningSelected || (control.name === "exam-time-limit" && !timingSelected); });
+    updateStartLabel();
+  }));
   startButton.addEventListener("click", async () => {
     const mode = root.querySelector('input[name="quiz-mode"]:checked')?.value === "reasoning" ? "reasoning" : "standard";
+    const timing = isExamSimulation && mode !== "reasoning"
+      && root.querySelector('input[name="exam-timing"]:checked')?.value === "timed";
+    const selectedLimit = Number(root.querySelector('select[name="exam-time-limit"]')?.value);
+    const sessionMaterial = {
+      ...material,
+      examTimeLimitMinutes: configuredTimeLimit,
+      timeLimitMinutes: timing ? (Number.isInteger(selectedLimit) ? selectedLimit : configuredTimeLimit || 15) : null
+    };
     startButton.disabled = true;
     startButton.textContent = "Starting…";
     errorNode.hidden = true;
@@ -263,10 +312,10 @@ function renderRemoteQuizStart(root, material, options, { preferredMode = "stand
       let run = await createQuizRunApi(material.id, operationId, mode);
       run = normalizePublicQuizRun(run, { materialId: material.id, mode });
       if (mode === "reasoning") {
-        renderReasoningQuizPlayer(root, { ...material, questions: run.questions }, options, run);
+        renderReasoningQuizPlayer(root, { ...sessionMaterial, timeLimitMinutes: null, questions: run.questions }, options, run);
         focusStudyPlayer(root);
       } else {
-        renderQuizPlayer(root, { ...material, questions: run.questions }, {
+        renderQuizPlayer(root, { ...sessionMaterial, questions: run.questions }, {
           ...options, runContext: { mode, runId: run.run_id, run }
         });
       }
@@ -274,7 +323,7 @@ function renderRemoteQuizStart(root, material, options, { preferredMode = "stand
       errorNode.textContent = error.message || "The quiz could not start. Try again.";
       errorNode.hidden = false;
       startButton.disabled = false;
-      startButton.textContent = "Start quiz";
+      updateStartLabel();
     }
   });
 }
@@ -565,6 +614,7 @@ function renderReasoningQuizPlayer(root, material, options, initialRun) {
     root.innerHTML = `
       <section class="assessment-view">
         ${sourceWarningsHtml(material)}
+        ${generatedStudyQualityNote(material, material.type === "Practice test" ? "practice test" : "quiz")}
         <button class="back-link assessment-back" type="button" data-back-to-study>&larr; Back to study materials</button>
         <header class="assessment-header">
           <div><p class="eyebrow">Reasoning Mode results</p><h2>${escapeHtml(material.title || material.type)}</h2></div>
@@ -607,7 +657,7 @@ function renderReasoningQuizPlayer(root, material, options, initialRun) {
             </article>`;
           }).join("")}
         </div>
-        <div class="assessment-actions"><button class="btn btn-secondary" type="button" data-retake>Try again</button><button class="btn btn-primary" type="button" data-back-to-study>Back to study materials</button></div>
+        <div class="assessment-actions"><button class="btn btn-secondary" type="button" data-retake>Try again</button>${material.isRemote ? `<a class="btn btn-secondary" href="#/progress">Review suggested next steps</a>` : ""}<button class="btn btn-primary" type="button" data-back-to-study>Back to study materials</button></div>
       </section>`;
     void typesetMath(root);
     bindSourceCitations(root, material);
@@ -675,6 +725,7 @@ function renderReasoningQuizPlayer(root, material, options, initialRun) {
     root.innerHTML = `
       <section class="assessment-view">
         ${sourceWarningsHtml(material)}
+        ${generatedStudyQualityNote(material, material.type === "Practice test" ? "practice test" : "quiz")}
         <button class="back-link assessment-back" type="button" data-reasoning-back>&larr; Back to study materials</button>
         <header class="assessment-header"><div><p class="eyebrow">Reasoning Mode</p><h2>${escapeHtml(material.title || material.type)}</h2><p class="muted">Select or draft answers at any time. Submission unlocks after the backend accepts a meaningful reasoning attempt.</p></div><div class="assessment-score" role="status"><strong>${byQuestion.size}/${material.questions.length}</strong><span>questions in this run</span></div></header>
         <div class="reasoning-question-list">
@@ -938,9 +989,16 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
     clearTimer();
     if (deadline === null || disposed) return;
     const countdown = root.querySelector("#assessment-countdown");
+    const warning = root.querySelector("#assessment-timer-warning");
+    let warned = false;
     const updateCountdown = () => {
       const secondsLeft = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
       if (countdown) countdown.textContent = formatTime(secondsLeft);
+      if (secondsLeft <= 60 && !warned && warning) {
+        warned = true;
+        warning.hidden = false;
+        warning.textContent = "One minute remains. You can submit your work now or continue until time expires.";
+      }
       if (secondsLeft <= 0) {
         clearTimer();
         void submit(root.querySelector("#assessment-form"), true);
@@ -965,6 +1023,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
     root.innerHTML = `
       <section class="assessment-view">
         ${sourceWarningsHtml(material)}
+        ${generatedStudyQualityNote(material, material.type === "Practice test" ? "practice test" : "quiz")}
         <button class="back-link assessment-back" type="button" data-back-to-study>&larr; Back to study materials</button>
         <header class="assessment-header">
           <div>
@@ -1048,6 +1107,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
         </div>
         <div class="assessment-actions">
           <button class="btn btn-secondary" type="button" data-retake>${material.isRemote ? (material.type === "Practice test" ? "Retake practice test" : "Retake quiz") : "Try again"}</button>
+          ${material.isRemote ? `<a class="btn btn-secondary" href="#/progress">Review suggested next steps</a>` : ""}
           <button class="btn btn-primary" type="button" data-back-to-study>Back to study materials</button>
         </div>
       </section>
@@ -1067,7 +1127,8 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
       if (material.isRemote) {
         renderRemoteQuizStart(root, material, { onBack, onAttemptCompleted }, {
           preferredMode: runContext?.mode || "standard",
-          forceNewRun: true
+          forceNewRun: true,
+          timed: Boolean(material.timeLimitMinutes)
         });
       } else {
         renderQuizPlayer(root, material, { onBack, onAttemptCompleted });
@@ -1264,6 +1325,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
   root.innerHTML = `
     <section class="assessment-view">
       ${sourceWarningsHtml(material)}
+      ${generatedStudyQualityNote(material, material.type === "Practice test" ? "practice test" : "quiz")}
       <button class="back-link assessment-back" type="button" data-back-to-study>&larr; Back to study materials</button>
       <header class="assessment-header">
         <div>
@@ -1275,6 +1337,7 @@ export function renderQuizPlayer(root, material, { onBack, onAttemptCompleted, r
           ? `<div class="assessment-timer" role="timer" aria-live="off"><span>Time left</span><strong id="assessment-countdown">${formatTime(material.timeLimitMinutes * 60)}</strong></div>`
           : ""}
       </header>
+      ${material.timeLimitMinutes ? `<p id="assessment-timer-warning" class="field-hint assessment-timer-warning" role="status" aria-live="polite" hidden></p>` : ""}
       ${material.instructions ? `<p class="assessment-instructions">${escapeHtml(material.instructions)}</p>` : ""}
       <form id="assessment-form" class="assessment-form">
         ${material.questions.map((question, index) => `

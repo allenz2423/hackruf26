@@ -274,6 +274,17 @@ class MajorGuideActivityGenerationTests(unittest.TestCase):
                     {
                         "heading": "CS",
                         "blocks": [{"type": "paragraph", "text": "A graph has vertices."}],
+                        "mini_quiz": {
+                            "question": "Which description matches this section?",
+                            "choices": [
+                                "A graph has vertices",
+                                "A graph has no nodes",
+                                "A chemical bond",
+                                "A claim outside the section",
+                            ],
+                            "correct_index": 0,
+                            "explanation": "The first choice matches the section's concept.",
+                        },
                     }
                 ],
                 "requested_tool_ids": [
@@ -306,6 +317,17 @@ class MajorGuideActivityGenerationTests(unittest.TestCase):
             {
                 "heading": "Computer science and mechanics",
                 "sources": [{"upload_id": upload_id}],
+                "mini_quiz": {
+                    "question": "Which topic appears in the section?",
+                    "choices": [
+                        "Graphs and stress",
+                        "Cell division",
+                        "Thermodynamics only",
+                        "An unrelated claim",
+                    ],
+                    "correct_index": 0,
+                    "explanation": "The section covers graphs and stress.",
+                },
                 "blocks": [{"type": "paragraph", "text": "These notes cover graphs and stress."}],
             }
         )
@@ -314,7 +336,7 @@ class MajorGuideActivityGenerationTests(unittest.TestCase):
             return _StudyGuideSectionBatch(
                 format="study_guide",
                 schema_version=2,
-                sections=[section],
+                sections=[section.model_dump(mode="json")],
                 requested_tool_ids=requested,
             )
 

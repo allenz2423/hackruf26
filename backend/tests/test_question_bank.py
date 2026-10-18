@@ -626,6 +626,46 @@ class QuestionBankTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "duplicate_question_family")
 
+    def test_multiple_choice_order_is_shuffled_without_changing_answer_identity(self) -> None:
+        source = "chunk-a"
+        candidate = self._candidate("slot-0", "Recall the supported concept", source)
+        candidate = QuestionBankAIItem.model_validate(
+            {
+                **candidate.model_dump(),
+                "choices": [
+                    {"id": "a", "text": "Supported statement"},
+                    {"id": "b", "text": "Other statement"},
+                    {"id": "c", "text": "Third statement"},
+                    {"id": "d", "text": "Fourth statement"},
+                ],
+            }
+        )
+        fixed_id = UUID("00000000-0000-4000-8000-000000000001")
+        plan = [
+            {
+                "assignment_id": "slot-0",
+                "concept_id": "concept-a",
+                "level": 2,
+                "kind": "multiple_choice",
+            }
+        ]
+        with patch("app.services.question_bank.uuid4", return_value=fixed_id):
+            validated = _validate_ai_items(
+                [candidate],
+                [self._review(0)],
+                plan=plan,
+                source_context={source: {"concept_id": "concept-a"}},
+                language="en",
+            )
+
+        item = validated[0]
+        self.assertEqual([choice["id"] for choice in item["choices"]], ["a", "c", "b", "d"])
+        self.assertEqual(item["answer"], "a")
+        self.assertEqual(
+            next(choice["text"] for choice in item["choices"] if choice["id"] == item["answer"]),
+            "Supported statement",
+        )
+
     def test_model_review_rejects_prior_validated_paraphrased_family(self) -> None:
         source = "chunk-a"
         item = self._candidate(

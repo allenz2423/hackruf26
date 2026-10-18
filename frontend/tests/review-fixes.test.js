@@ -9,6 +9,7 @@ import { renderQuestionInput, renderQuizPlayer } from "../src/quiz-player.js";
 import { sourceCitationHtml, sourceWarningsHtml } from "../src/source-citations.js";
 import { submitReasoningApi } from "../src/api.js";
 import { defaultPracticeTestTimeLimit } from "../src/study.js";
+import { generatedStudyQualityNote } from "../src/study-quality-note.js";
 
 function globals(t, values) {
   for (const [key, value] of Object.entries(values)) {
@@ -46,6 +47,13 @@ test("free-response run questions render an editable text answer", () => {
   assert.match(html, /<textarea/);
   assert.match(html, /name="question-3"/);
   assert.match(html, /data-answer-text/);
+});
+
+test("AI-generated material is explicitly qualified without leaking untrusted labels", () => {
+  assert.equal(generatedStudyQualityNote({ isRemote: false }, "quiz"), "");
+  const note = generatedStudyQualityNote({ isRemote: true }, '<img src=x onerror="run">');
+  assert.match(note, /not been independently fact-checked/);
+  assert.doesNotMatch(note, /<img/);
 });
 
 test("congested frame samples are dropped and the next current sample can send", (t) => {
@@ -201,10 +209,13 @@ test("remote quizzes start in Standard mode and offer an isolated opt-in Reasoni
   assert.match(root.innerHTML, /Standard quiz/);
   assert.match(root.innerHTML, /Reasoning Mode/);
   assert.match(root.innerHTML, /value="standard" checked/);
+  assert.match(root.innerHTML, /AI-generated quiz/);
+  assert.match(root.innerHTML, /not been independently fact-checked/);
 
   await start.events.get("click")();
   assert.equal(requests[0].body.mode, "reasoning");
   assert.match(root.innerHTML, /Explain your thinking/);
+  assert.match(root.innerHTML, /AI-generated quiz/);
   assert.match(root.innerHTML, /value="option-a"/);
   assert.match(root.innerHTML, /type="radio" name="question-0" value="option-a" \/>/);
   assert.match(root.innerHTML, /type="submit" disabled>Submit answer/);
@@ -262,6 +273,8 @@ test("reopening a completed remote Standard run renders its released review and 
   assert.match(root.innerHTML, /100%/);
   assert.match(root.innerHTML, /Answer key:/);
   assert.match(root.innerHTML, /Retake quiz/);
+  assert.match(root.innerHTML, /AI-generated quiz/);
+  assert.match(root.innerHTML, /Review suggested next steps/);
   assert.doesNotMatch(root.innerHTML, /Flag question/);
 });
 

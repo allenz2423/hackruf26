@@ -621,6 +621,35 @@ CREATE TABLE IF NOT EXISTS study_material_sources (
     FOREIGN KEY (material_id) REFERENCES study_materials(id) ON DELETE CASCADE
 );
 
+-- Personal, per-class organization. Folder assignments never change material
+-- visibility; they are read and written only for the authenticated owner.
+CREATE TABLE IF NOT EXISTS study_material_folders (
+    id              TEXT PRIMARY KEY,
+    owner_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    class_id        TEXT NOT NULL REFERENCES course_classes(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 80),
+    normalized_name TEXT NOT NULL CHECK (length(normalized_name) BETWEEN 1 AND 160),
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (owner_id, class_id, normalized_name),
+    UNIQUE (id, owner_id, class_id)
+);
+
+CREATE TABLE IF NOT EXISTS study_material_folder_assignments (
+    owner_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    class_id        TEXT NOT NULL REFERENCES course_classes(id) ON DELETE CASCADE,
+    material_id     TEXT NOT NULL REFERENCES study_materials(id) ON DELETE CASCADE,
+    folder_id       TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (owner_id, material_id),
+    FOREIGN KEY (folder_id, owner_id, class_id)
+        REFERENCES study_material_folders(id, owner_id, class_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS study_material_folder_assignments_class_idx
+    ON study_material_folder_assignments(owner_id, class_id, folder_id);
+
 CREATE TABLE IF NOT EXISTS study_material_attempts (
     id              TEXT PRIMARY KEY,
     material_id     TEXT NOT NULL REFERENCES study_materials(id) ON DELETE CASCADE,
@@ -906,6 +935,72 @@ CREATE TABLE IF NOT EXISTS learning_recommendation_events (
 CREATE UNIQUE INDEX IF NOT EXISTS learning_recommendation_event_no_attempt_idx
     ON learning_recommendation_events(recommendation_id,event_type,event_date)
     WHERE related_attempt_id IS NULL;
+
+-- Short, source-linked retrieval checks are private learning activity. They use
+-- already validated question-bank items and are deliberately separate from
+-- mastery_evidence and assessment outcomes.
+CREATE TABLE IF NOT EXISTS learning_review_sessions (
+    id                TEXT PRIMARY KEY,
+    recommendation_id TEXT NOT NULL REFERENCES learning_recommendations(id) ON DELETE CASCADE,
+    owner_id          TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    class_id          TEXT NOT NULL REFERENCES course_classes(id) ON DELETE CASCADE,
+    concept_id        TEXT NOT NULL,
+    bank_item_id      TEXT NOT NULL,
+    family_id         TEXT NOT NULL,
+    public_snapshot   TEXT NOT NULL CHECK (json_valid(public_snapshot) AND json_type(public_snapshot)='object'),
+    private_snapshot  TEXT NOT NULL CHECK (json_valid(private_snapshot) AND json_type(private_snapshot)='object'),
+    status            TEXT NOT NULL DEFAULT 'in_progress'
+        CHECK (status IN ('in_progress','completed','abandoned')),
+    submitted_choice_id TEXT,
+    correctness       INTEGER CHECK (correctness IS NULL OR correctness IN (0,1)),
+    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    completed_at      TEXT,
+    FOREIGN KEY (concept_id,class_id) REFERENCES class_concepts(id,class_id) ON DELETE CASCADE,
+    FOREIGN KEY (bank_item_id,class_id) REFERENCES class_question_bank_items(id,class_id) ON DELETE CASCADE,
+    CHECK ((status='completed' AND correctness IS NOT NULL AND completed_at IS NOT NULL)
+        OR (status<>'completed' AND correctness IS NULL AND completed_at IS NULL))
+);
+CREATE INDEX IF NOT EXISTS learning_review_sessions_owner_concept_idx
+    ON learning_review_sessions(owner_id,class_id,concept_id,created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS learning_review_sessions_one_active_idx
+    ON learning_review_sessions(owner_id,class_id,concept_id) WHERE status='in_progress';
+CREATE INDEX IF NOT EXISTS learning_review_sessions_family_idx
+    ON learning_review_sessions(owner_id,class_id,concept_id,family_id,status);
+
+CREATE TABLE IF NOT EXISTS learning_review_state (
+    owner_id          TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    class_id          TEXT NOT NULL REFERENCES course_classes(id) ON DELETE CASCADE,
+    concept_id        TEXT NOT NULL,
+    due_at            TEXT NOT NULL,
+    interval_days     INTEGER NOT NULL DEFAULT 1 CHECK (interval_days BETWEEN 1 AND 30),
+    completed_count   INTEGER NOT NULL DEFAULT 0 CHECK (completed_count >= 0),
+    last_session_id   TEXT,
+    last_family_id    TEXT,
+    last_correct     INTEGER CHECK (last_correct IS NULL OR last_correct IN (0,1)),
+    updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (owner_id,class_id,concept_id),
+    FOREIGN KEY (concept_id,class_id) REFERENCES class_concepts(id,class_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS learning_review_state_due_idx
+    ON learning_review_state(owner_id,due_at,class_id);
+
+-- Flashcard history stores only a self-reported rating and scheduling metadata;
+-- it never stores the learner's attempted answer and never changes mastery.
+CREATE TABLE IF NOT EXISTS flashcard_review_state (
+    owner_id          TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    material_id       TEXT NOT NULL REFERENCES study_materials(id) ON DELETE CASCADE,
+    card_id           TEXT NOT NULL CHECK (length(trim(card_id)) BETWEEN 1 AND 160),
+    last_rating       TEXT CHECK (last_rating IS NULL OR last_rating IN ('recalled','unsure','missed')),
+    next_due_at       TEXT NOT NULL,
+    reviewed_at       TEXT,
+    review_count      INTEGER NOT NULL DEFAULT 0 CHECK (review_count >= 0),
+    recalled_streak   INTEGER NOT NULL DEFAULT 0 CHECK (recalled_streak BETWEEN 0 AND 10),
+    last_operation_id TEXT,
+    updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (owner_id,material_id,card_id)
+);
+CREATE INDEX IF NOT EXISTS flashcard_review_state_owner_due_idx
+    ON flashcard_review_state(owner_id,next_due_at,material_id);
 
 -- Aggregate-safe exposure and outcome telemetry for internal calibration. No
 -- raw reasoning, transcript, or direct user identifier is stored here.

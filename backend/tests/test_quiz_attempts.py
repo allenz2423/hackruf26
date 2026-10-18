@@ -14,7 +14,7 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from app.api.errors import ApiError
-from app.api.quiz_attempts import _record_metric
+from app.api.quiz_attempts import _is_correct, _record_metric
 from app.config import Settings
 from app.main import create_app
 from app.services.quiz_reasoning import ReasoningDecision, ReasoningFeedback
@@ -863,6 +863,60 @@ class ReasoningQuizApiTests(unittest.TestCase):
         self.assertGreaterEqual(len(fixtures), 8)
         self.assertEqual({item["expected"] for item in fixtures}, {"sufficient", "insufficient"})
         self.assertTrue(all(item.get("justification") for item in fixtures))
+
+
+class ShortAnswerMatchingTests(unittest.TestCase):
+    def test_accepted_paraphrases_notation_and_units_are_explicit(self):
+        cases = [
+            (
+                {
+                    "kind": "short_answer",
+                    "answer": "ATP",
+                    "accepted_answers": ["adenosine triphosphate"],
+                },
+                "Adenosine triphosphate",
+                True,
+            ),
+            ({"kind": "short_answer", "answer": "Na+", "accepted_answers": ["Na⁺"]}, "na⁺", True),
+            (
+                {
+                    "kind": "short_answer",
+                    "answer": "4.5 mg",
+                    "accepted_answers": ["4.5 milligrams"],
+                },
+                "4.5 milligrams",
+                True,
+            ),
+            (
+                {
+                    "kind": "short_answer",
+                    "answer": "4.5 mg",
+                    "accepted_answers": ["4.5 milligrams"],
+                },
+                "4.5",
+                False,
+            ),
+            (
+                {
+                    "kind": "short_answer",
+                    "answer": "mitochondrion",
+                    "accepted_answers": ["mitochondria"],
+                },
+                "mitochodria",
+                False,
+            ),
+        ]
+        for question, response, expected in cases:
+            with self.subTest(response=response):
+                self.assertEqual(_is_correct(question, response), expected)
+
+    def test_case_and_whitespace_variants_are_normalized(self):
+        question = {
+            "kind": "short_answer",
+            "answer": "cellular respiration",
+            "accepted_answers": ["aerobic respiration"],
+        }
+        self.assertTrue(_is_correct(question, "  CELLULAR   RESPIRATION  "))
 
 
 if __name__ == "__main__":

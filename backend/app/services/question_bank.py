@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+import random
 import re
 import unicodedata
-from typing import Any
+from typing import Any, NoReturn
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from app.api.errors import ApiError
@@ -53,6 +55,30 @@ COGNITIVE_LEVELS = {
     3: "Application or multi-step reasoning",
     4: "Analysis, synthesis, or transfer to a new context",
 }
+logger = logging.getLogger(__name__)
+
+
+def _reject_generated_assessment(
+    reason: str,
+    *,
+    item_index: int | None = None,
+    failed_checks: tuple[str, ...] = (),
+    status_code: int = 503,
+    error_code: str = "question_validation_failed",
+) -> NoReturn:
+    """Log a content-free validation reason before returning the stable API error."""
+    logger.warning(
+        "assessment_item_validation_rejected reason=%s item_index=%s failed_checks=%s",
+        reason,
+        item_index,
+        ",".join(failed_checks) or "none",
+    )
+    message = (
+        "The generated set repeats the same assessment objective. Retry generation."
+        if error_code == "duplicate_question_family"
+        else "The generated assessment did not pass validation."
+    )
+    raise ApiError(status_code, error_code, message)
 
 
 def _normalize_family(value: str) -> str:
@@ -442,21 +468,17 @@ def _validate_ai_items(
     prior_items: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     plan_by_id = {slot["assignment_id"]: slot for slot in plan}
-    if len(generated) != len(plan) or len(review) != len(plan):
-        raise ApiError(
-            503, "question_validation_failed", "The generated assessment did not pass validation."
-        )
+    if len(generated) != len(plan):
+        _reject_generated_assessment("generated_count_mismatch")
+    if len(review) != len(plan):
+        _reject_generated_assessment("review_count_mismatch")
     if {item.assignment_id for item in generated} != set(plan_by_id):
-        raise ApiError(
-            503, "question_validation_failed", "The generated assessment did not pass validation."
-        )
+        _reject_generated_assessment("assignment_ids_mismatch")
     generated_index = {item.assignment_id: index for index, item in enumerate(generated)}
     generated_by_assignment = {item.assignment_id: item for item in generated}
     review_by_index = {item.index: item for item in review}
     if set(review_by_index) != set(range(len(plan))):
-        raise ApiError(
-            503, "question_validation_failed", "The generated assessment did not pass validation."
-        )
+        _reject_generated_assessment("review_indices_mismatch")
     validated: list[dict[str, Any]] = []
     used_family_signatures: set[str] = set()
     batch_families: list[tuple[str, int, str, str]] = []
@@ -464,23 +486,25 @@ def _validate_ai_items(
         item = generated_by_assignment[slot["assignment_id"]]
         index = generated_index[slot["assignment_id"]]
         checks = review_by_index[index]
-        if not all(
-            (
-                checks.source_supported,
-                checks.concept_aligned,
-                checks.answer_correct,
-                checks.distractors_valid,
-                checks.unambiguous,
-                checks.level_aligned,
-                checks.language_valid,
-                checks.leakage_free,
-                not checks.duplicate_family,
+        failed_checks = tuple(
+            name
+            for name in (
+                "source_supported",
+                "concept_aligned",
+                "answer_correct",
+                "distractors_valid",
+                "unambiguous",
+                "level_aligned",
+                "language_valid",
+                "leakage_free",
             )
-        ):
-            raise ApiError(
-                503,
-                "question_validation_failed",
-                "The generated assessment did not pass validation.",
+            if not getattr(checks, name)
+        )
+        if checks.duplicate_family:
+            failed_checks += ("duplicate_family",)
+        if failed_checks:
+            _reject_generated_assessment(
+                "review_checks_failed", item_index=index, failed_checks=failed_checks
             )
         if (
             item.level != slot["level"]
@@ -490,46 +514,32 @@ def _validate_ai_items(
             or not set(item.concept_ids).issubset({s["concept_id"] for s in plan})
             or not set(item.source_chunk_revision_ids).issubset(source_context)
         ):
-            raise ApiError(
-                503,
-                "question_validation_failed",
-                "The generated assessment did not pass validation.",
-            )
+            _reject_generated_assessment("assignment_metadata_mismatch", item_index=index)
         if not any(
             source_context[source_id]["concept_id"] == slot["concept_id"]
             for source_id in item.source_chunk_revision_ids
         ):
-            raise ApiError(
-                503,
-                "question_validation_failed",
-                "The generated assessment did not pass validation.",
-            )
-        choice_ids = [choice.id for choice in item.choices]
-        choice_texts = [_normalize_family(choice.text) for choice in item.choices]
+            _reject_generated_assessment("source_concept_mismatch", item_index=index)
         if item.kind == "multiple_choice":
-            structurally_valid = (
-                2 <= len(item.choices) <= 6
-                and len(choice_ids) == len(set(choice_ids))
-                and len(choice_texts) == len(set(choice_texts))
-                and item.answer in set(choice_ids)
-            )
+            choice_ids = [choice.id for choice in item.choices]
+            choice_texts = [_normalize_family(choice.text) for choice in item.choices]
+            if not 2 <= len(item.choices) <= 6:
+                _reject_generated_assessment("choice_count_invalid", item_index=index)
+            if len(choice_ids) != len(set(choice_ids)):
+                _reject_generated_assessment("choice_ids_duplicate", item_index=index)
+            if len(choice_texts) != len(set(choice_texts)):
+                _reject_generated_assessment("choice_text_duplicate", item_index=index)
+            if item.answer not in set(choice_ids):
+                _reject_generated_assessment("answer_not_choice_id", item_index=index)
         elif item.kind == "true_false":
-            structurally_valid = not item.choices and item.answer.casefold() in {"true", "false"}
+            if item.choices or item.answer.casefold() not in {"true", "false"}:
+                _reject_generated_assessment("true_false_structure_invalid", item_index=index)
         else:
             accepted = {_normalize_family(value) for value in item.accepted_answers}
-            structurally_valid = not item.choices and _normalize_family(item.answer) in accepted
-        if not structurally_valid:
-            raise ApiError(
-                503,
-                "question_validation_failed",
-                "The generated assessment did not pass validation.",
-            )
+            if item.choices or _normalize_family(item.answer) not in accepted:
+                _reject_generated_assessment("short_answer_structure_invalid", item_index=index)
         if not item.source_chunk_revision_ids or not item.concept_ids:
-            raise ApiError(
-                503,
-                "question_validation_failed",
-                "The generated assessment did not pass validation.",
-            )
+            _reject_generated_assessment("missing_citations", item_index=index)
         family_id, signature = family_identity(item.assessment_target, slot["concept_id"])
         candidate_family_text = item.assessment_target
         near_batch_duplicate = any(
@@ -554,16 +564,21 @@ def _validate_ai_items(
             for entry in (prior_items or [])
         )
         if signature in used_family_signatures or near_batch_duplicate or prior_near_duplicate:
-            raise ApiError(
-                409,
+            _reject_generated_assessment(
                 "duplicate_question_family",
-                "The generated set repeats the same assessment objective. Retry generation.",
+                item_index=index,
+                status_code=409,
+                error_code="duplicate_question_family",
             )
         used_family_signatures.add(signature)
         batch_families.append((slot["concept_id"], item.level, candidate_family_text, signature))
+        question_id = str(uuid4())
+        choices = [choice.model_dump(mode="json") for choice in item.choices]
+        if item.kind == "multiple_choice":
+            random.Random(question_id).shuffle(choices)
         validated.append(
             {
-                "id": str(uuid4()),
+                "id": question_id,
                 "family_id": family_id,
                 "family_signature": signature,
                 "prompt": item.prompt,
@@ -571,7 +586,7 @@ def _validate_ai_items(
                 "level": item.level,
                 "language": item.language,
                 "assessment_target": item.assessment_target,
-                "choices": [choice.model_dump(mode="json") for choice in item.choices],
+                "choices": choices,
                 "answer": item.answer,
                 "accepted_answers": list(item.accepted_answers),
                 "explanation": item.explanation,

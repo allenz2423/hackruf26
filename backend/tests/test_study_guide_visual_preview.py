@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import unittest
+import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from uuid import uuid4
@@ -19,6 +20,9 @@ from app.services.gemini_content import (
 from app.services.openai_compatible import _parts_to_chat_content
 from app.services.study_guide_visual_preview import (
     SvgPreviewRenderError,
+    audit_svg_phone_text,
+    phone_text_audit_not_worse,
+    render_svg_animation_previews,
     render_svg_preview_png,
 )
 
@@ -39,6 +43,58 @@ def make_service() -> GeminiContentService:
             file_url_signing_secret="test-signing-secret-with-at-least-32-characters",
         ),
     )
+
+
+class SvgPhoneTextAuditTests(unittest.TestCase):
+    def test_measures_labels_after_scaling_to_the_phone_card(self) -> None:
+        audit = audit_svg_phone_text(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 800">'
+            '<text x="10" y="30" font-size="18">small</text>'
+            '<text x="10" y="70" font-size="24">minimum</text></svg>'
+        )
+
+        self.assertEqual(audit.rendered_text_runs, 2)
+        self.assertEqual(audit.undersized_text_runs, 1)
+        self.assertEqual(audit.smallest_text_px, 9.0)
+        self.assertEqual(audit.scale, 0.5)
+        self.assertIn("below 12 CSS px", audit.prompt_diagnostic() or "")
+
+    def test_inherits_font_size_and_accounts_for_nested_group_scale(self) -> None:
+        audit = audit_svg_phone_text(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 200">'
+            '<g font-size="24" transform="scale(0.5 2)">'
+            '<text x="10" y="30">readable</text>'
+            '<text x="10" y="70"><tspan font-size="22">small</tspan></text>'
+            '</g></svg>'
+        )
+
+        self.assertEqual(audit.rendered_text_runs, 2)
+        self.assertEqual(audit.undersized_text_runs, 1)
+        self.assertEqual(audit.smallest_text_px, 11.0)
+
+    def test_ignores_nonvisible_accessibility_text_and_hidden_labels(self) -> None:
+        audit = audit_svg_phone_text(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 200">'
+            '<title>Accessible title</title><desc>Long description</desc>'
+            '<text display="none">hidden</text><text visibility="hidden">hidden</text>'
+            '<text opacity="0">hidden</text><text x="10" y="30">Visible</text></svg>'
+        )
+
+        self.assertEqual(audit.rendered_text_runs, 1)
+        self.assertFalse(audit.has_small_text)
+
+    def test_edit_must_not_make_phone_text_audit_worse(self) -> None:
+        readable = audit_svg_phone_text(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 800">'
+            '<text font-size="20">label</text></svg>'
+        )
+        smaller = audit_svg_phone_text(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 800">'
+            '<text font-size="12">label</text></svg>'
+        )
+
+        self.assertTrue(phone_text_audit_not_worse(readable, readable))
+        self.assertFalse(phone_text_audit_not_worse(readable, smaller))
 
 
 class SvgPreviewRendererTests(unittest.TestCase):
@@ -95,6 +151,130 @@ class SvgPreviewRendererTests(unittest.TestCase):
                 render_svg_preview_png(
                     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>'
                 )
+
+
+class SvgAnimationPreviewTests(unittest.TestCase):
+    def test_samples_finite_numeric_motion_at_start_midpoint_and_end(self) -> None:
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">'
+            '<circle cx="10" cy="20" r="4"><animate attributeName="cx" dur="4s" '
+            'values="10;70" repeatCount="1"/></circle></svg>'
+        )
+        sampled_x: list[float] = []
+
+        def capture(markup: str, **_kwargs: object) -> bytes:
+            root = ET.fromstring(markup)
+            circle = root.find("{http://www.w3.org/2000/svg}circle")
+            assert circle is not None
+            sampled_x.append(float(circle.get("cx", "nan")))
+            return b"png"
+
+        with patch(
+            "app.services.study_guide_visual_preview.render_svg_preview_png",
+            side_effect=capture,
+        ):
+            result = render_svg_animation_previews(svg)
+
+        self.assertEqual([label for label, _ in result.frames], ["start", "midpoint", "end"])
+        self.assertEqual(sampled_x, [10.0, 40.0, 70.0])
+        self.assertEqual(result.unsupported_types, ())
+
+    def test_flags_motion_paths_instead_of_claiming_their_frames_were_sampled(self) -> None:
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">'
+            '<circle cx="10" cy="20" r="4"><animateMotion dur="2s" '
+            'path="M 0 0 L 50 0"/></circle></svg>'
+        )
+        with patch(
+            "app.services.study_guide_visual_preview.render_svg_preview_png"
+        ) as render:
+            result = render_svg_animation_previews(svg)
+
+        self.assertEqual(result.frames, ())
+        self.assertIn("animateMotion_path_not_sampled", result.unsupported_types)
+        render.assert_not_called()
+
+    def test_does_not_claim_synchronized_frames_for_mixed_animation_durations(self) -> None:
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">'
+            '<circle cx="10" cy="20" r="4"><animate attributeName="cx" dur="2s" '
+            'values="10;70"/></circle>'
+            '<circle cx="20" cy="30" r="4"><animate attributeName="cx" dur="4s" '
+            'values="20;80"/></circle></svg>'
+        )
+        with patch(
+            "app.services.study_guide_visual_preview.render_svg_preview_png"
+        ) as render:
+            result = render_svg_animation_previews(svg)
+
+        self.assertEqual(result.frames, ())
+        self.assertIn("mixed_or_unreadable_animation_durations", result.unsupported_types)
+        render.assert_not_called()
+
+    def test_samples_supported_numeric_transform_animation(self) -> None:
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">'
+            '<rect x="0" y="0" width="10" height="10" transform="scale(2)">'
+            '<animateTransform attributeName="transform" type="translate" from="10 0" '
+            'to="30 0" dur="2s"/></rect></svg>'
+        )
+        sampled_transforms: list[str] = []
+
+        def capture(markup: str, **_kwargs: object) -> bytes:
+            root = ET.fromstring(markup)
+            rect = root.find("{http://www.w3.org/2000/svg}rect")
+            assert rect is not None
+            sampled_transforms.append(rect.get("transform", ""))
+            return b"png"
+
+        with patch(
+            "app.services.study_guide_visual_preview.render_svg_preview_png",
+            side_effect=capture,
+        ):
+            result = render_svg_animation_previews(svg)
+
+        self.assertEqual(sampled_transforms, ["translate(10 0)", "translate(20 0)", "translate(30 0)"])
+        self.assertEqual(result.unsupported_types, ())
+
+    def test_does_not_sample_non_linear_spline_timing_as_if_it_were_linear(self) -> None:
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">'
+            '<circle cx="10" cy="20" r="4"><animate attributeName="cx" dur="2s" '
+            'values="10;70" calcMode="spline" keySplines="0 0 1 1"/></circle></svg>'
+        )
+        with patch(
+            "app.services.study_guide_visual_preview.render_svg_preview_png"
+        ) as render:
+            result = render_svg_animation_previews(svg)
+
+        self.assertEqual(result.frames, ())
+        self.assertIn("spline_interpolation_approximated_as_linear", result.unsupported_types)
+        render.assert_not_called()
+
+    def test_does_not_sample_unmodeled_begin_or_repeat_duration_semantics(self) -> None:
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">'
+            '<circle cx="10" cy="20" r="4"><animate attributeName="cx" dur="2s" '
+            'begin="0s;3s" repeatDur="5s" values="10;70"/></circle></svg>'
+        )
+        with patch(
+            "app.services.study_guide_visual_preview.render_svg_preview_png"
+        ) as render:
+            result = render_svg_animation_previews(svg)
+
+        self.assertEqual(result.frames, ())
+        self.assertIn("unreadable_animation_start", result.unsupported_types)
+        self.assertIn("advanced_animation_duration_not_sampled", result.unsupported_types)
+        render.assert_not_called()
+
+    def test_static_svg_has_no_animation_frames(self) -> None:
+        result = render_svg_animation_previews(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">'
+            '<circle cx="10" cy="20" r="4"/></svg>'
+        )
+
+        self.assertEqual(result.frames, ())
+        self.assertEqual(result.unsupported_types, ())
 
         with (
             patch(
@@ -214,6 +394,142 @@ class StudyGuideVisualSelfPreviewTests(unittest.TestCase):
         self.assertIs(result, sections)
         self.service._generate_json.assert_not_called()
 
+    def test_small_text_measurement_is_sent_to_author_and_worse_edit_is_rejected(self) -> None:
+        original_svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 800">'
+            '<text x="10" y="30" font-size="16">Initial label</text></svg>'
+        )
+        smaller_svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 800">'
+            '<text x="10" y="30" font-size="12">Smaller label</text></svg>'
+        )
+        sections = [
+            {
+                "heading": "Osmosis",
+                "blocks": [
+                    {
+                        "id": "osmosis-figure",
+                        "type": "svg_diagram",
+                        "title": "Water movement",
+                        "svg": original_svg,
+                        "alt_text": "Water crosses a membrane.",
+                        "fallback_text": "Water moves both ways with a net direction.",
+                    }
+                ],
+            }
+        ]
+        self.service._generate_json = Mock(
+            return_value=_StudyGuideVisualEditBatch(
+                items=[
+                    _StudyGuideVisualEdit(
+                        block_id="osmosis-figure",
+                        visual_note="The label could be clearer.",
+                        replacement_svg=smaller_svg,
+                    )
+                ]
+            )
+        )
+
+        with patch(
+            "app.services.gemini_content.render_svg_preview_png", return_value=b"phone preview"
+        ) as render_preview:
+            self.service._self_preview_study_guide_svgs(sections)
+
+        self.assertEqual(sections[0]["blocks"][0]["svg"], original_svg)
+        self.assertEqual(render_preview.call_count, 1)
+        prompt = str(self.service._generate_json.call_args.args[0][0])
+        self.assertIn("below 12 CSS px", prompt)
+        self.assertIn("smallest is about 8 px", prompt)
+
+    def test_model_sees_all_sampled_animation_frames_before_it_can_edit(self) -> None:
+        animated_svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">'
+            '<circle cx="10" cy="20" r="4"><animate attributeName="cx" dur="4s" '
+            'values="10;70" repeatCount="1"/></circle></svg>'
+        )
+        sections = [
+            {
+                "heading": "Motion",
+                "blocks": [
+                    {
+                        "id": "moving-dot",
+                        "type": "svg_diagram",
+                        "title": "Moving dot",
+                        "svg": animated_svg,
+                        "alt_text": "A dot moves right.",
+                        "fallback_text": "The dot moves from left to right.",
+                    }
+                ],
+            }
+        ]
+        self.service._generate_json = Mock(
+            return_value=_StudyGuideVisualEditBatch(
+                items=[
+                    _StudyGuideVisualEdit(
+                        block_id="moving-dot", visual_note="Motion is clear.", replacement_svg=None
+                    )
+                ]
+            )
+        )
+
+        with (
+            patch(
+                "app.services.gemini_content.render_svg_preview_png", return_value=b"still"
+            ) as static_renderer,
+            patch(
+                "app.services.study_guide_visual_preview.render_svg_preview_png",
+                side_effect=[b"start", b"midpoint", b"end"],
+            ),
+        ):
+            self.service._self_preview_study_guide_svgs(sections)
+
+        parts = self.service._generate_json.call_args.args[0]
+        content = _parts_to_chat_content(parts)
+        image_parts = [item for item in content if item.get("type") == "image_url"]
+        self.assertEqual(len(image_parts), 3)
+        static_renderer.assert_not_called()
+        for label in ("start", "midpoint", "end"):
+            self.assertIn(label, str(parts))
+        self.assertIn("objects must not collide", str(parts[0]))
+
+    def test_preview_reports_when_animation_motion_was_not_sampled(self) -> None:
+        motion_svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">'
+            '<circle cx="10" cy="20" r="4"><animateMotion dur="2s" '
+            'path="M 0 0 L 50 0"/></circle></svg>'
+        )
+        sections = [
+            {
+                "heading": "Motion",
+                "blocks": [
+                    {
+                        "id": "moving-dot",
+                        "type": "svg_diagram",
+                        "svg": motion_svg,
+                        "title": "Moving dot",
+                        "alt_text": "A dot moves.",
+                        "fallback_text": "A dot moves along a path.",
+                    }
+                ],
+            }
+        ]
+        self.service._generate_json = Mock(
+            return_value=_StudyGuideVisualEditBatch(
+                items=[
+                    _StudyGuideVisualEdit(
+                        block_id="moving-dot", visual_note="Keep it simple.", replacement_svg=None
+                    )
+                ]
+            )
+        )
+
+        with patch("app.services.gemini_content.render_svg_preview_png", return_value=b"still"):
+            self.service._self_preview_study_guide_svgs(sections)
+
+        parts = self.service._generate_json.call_args.args[0]
+        self.assertIn("animateMotion_path_not_sampled", str(parts))
+        self.assertIn("simplify it to directly animated numeric SVG attributes", str(parts[0]))
+
     def test_visual_review_happens_before_revised_batch_is_published(self) -> None:
         upload_id = str(uuid4())
         svg = (
@@ -238,11 +554,24 @@ class StudyGuideVisualSelfPreviewTests(unittest.TestCase):
                 {
                     "heading": "Concept map",
                     "sources": [{"upload_id": upload_id}],
+                    "mini_quiz": {
+                        "question": "What does the diagram connect?",
+                        "choices": [
+                            "Concept A to concept B",
+                            "Two unrelated objects",
+                            "A value to its unit",
+                            "No relationship",
+                        ],
+                        "correct_index": 0,
+                        "explanation": "The figure's text alternative describes A connecting to B.",
+                    },
                     "blocks": blocks,
                 }
             )
             return _StudyGuideSectionBatch(
-                format="study_guide", sections=[section], requested_tool_ids=[]
+                format="study_guide",
+                sections=[section.model_dump(mode="json")],
+                requested_tool_ids=[],
             )
 
         self.service._generate_json = Mock(

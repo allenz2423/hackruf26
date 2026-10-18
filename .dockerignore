@@ -20,3 +20,5 @@ node_modules
 demo-video/node_modules
 demo-video/output
 .codex
+artifacts
+sqlite3

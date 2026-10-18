@@ -85,7 +85,7 @@ test("failed guide viewer labels provisional content and offers no exports", () 
     assert.equal(viewer.dialog.title.innerHTML, "");
     assert.equal(
       viewer.dialog.meta.textContent,
-      "BIO_170_Comprehensive_Master_Study_Guide.pdf - 0 items - Generation failed"
+      "BIO_170_Comprehensive_Master_Study_Guide.pdf - 1 section - Generation failed"
     );
     assert.match(viewer.dialog.root.innerHTML, /Generation stopped before the guide was saved/);
     assert.match(viewer.dialog.root.innerHTML, /partial preview is not saved or export-checked/);
@@ -211,7 +211,7 @@ test("an unterminated code fence remains visible instead of hiding the rest of a
   assert.match(html, /\/\/ final line/);
 });
 
-test("long study guides render a section contents navigator with matching targets", () => {
+test("study guides paginate one section at a time with a model-authored mini quiz", () => {
   class FakeElement {
     constructor() { this.textContent = ""; this.innerHTML = ""; this.scrollTop = 0; }
     addEventListener() {}
@@ -249,9 +249,16 @@ test("long study guides render a section contents navigator with matching target
   };
   try {
     const sections = Array.from({ length: 6 }, (_, index) => ({
+      id: `section-${index + 1}`,
       heading: `Section ${index + 1}`,
       body: `Content ${index + 1}.`,
-      sources: []
+      sources: [],
+      mini_quiz: {
+        question: `Which concept does section ${index + 1} explain?`,
+        choices: ["The correct concept", "A reversal", "An unrelated idea", "An unsupported claim"],
+        correct_index: 0,
+        explanation: "The correct concept matches the explanation above."
+      }
     }));
     const viewer = openMaterialViewer({
       id: "guide:bio/1",
@@ -264,11 +271,14 @@ test("long study guides render a section contents navigator with matching target
     });
     assert.match(viewer.dialog.root.innerHTML, /<nav class="guide-toc"/);
     assert.match(viewer.dialog.root.innerHTML, /aria-label="Study guide sections"/);
-    for (let index = 1; index <= sections.length; index += 1) {
-      const target = `guide-guide-bio-1-section-${index}`;
-      assert.match(viewer.dialog.root.innerHTML, new RegExp(`href="#${target}"`));
-      assert.match(viewer.dialog.root.innerHTML, new RegExp(`id="${target}"`));
-    }
+    assert.match(viewer.dialog.root.innerHTML, /data-guide-previous disabled/);
+    assert.match(viewer.dialog.root.innerHTML, /data-guide-next/);
+    assert.match(viewer.dialog.root.innerHTML, /Section 1 of 6/);
+    assert.match(viewer.dialog.root.innerHTML, /data-guide-page-target="5"/);
+    assert.match(viewer.dialog.root.innerHTML, /Which concept does section 1 explain\?/);
+    assert.match(viewer.dialog.root.innerHTML, /Check answer/);
+    assert.doesNotMatch(viewer.dialog.root.innerHTML, /data-guide-section="section-2"/);
+    assert.doesNotMatch(viewer.dialog.root.innerHTML, /Correct answer:/);
   } finally {
     if (priorDocument === undefined) delete globalThis.document;
     else globalThis.document = priorDocument;

@@ -1,7 +1,7 @@
 import { icon } from "./icons.js";
 import { renderQuizPlayer } from "./quiz-player.js";
 import { renderFlashcards } from "./flashcards.js";
-import { escapeHtml, toast } from "./ui.js";
+import { escapeHtml, openDialog, toast } from "./ui.js";
 import { openMaterialViewer } from "./material-viewer.js";
 import { renderMasteryLadderPanel } from "./mastery-ladder.js";
 import { loadTutorLanguage, GENERATION_LANGUAGES } from "./tutor-language.js";
@@ -9,6 +9,13 @@ import { classHasCapability, updateClass } from "./classes.js";
 import { getBackendClassId, getBackendUploadId, prepareStudySources, waitForStudyMaterial } from "./course-sync.js";
 import {
   getStudyMaterialsApi,
+  getStudyMaterialFoldersApi,
+  createStudyMaterialFolderApi,
+  renameStudyMaterialFolderApi,
+  deleteStudyMaterialFolderApi,
+  assignStudyMaterialFolderApi,
+  proposeStudyMaterialOrganizationApi,
+  applyStudyMaterialOrganizationApi,
   getMyStudyMaterialsApi,
   getUploadsApi,
   createStudyMaterialApi,
@@ -159,6 +166,7 @@ export function formatRemoteMaterial(detail, klassId, uiTypeFallback, uploads = 
     id: detail.id,
     classId: klassId,
     backendClassId,
+    folderId: detail.folder_id || null,
     title: detail.title || `${uiType}: Material`,
     type: uiType,
     scope: scopeLabel,
@@ -189,6 +197,25 @@ export function formatRemoteMaterial(detail, klassId, uiTypeFallback, uploads = 
     // out of this cache and render them only from a release-approved run DTO.
     attempts: []
   };
+}
+
+export function displayStudyMaterialTitle(title, className) {
+  const original = String(title || "").trim();
+  const courseName = String(className || "").trim();
+  if (!original || !courseName) return original;
+
+  const prefixes = [...new Set([courseName, courseName.replace(/\s+/g, "")])]
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+  for (const prefix of prefixes) {
+    if (!original.toLocaleLowerCase().startsWith(prefix.toLocaleLowerCase())) continue;
+    const remainder = original.slice(prefix.length);
+    const separator = remainder.match(/^\s*(?:[·:|—–-]\s*|\s+)/u);
+    if (!separator) continue;
+    const shortened = remainder.slice(separator[0].length).trim();
+    if (shortened) return shortened;
+  }
+  return original;
 }
 
 export function openRemoteStudyGuideViewer(
@@ -281,6 +308,11 @@ function scoreableQuestions(material) {
 
 export async function renderStudyTab({ root, klass, currentUserId = null, onMaterialAdded, onAttemptCompleted }) {
   const backendClassId = getBackendClassId(klass);
+  let studyMaterialFolders = [];
+  let selectedStudyFolder = "all";
+  let folderLoadFailed = false;
+  let organizationProposal = null;
+  let organizationBusy = false;
   let personalSummaries = [];
   if (currentUserId) {
     try {
@@ -291,9 +323,13 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
   }
   if (backendClassId) {
     try {
-      const [materialResult, uploadResult] = await Promise.allSettled([
-        getStudyMaterialsApi(backendClassId), getUploadsApi(backendClassId)
+      const [materialResult, uploadResult, folderResult] = await Promise.allSettled([
+        getStudyMaterialsApi(backendClassId),
+        getUploadsApi(backendClassId),
+        currentUserId ? getStudyMaterialFoldersApi(backendClassId) : Promise.resolve([])
       ]);
+      if (folderResult.status === "fulfilled") studyMaterialFolders = folderResult.value;
+      else folderLoadFailed = true;
       if (uploadResult.status === "fulfilled") {
         const localByBackendId = new Map(klass.uploads.map((upload) => [getBackendUploadId(upload), upload]));
         const kinds = { notes: "Notes", document: "Document", syllabus: "Syllabus", slides: "Slides", lecture_audio: "Lecture", lecture_video: "Lecture" };
@@ -365,6 +401,8 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
     const hasUploads = klass.uploads.length > 0;
     root.innerHTML = `
       <section class="section-stack">
+        <details class="study-create-details" id="study-create-details">
+          <summary><span><strong>Create or customize a study set</strong><small>Choose source materials, format, and difficulty when you are ready.</small></span><span class="study-create-chevron">Customize</span></summary>
         <form class="panel generate-panel" id="generate-form">
           <div class="generate-head">
             <span class="kind-icon">${icon("sparkles", { size: 22 })}</span>
@@ -464,8 +502,9 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
           <p id="generation-status" class="field-hint" role="status" aria-live="polite"></p>
           ${hasUploads ? "" : `<p class="field-hint">Add course material in the Library tab first.</p>`}
         </form>
+        </details>
         ${backendClassId ? `<div id="mastery-ladder-root"></div>` : ""}
-        <div class="section-stack">
+        <div class="section-stack study-saved-section">
           <div>
             <h2>Saved materials</h2>
             <p class="muted">Open study guides and flashcards, or start a quiz to see explanations and saved scores.</p>
@@ -477,13 +516,26 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
               <span>Selected course text and prompts are processed by this Jot deployment's administrator-configured AI provider. Scanned files and lecture recordings may use Gemini. Generated materials and quiz scores are saved by the backend.</span>
             </div>
           </div>
+          ${backendClassId && currentUserId ? `
+            <div id="material-folder-toolbar" class="study-folder-toolbar"></div>
+            <div id="study-organization-preview"></div>` : ""}
           <div id="material-list"></div>
         </div>
       </section>
     `;
 
+    const pageSection = root.querySelector(":scope > section");
+    const savedSection = pageSection?.querySelector(".study-saved-section");
+    const customizeDetails = pageSection?.querySelector("#study-create-details");
+    if (pageSection && savedSection && customizeDetails) {
+      pageSection.insertBefore(savedSection, pageSection.firstChild);
+      pageSection.append(customizeDetails);
+    }
+
     const form = root.querySelector("#generate-form");
     const list = root.querySelector("#material-list");
+    const folderToolbar = root.querySelector("#material-folder-toolbar");
+    const organizationPreview = root.querySelector("#study-organization-preview");
     const generateBtn = root.querySelector("#generate-btn");
     const generationStatus = root.querySelector("#generation-status");
     const sourcePicker = root.querySelector("#study-source-picker");
@@ -551,8 +603,23 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
       const checked = [...sourcePicker.querySelectorAll('input[name="source_upload"]:checked')];
       selectedSourceIds.clear();
       checked.forEach((input) => selectedSourceIds.add(input.value));
-      sourceCount.textContent = `${checked.length} of ${klass.uploads.length} ${klass.uploads.length === 1 ? "material" : "materials"} selected${checked.length ? "" : ". Select at least one to generate."}`;
-      generateBtn.disabled = generating || !checked.length;
+      const selectedUploads = checked
+        .map((input) => klass.uploads.find((upload) => upload.id === input.value))
+        .filter(Boolean);
+      const failedCount = selectedUploads.filter((upload) => upload.status === "failed").length;
+      const processingCount = selectedUploads.filter((upload) => upload.status === "processing").length;
+      const readyCount = selectedUploads.length - failedCount - processingCount;
+      const scopeDescription = checked.length
+        ? `${checked.length} of ${klass.uploads.length} selected; only selected sources will be used.`
+        : "Select at least one source to continue.";
+      const statusDescription = failedCount
+        ? ` ${failedCount} selected ${failedCount === 1 ? "source has" : "sources have"} failed; unselect it or retry it in Library.`
+        : processingCount
+          ? ` ${readyCount} ready; ${processingCount} still processing and will be checked before generation.`
+          : checked.length ? ` ${readyCount} ready.` : "";
+      sourceCount.textContent = `${scopeDescription}${statusDescription}`;
+      sourceCount.classList.toggle("is-error", failedCount > 0);
+      generateBtn.disabled = generating || !checked.length || failedCount > 0;
       sourcePicker.querySelector('[data-source-filter="all"]').disabled = !hasUploads || checked.length === klass.uploads.length;
       sourcePicker.querySelector('[data-source-filter="none"]').disabled = !checked.length;
       for (const kind of ["notes", "syllabus"]) {
@@ -562,6 +629,7 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
 
     function watchLiveGuidePreview(material, controller, viewer) {
       const materialId = String(material.id);
+      const savedFolderId = material.folderId || null;
       const closeOnNavigation = () => {
         controller.abort();
         viewer.close();
@@ -576,12 +644,20 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
         timeoutMs: Number.POSITIVE_INFINITY,
         onStatus: (detail) => {
           viewer.update(formatRemoteMaterial(
-            detail, klass.id, "Study guide", klass.uploads, backendClassId
+            { ...detail, folder_id: detail.folder_id || savedFolderId },
+            klass.id,
+            "Study guide",
+            klass.uploads,
+            backendClassId
           ));
         }
       }).then((detail) => {
         const updated = formatRemoteMaterial(
-          detail, klass.id, "Study guide", klass.uploads, backendClassId
+          { ...detail, folder_id: detail.folder_id || savedFolderId },
+          klass.id,
+          "Study guide",
+          klass.uploads,
+          backendClassId
         );
         viewer.update(updated);
         return updated;
@@ -610,6 +686,7 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
           const pending = formatRemoteMaterial(
             summary, klass.id, "Study guide", klass.uploads, backendClassId
           );
+          pending.folderId = failedMaterial.folderId || null;
           const pendingViewer = {
             ...pending,
             previewContent: failedMaterial.previewContent,
@@ -642,18 +719,173 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
     const ladderRoot = root.querySelector("#mastery-ladder-root");
     if (ladderRoot) void renderMasteryLadderPanel({ root: ladderRoot, klass, currentUserId });
 
+    function renderFolderToolbar() {
+      if (!folderToolbar) return;
+      if (folderLoadFailed) {
+        folderToolbar.innerHTML = `
+          <div class="study-folder-load-error" role="status">
+            <span>Folders could not be loaded.</span>
+            <button class="btn btn-secondary btn-small" type="button" data-reload-study-folders>Try again</button>
+          </div>`;
+        return;
+      }
+      const counts = new Map(studyMaterialFolders.map((folder) => [folder.id, 0]));
+      let unfiledCount = 0;
+      for (const material of klass.materials) {
+        if (material.folderId && counts.has(material.folderId)) counts.set(material.folderId, counts.get(material.folderId) + 1);
+        else unfiledCount += 1;
+      }
+      const allCount = klass.materials.length;
+      const selected = (value) => selectedStudyFolder === value ? 'aria-pressed="true"' : 'aria-pressed="false"';
+      folderToolbar.innerHTML = `
+        <div class="study-folder-toolbar-head">
+          <div>
+            <h3>Folders</h3>
+            <p class="muted">Private to you. AI uses titles and short outlines; review suggestions before anything moves.</p>
+          </div>
+          <div class="study-folder-toolbar-actions">
+            <button class="btn btn-primary btn-small" type="button" data-organize-study-materials ${!klass.materials.length || organizationBusy ? "disabled" : ""}>
+              ${icon("sparkles", { size: 16 })} ${organizationBusy ? "Organizing…" : "Organize with AI"}
+            </button>
+            <button class="btn btn-secondary btn-small" type="button" data-create-study-folder>
+              ${icon("plus", { size: 16 })} New folder
+            </button>
+          </div>
+        </div>
+        <nav class="study-folder-nav" aria-label="Saved material folders">
+          <button class="study-folder-chip" type="button" data-study-folder-filter="all" ${selected("all")}>
+            <span>All materials</span><span class="study-folder-count">${allCount}</span>
+          </button>
+          <button class="study-folder-chip" type="button" data-study-folder-filter="unfiled" ${selected("unfiled")}>
+            <span>Unfiled</span><span class="study-folder-count">${unfiledCount}</span>
+          </button>
+          ${studyMaterialFolders.map((folder) => `
+            <div class="study-folder-entry ${selectedStudyFolder === folder.id ? "is-selected" : ""}">
+              <button class="study-folder-chip" type="button" data-study-folder-filter="${escapeHtml(folder.id)}" ${selected(folder.id)}>
+                <span class="study-folder-name">${icon("folder", { size: 16 })}${escapeHtml(folder.name)}</span>
+                <span class="study-folder-count">${counts.get(folder.id) || 0}</span>
+              </button>
+              <details class="study-folder-options">
+                <summary aria-label="Options for ${escapeHtml(folder.name)}">${icon("more", { size: 16 })}</summary>
+                <div class="study-folder-options-menu">
+                  <button type="button" data-rename-study-folder="${escapeHtml(folder.id)}">Rename</button>
+                  <button type="button" data-delete-study-folder="${escapeHtml(folder.id)}">Delete</button>
+                </div>
+              </details>
+            </div>`).join("")}
+      </nav>`;
+    }
+
+    function renderOrganizationReview() {
+      if (!organizationPreview) return;
+      if (!organizationProposal) {
+        organizationPreview.innerHTML = "";
+        return;
+      }
+      const sourceById = new Map((organizationProposal.materials || []).map((item) => [String(item.id), item]));
+      const proposedFolders = organizationProposal.folders || [];
+      const proposalMaterialCount = (organizationProposal.materials || []).length;
+      organizationPreview.innerHTML = `
+        <section class="study-organizer-review" aria-labelledby="study-organizer-title">
+          <header class="study-organizer-review-head">
+            <div>
+              <span class="study-organizer-eyebrow">${icon("sparkles", { size: 14 })} Suggested by AI</span>
+              <h3 id="study-organizer-title">Review your folder plan</h3>
+              <p class="muted">Rename folders or change destinations. Nothing moves until you apply the plan.</p>
+            </div>
+            <div class="study-organizer-summary">
+              <strong>${proposalMaterialCount}</strong>
+              <span>${proposalMaterialCount === 1 ? "material" : "materials"}</span>
+              <span class="study-organizer-draft-badge">Not applied</span>
+            </div>
+            <button class="btn btn-ghost btn-icon" type="button" data-organization-cancel aria-label="Discard AI folder suggestions">${icon("x", { size: 17 })}</button>
+          </header>
+          <div class="study-organizer-groups">
+            ${proposedFolders.map((folder, index) => `
+              <section class="study-organizer-group" data-organization-group="${index}">
+                <header class="study-organizer-group-head">
+                  <span class="study-organizer-folder-mark">${icon("folder", { size: 17 })}</span>
+                  <span class="study-organizer-group-label">Suggested folder ${index + 1}</span>
+                  <span class="study-organizer-group-count" data-organization-group-count="${index}">${(folder.material_ids || []).length} ${(folder.material_ids || []).length === 1 ? "item" : "items"}</span>
+                </header>
+                <label class="field study-organizer-folder-name">
+                  <span>Folder name</span>
+                  <input type="text" maxlength="80" value="${escapeHtml(folder.name)}" data-organization-folder-name="${index}" aria-label="Name for suggested folder ${index + 1}" />
+                </label>
+                <ul class="study-organizer-items" data-organization-material-list>
+                  ${(folder.material_ids || []).map((materialId) => {
+                    const material = sourceById.get(String(materialId)) || {};
+                    const sources = Array.isArray(material.sources) ? material.sources : [];
+                    return `
+                      <li class="study-organizer-item">
+                        <div class="study-organizer-item-copy">
+                          <strong>${escapeHtml(material.title || "Study material")}</strong>
+                          <span class="study-organizer-item-meta">${escapeHtml(material.kind || "Material")}</span>
+                          ${sources.length ? `<span class="study-organizer-item-sources">${escapeHtml(sources.slice(0, 2).join(", "))}</span>` : ""}
+                        </div>
+                        <label class="study-organizer-destination">
+                          <span>Move to</span>
+                          <select data-organization-material="${escapeHtml(materialId)}" aria-label="Folder for ${escapeHtml(material.title || "study material")}">
+                            <option value="">Leave unfiled</option>
+                            ${proposedFolders.map((target, targetIndex) => `<option value="${targetIndex}" ${targetIndex === index ? "selected" : ""}>${escapeHtml(target.name)}</option>`).join("")}
+                          </select>
+                        </label>
+                      </li>`;
+                  }).join("")}
+                </ul>
+              </section>`).join("")}
+            <section class="study-organizer-group study-organizer-unfiled" data-organization-unfiled hidden>
+              <header class="study-organizer-group-head">
+                <span class="study-organizer-folder-mark">${icon("folder", { size: 17 })}</span>
+                <span class="study-organizer-group-label">Leave unfiled</span>
+                <span class="study-organizer-group-count" data-organization-group-count="">0 items</span>
+              </header>
+              <ul class="study-organizer-items" data-organization-material-list></ul>
+            </section>
+          </div>
+          <footer class="study-organizer-review-actions">
+            <span class="muted">Review all ${proposalMaterialCount} ${proposalMaterialCount === 1 ? "material" : "materials"} before saving.</span>
+            <div>
+              <button class="btn btn-secondary" type="button" data-organization-cancel>Cancel</button>
+              <button class="btn btn-primary" type="button" data-organization-apply>Apply organization</button>
+            </div>
+          </footer>
+        </section>`;
+    }
+
     function renderMaterials() {
-      if (!klass.materials.length) {
+      renderFolderToolbar();
+      renderOrganizationReview();
+      const allMaterials = [...klass.materials].reverse();
+      const latestReady = allMaterials.find((material) => material.status === "ready");
+      const nextActionsMarkup = `
+        <section class="study-next-actions" aria-label="Study next">
+          <div class="study-next-action-primary">
+            <span class="eyebrow">Pick up where you left off</span>
+            ${latestReady ? `<h2>${escapeHtml(displayStudyMaterialTitle(latestReady.title || latestReady.type, klass.name))}</h2><p class="muted">${escapeHtml(latestReady.type || "Study material")} · ${escapeHtml(latestReady.scope || "Class material")}</p><button class="btn btn-primary" type="button" data-open-material="${escapeHtml(latestReady.id)}">${latestReady.type === "Flashcards" ? "Continue flashcards" : "Continue studying"}</button>` : `<h2>No study set yet</h2><p class="muted">Make a study set from ready course sources when you are ready.</p><button class="btn btn-primary" type="button" data-open-customizer>Create study materials</button>`}
+          </div>
+          <div class="study-next-action-secondary">
+            <a class="btn btn-secondary" href="#/progress">Review due topics</a>
+            <button class="btn btn-ghost" type="button" data-open-customizer>Create or customize</button>
+          </div>
+        </section>`;
+      const visibleMaterials = selectedStudyFolder === "all"
+        ? allMaterials
+        : allMaterials.filter((material) => selectedStudyFolder === "unfiled"
+          ? !material.folderId
+          : material.folderId === selectedStudyFolder);
+      if (!allMaterials.length || !visibleMaterials.length) {
         list.innerHTML = `
+          ${nextActionsMarkup}
           <div class="panel empty-state">
             <span class="empty-icon">${icon("sparkles", { size: 26 })}</span>
-            <strong>No study materials yet</strong>
-            <span>Create a review set from available class material.</span>
+            <strong>${allMaterials.length ? "This folder is empty" : "No study materials yet"}</strong>
+            <span>${allMaterials.length ? "Move saved materials here with the Folder menu on each card." : "Create a review set from available class material."}</span>
           </div>`;
         return;
       }
 
-      list.innerHTML = `<div class="material-grid">${[...klass.materials].reverse().map((material) => {
+      list.innerHTML = `${nextActionsMarkup}<div class="material-grid">${visibleMaterials.map((material) => {
         material.classId = klass.id;
         const questions = Array.isArray(material.questions) ? material.questions : [];
         const count = material.items?.length || material.cards?.length || questions.length || material.count || 0;
@@ -661,7 +893,7 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
         const isAssessment = ["Quiz", "Practice test"].includes(material.type);
         const isFlashcards = material.type === "Flashcards";
         const canPlay = isAssessment || isFlashcards;
-        const title = material.title || material.type || "Study material";
+        const title = displayStudyMaterialTitle(material.title || material.type || "Study material", klass.name);
         const isAuthor = material.createdBy && String(material.createdBy) === String(currentUserId);
         const canDelete = (material.resourceScope === "personal" && isAuthor)
           || klass.isOwner || (isAuthor && classHasCapability(klass, "delete"));
@@ -688,6 +920,14 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
               ${material.resourceScope === "personal" ? `<span class="permission-badge">Personal</span>` : material.publicationState ? `<span class="permission-badge" data-publication="${escapeHtml(material.publicationState)}">${material.publicationState === "scheduled" ? `Scheduled for ${escapeHtml(formatDate(material.releaseAt))}` : escapeHtml(material.publicationState)}</span>` : ""}
               ${lastAttempt ? `<span class="row-meta">${typeof lastAttempt.scorePercent === "number" ? `Last score: <strong>${lastAttempt.scorePercent}%</strong> &middot; ` : ""}${(material.attempts || []).length} ${(material.attempts || []).length === 1 ? "attempt" : "attempts"}</span>` : ""}
             </div>
+            ${material.isRemote && backendClassId && currentUserId && !folderLoadFailed ? `
+              <label class="material-folder-select">
+                <span>${icon("folder", { size: 15 })} Folder</span>
+                <select data-material-folder="${escapeHtml(material.id)}" aria-label="Move ${escapeHtml(title)} to a folder">
+                  <option value="" ${material.folderId ? "" : "selected"}>Unfiled</option>
+                  ${studyMaterialFolders.map((folder) => `<option value="${escapeHtml(folder.id)}" ${material.folderId === folder.id ? "selected" : ""}>${escapeHtml(folder.name)}</option>`).join("")}
+                </select>
+              </label>` : ""}
             <footer>
               <span class="row-meta">${formatDate(material.createdAt)}${material.timeLimitMinutes ? ` &middot; ${material.timeLimitMinutes} min` : ""}</span>
               <div class="material-card-actions">
@@ -828,7 +1068,210 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
       }
     });
 
+    folderToolbar?.addEventListener("click", async (event) => {
+      if (event.target.closest("[data-organize-study-materials]")) {
+        organizationBusy = true;
+        renderFolderToolbar();
+        try {
+          organizationProposal = await proposeStudyMaterialOrganizationApi(backendClassId);
+          renderOrganizationReview();
+        } catch (error) {
+          toast(error.message || "Could not organize these materials.", { tone: "error" });
+        } finally {
+          organizationBusy = false;
+          renderFolderToolbar();
+        }
+        return;
+      }
+
+      const filter = event.target.closest("[data-study-folder-filter]")?.dataset.studyFolderFilter;
+      if (filter) {
+        selectedStudyFolder = filter;
+        renderMaterials();
+        return;
+      }
+
+      if (event.target.closest("[data-reload-study-folders]")) {
+        try {
+          studyMaterialFolders = await getStudyMaterialFoldersApi(backendClassId);
+          folderLoadFailed = false;
+          renderMaterials();
+        } catch (error) {
+          toast(error.message || "Could not load folders.", { tone: "error" });
+        }
+        return;
+      }
+
+      if (event.target.closest("[data-create-study-folder]")) {
+        const name = await openDialog({
+          title: "Create folder",
+          message: "Folders are private to you in this class.",
+          input: { label: "Folder name", maxLength: 80 },
+          confirmLabel: "Create folder"
+        });
+        if (typeof name !== "string") return;
+        try {
+          const folder = await createStudyMaterialFolderApi(backendClassId, name);
+          studyMaterialFolders = [...studyMaterialFolders, folder];
+          selectedStudyFolder = folder.id;
+          renderMaterials();
+          toast(`Created “${folder.name}”.`);
+        } catch (error) {
+          toast(error.message || "Could not create folder.", { tone: "error" });
+        }
+        return;
+      }
+
+      const renameId = event.target.closest("[data-rename-study-folder]")?.dataset.renameStudyFolder;
+      if (renameId) {
+        const folder = studyMaterialFolders.find((item) => item.id === renameId);
+        if (!folder) return;
+        const name = await openDialog({
+          title: "Rename folder",
+          input: { label: "Folder name", value: folder.name, maxLength: 80 },
+          confirmLabel: "Save name"
+        });
+        if (typeof name !== "string") return;
+        try {
+          const updated = await renameStudyMaterialFolderApi(backendClassId, renameId, name);
+          studyMaterialFolders = studyMaterialFolders.map((item) => item.id === renameId ? updated : item);
+          renderMaterials();
+          toast("Folder renamed.");
+        } catch (error) {
+          toast(error.message || "Could not rename folder.", { tone: "error" });
+        }
+        return;
+      }
+
+      const deleteId = event.target.closest("[data-delete-study-folder]")?.dataset.deleteStudyFolder;
+      if (deleteId) {
+        const folder = studyMaterialFolders.find((item) => item.id === deleteId);
+        if (!folder) return;
+        const confirmed = await openDialog({
+          title: `Delete “${folder.name}”?`,
+          message: "Materials in this folder will become unfiled. The materials themselves will stay saved.",
+          confirmLabel: "Delete folder",
+          danger: true
+        });
+        if (confirmed !== true) return;
+        try {
+          await deleteStudyMaterialFolderApi(backendClassId, deleteId);
+          studyMaterialFolders = studyMaterialFolders.filter((item) => item.id !== deleteId);
+          for (const material of klass.materials) {
+            if (material.folderId === deleteId) material.folderId = null;
+          }
+          if (selectedStudyFolder === deleteId) selectedStudyFolder = "unfiled";
+          renderMaterials();
+          toast("Folder deleted. Its materials are now unfiled.");
+        } catch (error) {
+          toast(error.message || "Could not delete folder.", { tone: "error" });
+        }
+      }
+    });
+
+    organizationPreview?.addEventListener("input", (event) => {
+      const input = event.target.closest("[data-organization-folder-name]");
+      if (!input) return;
+      const index = input.dataset.organizationFolderName;
+      const label = input.value.trim() || `Folder ${Number(index) + 1}`;
+      for (const select of organizationPreview.querySelectorAll("[data-organization-material]")) {
+        const option = [...select.options].find((item) => item.value === index);
+        if (option) option.textContent = label;
+      }
+    });
+
+    organizationPreview?.addEventListener("change", (event) => {
+      const select = event.target.closest("[data-organization-material]");
+      if (!select) return;
+      const item = select.closest(".study-organizer-item");
+      const destination = select.value === ""
+        ? organizationPreview.querySelector("[data-organization-unfiled]")
+        : organizationPreview.querySelector(`[data-organization-group="${select.value}"]`);
+      const destinationList = destination?.querySelector("[data-organization-material-list]");
+      if (!item || !destinationList) return;
+      destinationList.append(item);
+
+      for (const group of organizationPreview.querySelectorAll(".study-organizer-group")) {
+        const count = group.querySelector("[data-organization-group-count]");
+        const list = group.querySelector("[data-organization-material-list]");
+        const itemCount = list?.children.length || 0;
+        if (count) count.textContent = `${itemCount} ${itemCount === 1 ? "item" : "items"}`;
+        if (group.hasAttribute("data-organization-unfiled")) group.hidden = itemCount === 0;
+      }
+    });
+
+    organizationPreview?.addEventListener("click", async (event) => {
+      if (event.target.closest("[data-organization-cancel]")) {
+        organizationProposal = null;
+        renderOrganizationReview();
+        return;
+      }
+      const applyButton = event.target.closest("[data-organization-apply]");
+      if (!applyButton || applyButton.disabled || !organizationProposal) return;
+
+      const folderNames = [...organizationPreview.querySelectorAll("[data-organization-folder-name]")]
+        .map((input) => input.value.trim());
+      if (folderNames.some((name) => !name)) {
+        toast("Give every proposed folder a name before applying.", { tone: "error" });
+        return;
+      }
+      const folders = folderNames.map((name) => ({ name, material_ids: [] }));
+      const unfiledMaterialIds = [];
+      for (const select of organizationPreview.querySelectorAll("[data-organization-material]")) {
+        const materialId = select.dataset.organizationMaterial;
+        const target = select.value;
+        if (target === "") unfiledMaterialIds.push(materialId);
+        else if (folders[Number(target)]) folders[Number(target)].material_ids.push(materialId);
+      }
+      const nonEmptyFolders = folders.filter((folder) => folder.material_ids.length);
+      if (!nonEmptyFolders.length) {
+        toast("Keep at least one material in a folder, or cancel without applying.", { tone: "error" });
+        return;
+      }
+
+      applyButton.disabled = true;
+      applyButton.textContent = "Applying…";
+      try {
+        const result = await applyStudyMaterialOrganizationApi(
+          backendClassId,
+          nonEmptyFolders,
+          unfiledMaterialIds
+        );
+        const folderById = new Map(studyMaterialFolders.map((folder) => [String(folder.id), folder]));
+        for (const folder of result.folders || []) folderById.set(String(folder.id), folder);
+        studyMaterialFolders = [...folderById.values()];
+        const assignmentByMaterial = new Map(
+          (result.assignments || []).map((assignment) => [String(assignment.material_id), String(assignment.folder_id)])
+        );
+        const affected = new Set([
+          ...(organizationProposal.materials || []).map((item) => String(item.id)),
+          ...unfiledMaterialIds
+        ]);
+        for (const material of klass.materials) {
+          if (affected.has(String(material.id))) material.folderId = assignmentByMaterial.get(String(material.id)) || null;
+        }
+        organizationProposal = null;
+        selectedStudyFolder = "all";
+        renderMaterials();
+        toast("Study materials organized.");
+      } catch (error) {
+        toast(error.message || "Could not apply this folder plan.", { tone: "error" });
+        applyButton.disabled = false;
+        applyButton.textContent = "Apply organization";
+      }
+    });
+
     list.addEventListener("click", async (event) => {
+      if (event.target.closest("[data-open-customizer]")) {
+        const details = root.querySelector("#study-create-details");
+        if (details) {
+          details.open = true;
+          details.scrollIntoView?.({ block: "start", behavior: "smooth" });
+          root.querySelector('#study-create-details input[name="source_upload"]')?.focus({ preventScroll: true });
+        }
+        return;
+      }
+
       const retryId = event.target.closest("[data-retry-material]")?.dataset.retryMaterial;
       if (retryId) {
         const material = klass.materials.find((item) => item.id === retryId);
@@ -841,6 +1284,7 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
           const pending = formatRemoteMaterial(
             summary, klass.id, "Study guide", klass.uploads, backendClassId
           );
+          pending.folderId = material.folderId || null;
           await onMaterialAdded(pending);
           renderMaterials();
           const previewMaterial = {
@@ -890,7 +1334,11 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
         try {
           const detail = await getStudyMaterialDetailApi(materialId);
           const refreshed = formatRemoteMaterial(
-            detail, klass.id, material.type, klass.uploads, backendClassId
+            { ...detail, folder_id: detail.folder_id || material.folderId || null },
+            klass.id,
+            material.type,
+            klass.uploads,
+            backendClassId
           );
           if (refreshed.status === "generating" && refreshed.type === "Study guide") {
             const previewController = new AbortController();
@@ -973,7 +1421,24 @@ export async function renderStudyTab({ root, klass, currentUserId = null, onMate
       });
     });
 
-    list.addEventListener("change", (event) => {
+    list.addEventListener("change", async (event) => {
+      const folderSelect = event.target.closest?.("[data-material-folder]");
+      if (folderSelect) {
+        const material = klass.materials.find((item) => item.id === folderSelect.dataset.materialFolder);
+        if (!material) return;
+        folderSelect.disabled = true;
+        try {
+          const folderId = folderSelect.value || null;
+          await assignStudyMaterialFolderApi(backendClassId, material.id, folderId);
+          material.folderId = folderId;
+          renderMaterials();
+          toast(folderId ? "Material moved to folder." : "Material moved to Unfiled.");
+        } catch (error) {
+          renderMaterials();
+          toast(error.message || "Could not move material.", { tone: "error" });
+        }
+        return;
+      }
       if (!event.target.matches?.('[data-material-publication] [name="state"]')) return;
       const form = event.target.closest("[data-material-publication]");
       form.querySelector("[data-release-date-wrap]").hidden = event.target.value !== "scheduled";

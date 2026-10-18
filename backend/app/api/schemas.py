@@ -570,6 +570,7 @@ class MaterialSummary(BaseModel):
     id: UUID
     class_id: UUID | None = None
     origin_class_id: UUID | None = None
+    folder_id: UUID | None = None
     resource_scope: Literal["class_owned", "personal", "student_contribution"] = "class_owned"
     created_by: UUID | None = None
     publication_state: Literal["draft", "scheduled", "published"] | None = "published"
@@ -586,6 +587,30 @@ class MaterialSummary(BaseModel):
     generated_at: datetime | None = None
     latest_attempt: LatestAttempt | None = None
     source_warnings: list[Literal["changed", "missing", "truncated"]] = Field(default_factory=list)
+
+
+class StudyMaterialFolderCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=80)
+
+
+class StudyMaterialFolderRename(StudyMaterialFolderCreate):
+    pass
+
+
+class StudyMaterialFolderSummary(BaseModel):
+    id: UUID
+    class_id: UUID
+    name: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class StudyMaterialFolderAssignment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    folder_id: UUID | None
 
 
 class MaterialDetail(MaterialSummary):
@@ -1406,6 +1431,26 @@ class StudyGuideBlock(BaseModel):
         return self
 
 
+class StudyGuideMiniQuiz(BaseModel):
+    """One short, source-grounded check for understanding at the end of a guide section."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    question: str = Field(min_length=8, max_length=1200)
+    choices: list[str] = Field(min_length=4, max_length=4)
+    correct_index: int = Field(ge=0, le=3, strict=True)
+    explanation: str = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def choices_are_distinct_and_answer_exists(self) -> StudyGuideMiniQuiz:
+        normalized = [choice.strip().casefold() for choice in self.choices]
+        if any(not choice for choice in normalized) or len(set(normalized)) != 4:
+            raise ValueError("Mini-quiz choices must be non-empty and distinct.")
+        if self.correct_index >= len(self.choices):
+            raise ValueError("Mini-quiz correct_index must identify one of its choices.")
+        return self
+
+
 class StudyGuideSectionV2(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1417,6 +1462,8 @@ class StudyGuideSectionV2(BaseModel):
     key_terms: list[str] = Field(default_factory=list, max_length=50)
     sources: list[SourceCitation] = Field(default_factory=list, max_length=20)
     blocks: list[StudyGuideBlock] = Field(min_length=1, max_length=24)
+    # Optional when reading existing saved guides; new authoring responses require it.
+    mini_quiz: StudyGuideMiniQuiz | None = None
 
 
 class StudyGuideContent(BaseModel):

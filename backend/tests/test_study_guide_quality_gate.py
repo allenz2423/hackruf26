@@ -43,6 +43,17 @@ def guide(upload_id: UUID, *, heading: str = "Vectors") -> dict:
                 "heading": heading,
                 "key_terms": ["vector"],
                 "sources": [{"upload_id": str(upload_id), "page": 1}],
+                "mini_quiz": {
+                    "question": "If a vector is resolved into perpendicular components, what stays unchanged?",
+                    "choices": [
+                        "Its direction and magnitude as a whole",
+                        "Only its horizontal component",
+                        "Only its vertical component",
+                        "The angle between its components",
+                    ],
+                    "correct_index": 0,
+                    "explanation": "Perpendicular components represent the same original vector.",
+                },
                 "blocks": [
                     {
                         "type": "paragraph",
@@ -65,6 +76,7 @@ class QualityGateService:
         self.review_calls: list[dict] = []
         self.review_scopes: list[set[int] | None] = []
         self.repair_calls: list[dict] = []
+        self.mini_quiz_calls: list[list[dict]] = []
 
     def generate_material(self, **_kwargs):
         return "Vector guide", deepcopy(self.initial)
@@ -89,6 +101,13 @@ class QualityGateService:
         if self.repair_results:
             return deepcopy(self.repair_results.pop(0))
         return deepcopy(content)
+
+    def complete_study_guide_mini_quizzes(self, sections: list[dict], _sources: list[dict]):
+        self.mini_quiz_calls.append(deepcopy(sections))
+        completed = deepcopy(sections)
+        for section in completed:
+            section["mini_quiz"] = deepcopy(guide(self.upload_id)["sections"][0]["mini_quiz"])
+        return completed
 
 
 class FailingGuideGenerationService(QualityGateService):
@@ -229,6 +248,28 @@ class StudyGuideQualityGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service.repair_calls, [])
         self.assertFalse(render.call_args.kwargs["strict_math"])
         validate.assert_called_once()
+
+    async def test_missing_section_quiz_is_added_without_rewriting_teaching_content(self) -> None:
+        initial = guide(self.upload_id)
+        initial["sections"][0].pop("mini_quiz")
+        self.service.initial = initial
+        await self.add_material()
+
+        with self.export_patch(), patch("app.api.class_library._validate_guide_pdf"):
+            await _create_material_job(self.application, self.material_id)
+
+        row = await self.db.fetchrow(
+            "SELECT status, content FROM study_materials WHERE id=?1", self.material_id
+        )
+        saved = json.loads(row["content"])
+        self.assertEqual(row["status"], "ready")
+        self.assertEqual(len(self.service.mini_quiz_calls), 1)
+        self.assertEqual(saved["sections"][0]["heading"], "Vectors")
+        self.assertEqual(
+            saved["sections"][0]["blocks"][0]["text"],
+            initial["sections"][0]["blocks"][0]["text"],
+        )
+        self.assertIsNotNone(saved["sections"][0]["mini_quiz"])
 
     async def test_invalid_study_guide_does_not_restart_the_entire_generation(self) -> None:
         self.service = FailingGuideGenerationService(self.upload_id)

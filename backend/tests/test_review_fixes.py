@@ -137,8 +137,7 @@ class PdfExtractionTests(unittest.TestCase):
 
         self.assertIn("[Page 1]\nReadable course page 1.", text)
         self.assertIn(
-            "[Page 5]\n[No native text extracted; inspect the original page image "
-            "as needed.]",
+            "[Page 5]\n[No native text extracted; inspect the original page image as needed.]",
             text,
         )
         vision.assert_not_called()
@@ -418,7 +417,9 @@ class SourceLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_existing_database_migrates_and_removes_destructive_trigger(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "legacy.sqlite3"
-            schema = Path("backend/app/services/sqlite_schema.sql").read_text()
+            schema = (
+                Path(__file__).resolve().parents[1] / "app/services/sqlite_schema.sql"
+            ).read_text()
             source_index_start = schema.index("-- Immutable source revisions")
             source_index_end = schema.index("CREATE TABLE IF NOT EXISTS study_materials")
             schema = schema[:source_index_start] + schema[source_index_end:]
