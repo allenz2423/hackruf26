@@ -8549,7 +8549,7 @@ p {
   /* Scrolling makes this span's baseline its bottom edge rather than KaTeX's
      internal text baseline. Compensate for the glyph height so inline math
      sits on the same baseline as surrounding prose. */
-  vertical-align: -0.5em;
+  vertical-align: -0.6em;
 }
 
 /* A long display equation scrolls inside its box instead of widening the page. */
