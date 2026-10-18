@@ -139,12 +139,136 @@ export function createGuideChat(host, { material, sectionIndex = 0, sectionHeadi
   let destroyed = false;
   let requestController = null;
   let statusText = "";
+  let panelWidth = readStoredPanelSize("jot-guide-chat-width");
+  let panelHeight = readStoredPanelSize("jot-guide-chat-height");
+  let stopPanelResize = null;
+  let panelResizeController = null;
 
   host.className = "guide-chat-host";
   host.hidden = true;
 
+  function readStoredPanelSize(key) {
+    try {
+      const value = Number(window.localStorage?.getItem(key));
+      return Number.isFinite(value) && value > 0 ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function panelBounds(isMobile) {
+    const layout = host.parentElement;
+    if (isMobile) {
+      const available = Math.max(220, layout?.clientHeight || window.innerHeight || 720);
+      const min = Math.min(240, Math.max(160, available - 120));
+      return { min, max: Math.max(min, Math.min(680, available - 48)) };
+    }
+    const available = Math.max(608, layout?.clientWidth || 900);
+    const min = 288;
+    return { min, max: Math.max(min, Math.min(640, available - 320)) };
+  }
+
+  function setPanelSize(value, isMobile, persist = false) {
+    const layout = host.parentElement;
+    if (!layout) return;
+    const { min, max } = panelBounds(isMobile);
+    const size = Math.round(Math.max(min, Math.min(max, value)));
+    const handle = host.querySelector("[data-guide-chat-resize]");
+    if (isMobile) {
+      panelHeight = size;
+      layout.style.setProperty("--guide-chat-height", String(size) + "px");
+    } else {
+      panelWidth = size;
+      layout.style.setProperty("--guide-chat-width", String(size) + "px");
+    }
+    handle?.setAttribute("aria-valuemin", String(min));
+    handle?.setAttribute("aria-valuemax", String(max));
+    handle?.setAttribute("aria-valuenow", String(size));
+    handle?.setAttribute("aria-valuetext", "Study Help " + (isMobile ? "height" : "width") + " " + size + " pixels");
+    if (persist) {
+      try {
+        window.localStorage?.setItem(isMobile ? "jot-guide-chat-height" : "jot-guide-chat-width", String(size));
+      } catch {
+        // Resizing still works when browser storage is unavailable.
+      }
+    }
+  }
+
+  function setupPanelResize(handle) {
+    const layout = host.parentElement;
+    if (!handle || !layout) return;
+    panelResizeController?.abort();
+    panelResizeController = new AbortController();
+    const { signal } = panelResizeController;
+    const isMobileViewport = () => window.matchMedia?.("(max-width: 760px)")?.matches ?? window.innerWidth <= 760;
+    const updateOrientation = () => {
+      const isMobile = isMobileViewport();
+      const { min, max } = panelBounds(isMobile);
+      handle.setAttribute("aria-orientation", isMobile ? "horizontal" : "vertical");
+      handle.setAttribute("aria-valuemin", String(min));
+      handle.setAttribute("aria-valuemax", String(max));
+      const rect = host.getBoundingClientRect();
+      const size = isMobile ? panelHeight : panelWidth;
+      const defaultSize = isMobile
+        ? Math.min(680, Math.max(240, window.innerHeight * 0.72))
+        : Math.min(384, max);
+      setPanelSize(size ?? ((isMobile ? rect.height : rect.width) || defaultSize), isMobile);
+    };
+    const isMobile = isMobileViewport();
+    const { min, max } = panelBounds(isMobile);
+    const bounds = host.getBoundingClientRect();
+    const stored = isMobile ? panelHeight : panelWidth;
+    const defaultSize = isMobile
+      ? Math.min(680, Math.max(240, window.innerHeight * 0.72))
+      : Math.min(384, max);
+    setPanelSize(stored ?? ((isMobile ? bounds.height : bounds.width) || defaultSize), isMobile);
+    handle.setAttribute("aria-orientation", isMobile ? "horizontal" : "vertical");
+    handle.setAttribute("aria-valuemin", String(min));
+    handle.setAttribute("aria-valuemax", String(max));
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== undefined && event.button !== 0) return;
+      event.preventDefault();
+      stopPanelResize?.();
+      const isMobile = isMobileViewport();
+      const startBounds = host.getBoundingClientRect();
+      const startSize = isMobile ? startBounds.height : startBounds.width;
+      const startPosition = isMobile ? event.clientY : event.clientX;
+      const onMove = (moveEvent) => {
+        const position = isMobile ? moveEvent.clientY : moveEvent.clientX;
+        setPanelSize(startSize - (position - startPosition), isMobile);
+      };
+      const finish = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", finish);
+        window.removeEventListener("pointercancel", finish);
+        document.body?.classList.remove("is-resizing-guide-chat", "is-resizing-guide-chat-mobile");
+        setPanelSize(isMobile ? panelHeight : panelWidth, isMobile, true);
+        stopPanelResize = null;
+      };
+      stopPanelResize = finish;
+      document.body?.classList.add(isMobile ? "is-resizing-guide-chat-mobile" : "is-resizing-guide-chat");
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", finish, { once: true });
+      window.addEventListener("pointercancel", finish, { once: true });
+    }, { signal });
+    handle.addEventListener("keydown", (event) => {
+      const isMobile = isMobileViewport();
+      const { min, max } = panelBounds(isMobile);
+      const grow = isMobile ? event.key === "ArrowUp" : event.key === "ArrowLeft";
+      const shrink = isMobile ? event.key === "ArrowDown" : event.key === "ArrowRight";
+      if (!grow && !shrink && event.key !== "Home" && event.key !== "End") return;
+      event.preventDefault();
+      const current = isMobile ? panelHeight : panelWidth;
+      const step = event.shiftKey ? 32 : 16;
+      const next = event.key === "Home" ? min : event.key === "End" ? max : current + (grow ? step : -step);
+      setPanelSize(next, isMobile, true);
+    }, { signal });
+    window.addEventListener("resize", updateOrientation, { signal });
+  }
+
   function render() {
     if (destroyed) return;
+    stopPanelResize?.();
     host.innerHTML = `<aside class="guide-chat-panel" aria-labelledby="guide-chat-title" aria-describedby="guide-chat-privacy">
       <header class="guide-chat-header">
         <div><p class="eyebrow">Study help</p><h3 id="guide-chat-title">Ask about this guide</h3><p class="guide-chat-context" data-guide-chat-context>${escapeHtml(activeSectionHeading || "Current section")}</p></div>
@@ -167,9 +291,21 @@ export function createGuideChat(host, { material, sectionIndex = 0, sectionHeadi
       </form>
       <p class="guide-chat-footer">Chat text and practice answers are saved in this private transcript. They do not change quiz results or mastery.</p>
     </aside>`;
-    const panel = host.querySelector(".guide-chat-panel");
+    const resizeHandle = document.createElement("div");
+    resizeHandle.className = "guide-chat-resize-handle";
+    resizeHandle.dataset.guideChatResize = "";
+    resizeHandle.setAttribute("role", "separator");
+    resizeHandle.setAttribute("tabindex", "0");
+    resizeHandle.setAttribute("aria-label", "Resize Study Help");
+    resizeHandle.setAttribute("aria-controls", "guide-chat-panel");
+    resizeHandle.setAttribute("aria-orientation", "vertical");
+    resizeHandle.innerHTML = '<span aria-hidden="true"></span>';
+    host.prepend(resizeHandle);
     const messageBox = host.querySelector("[data-guide-chat-messages]");
     const scope = host.querySelector("[data-guide-chat-scope]");
+    const panel = host.querySelector(".guide-chat-panel");
+    panel?.setAttribute("id", "guide-chat-panel");
+    setupPanelResize(resizeHandle);
     scope.value = activeScope;
     host.querySelector("[data-guide-chat-close]")?.addEventListener("click", close);
     host.querySelector("[data-guide-chat-clear]")?.addEventListener("click", () => { void clearChat(); });
@@ -313,6 +449,9 @@ export function createGuideChat(host, { material, sectionIndex = 0, sectionHeadi
 
   function close() {
     if (destroyed) return;
+    stopPanelResize?.();
+    panelResizeController?.abort();
+    panelResizeController = null;
     requestController?.abort();
     requestController = null;
     pending = false;
@@ -511,6 +650,9 @@ export function createGuideChat(host, { material, sectionIndex = 0, sectionHeadi
   function destroy() {
     if (destroyed) return;
     destroyed = true;
+    stopPanelResize?.();
+    panelResizeController?.abort();
+    panelResizeController = null;
     requestController?.abort();
     messages = [];
     host.replaceChildren();

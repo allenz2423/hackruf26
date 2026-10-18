@@ -3541,7 +3541,7 @@ main {
 
 .material-session-layout:has(.guide-chat-host:not([hidden])) {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(19rem, 24rem);
+  grid-template-columns: minmax(0, 1fr) minmax(18rem, var(--guide-chat-width, 24rem));
 }
 
 .material-session-layout:has(.guide-chat-host:not([hidden])) > .material-session {
@@ -3549,11 +3549,43 @@ main {
 }
 
 .guide-chat-host:not([hidden]) {
+  position: relative;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
   border-left: 1px solid var(--line);
   background: var(--surface);
+}
+
+.guide-chat-resize-handle {
+  position: absolute;
+  z-index: 2;
+  inset: 0 auto 0 0;
+  display: flex;
+  width: 16px;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;
+  cursor: col-resize;
+  background: transparent;
+}
+
+.guide-chat-resize-handle span {
+  width: 3px;
+  height: 2.75rem;
+  border-radius: 999px;
+  background: var(--line-strong, var(--line));
+  transition: background-color 120ms ease, height 120ms ease, width 120ms ease;
+}
+
+.guide-chat-resize-handle:hover span,
+.guide-chat-resize-handle:focus-visible span {
+  background: var(--accent);
+}
+
+.guide-chat-resize-handle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .guide-chat-panel {
@@ -3562,9 +3594,21 @@ main {
   min-height: 0;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-4);
+  padding: var(--space-4) var(--space-4) var(--space-4) calc(var(--space-4) + 0.5rem);
   background: var(--surface);
   color: var(--text);
+}
+
+body.is-resizing-guide-chat,
+body.is-resizing-guide-chat * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+body.is-resizing-guide-chat-mobile,
+body.is-resizing-guide-chat-mobile * {
+  cursor: row-resize !important;
+  user-select: none !important;
 }
 
 .guide-chat-header {
@@ -4044,15 +4088,33 @@ main {
     z-index: 10;
     inset: auto 0 0;
     display: flex;
-    height: min(72dvh, 680px);
+    height: var(--guide-chat-height, min(72dvh, 680px));
+    max-height: calc(100% - 2.5rem);
     border-top: 1px solid var(--line);
     border-left: 0;
     box-shadow: 0 -12px 28px rgb(28 46 55 / 14%);
   }
 
+  .guide-chat-resize-handle {
+    inset: 0 0 auto;
+    width: auto;
+    height: 18px;
+    cursor: row-resize;
+  }
+
+  .guide-chat-resize-handle span {
+    width: 2.75rem;
+    height: 3px;
+  }
+
+  .guide-chat-resize-handle:hover span,
+  .guide-chat-resize-handle:focus-visible span {
+    width: 3.5rem;
+  }
+
   .guide-chat-panel {
     width: 100%;
-    padding: var(--space-3);
+    padding: calc(var(--space-3) + 0.65rem) var(--space-3) var(--space-3);
   }
 
   .guide-chat-scroll {
