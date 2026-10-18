@@ -3641,16 +3641,56 @@ main {
   overflow-wrap: anywhere;
 }
 
+.guide-chat-message-meta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.6rem;
+  margin-bottom: 0.45rem;
+}
+
 .guide-chat-message.is-user {
   border-left: 3px solid var(--primary);
   background: color-mix(in srgb, var(--primary) 7%, var(--surface));
 }
 
 .guide-chat-speaker {
-  margin: 0 0 0.35rem;
+  min-width: 0;
+  margin: 0;
   color: var(--muted);
   font-size: 0.75rem;
   font-weight: 700;
+}
+
+.guide-chat-message-context {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 0.4rem;
+  padding: 0.16rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.guide-chat-message-context-type {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.guide-chat-message-context-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .guide-chat-message-body {

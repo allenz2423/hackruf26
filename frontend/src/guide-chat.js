@@ -58,11 +58,15 @@ function editPreviewHtml(proposal, index) {
 
 function messageHtml(message, index) {
   const isUser = message.role === "user";
+  const contextType = message.scope === "guide" ? "Guide" : "Section";
   const contextLabel = message.scope === "guide"
     ? "Whole guide"
     : message.sectionHeading || (Number.isInteger(message.sectionIndex) ? `Section ${message.sectionIndex + 1}` : "Study guide");
   return `<article class="guide-chat-message ${isUser ? "is-user" : "is-assistant"}" data-guide-chat-message="${index}">
-    <p class="guide-chat-speaker">${isUser ? "You" : "Jot · source-grounded help"} <span class="guide-chat-message-context">${escapeHtml(contextLabel)}</span></p>
+    <div class="guide-chat-message-meta">
+      <span class="guide-chat-speaker">${isUser ? "You" : "Jot · source-grounded help"}</span>
+      <span class="guide-chat-message-context"><span class="guide-chat-message-context-type">${contextType}</span><span class="guide-chat-message-context-name">${escapeHtml(contextLabel)}</span></span>
+    </div>
     <div class="guide-chat-message-body">${responseHtml(message.text)}</div>
     ${!isUser && message.references?.length ? `<div class="guide-chat-evidence" aria-label="Course sources">${message.references.map(sourceCitationHtml).join("")}</div>` : ""}
     ${!isUser && message.sourceWarnings?.length ? `<div class="guide-chat-caveats" role="note"><strong>Source limits</strong><ul>${message.sourceWarnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul></div>` : ""}
