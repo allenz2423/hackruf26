@@ -3774,6 +3774,9 @@ body.is-resizing-guide-chat-mobile * {
 }
 
 .guide-chat-starters {
+  min-height: 2.5rem;
+  flex: 0 0 auto;
+  align-items: center;
   flex-wrap: nowrap;
   overflow-x: auto;
   overflow-y: hidden;
