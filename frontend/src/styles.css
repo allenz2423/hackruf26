@@ -3541,7 +3541,7 @@ main {
 
 .material-session-layout:has(.guide-chat-host:not([hidden])) {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(18rem, var(--guide-chat-width, 24rem));
+  grid-template-columns: minmax(0, 1fr) minmax(18rem, var(--guide-chat-width, 22rem));
 }
 
 .material-session-layout:has(.guide-chat-host:not([hidden])) > .material-session {
@@ -3769,6 +3769,22 @@ body.is-resizing-guide-chat-mobile * {
   flex-wrap: wrap;
   gap: 0.4rem;
   margin-top: var(--space-2);
+}
+
+.guide-chat-starters {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 0.15rem;
+  scrollbar-width: thin;
+  scroll-snap-type: x proximity;
+}
+
+.guide-chat-starters .btn {
+  min-width: max-content;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  scroll-snap-align: start;
 }
 
 .guide-chat-evidence .source-chip {

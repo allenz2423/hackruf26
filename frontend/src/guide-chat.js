@@ -165,7 +165,7 @@ export function createGuideChat(host, { material, sectionIndex = 0, sectionHeadi
     }
     const available = Math.max(608, layout?.clientWidth || 900);
     const min = 288;
-    return { min, max: Math.max(min, Math.min(640, available - 320)) };
+    return { min, max: Math.max(min, Math.min(400, available - 320)) };
   }
 
   function setPanelSize(value, isMobile, persist = false) {
@@ -211,7 +211,7 @@ export function createGuideChat(host, { material, sectionIndex = 0, sectionHeadi
       const size = isMobile ? panelHeight : panelWidth;
       const defaultSize = isMobile
         ? Math.min(440, Math.max(300, window.innerHeight * 0.46))
-        : Math.min(384, max);
+        : Math.min(352, max);
       setPanelSize(size ?? ((isMobile ? rect.height : rect.width) || defaultSize), isMobile);
     };
     const isMobile = isMobileViewport();
@@ -220,7 +220,7 @@ export function createGuideChat(host, { material, sectionIndex = 0, sectionHeadi
     const stored = isMobile ? panelHeight : panelWidth;
     const defaultSize = isMobile
       ? Math.min(440, Math.max(300, window.innerHeight * 0.46))
-      : Math.min(384, max);
+      : Math.min(352, max);
     setPanelSize(stored ?? ((isMobile ? bounds.height : bounds.width) || defaultSize), isMobile);
     handle.setAttribute("aria-orientation", isMobile ? "horizontal" : "vertical");
     handle.setAttribute("aria-valuemin", String(min));
