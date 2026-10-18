@@ -210,7 +210,7 @@ export function createGuideChat(host, { material, sectionIndex = 0, sectionHeadi
       const rect = host.getBoundingClientRect();
       const size = isMobile ? panelHeight : panelWidth;
       const defaultSize = isMobile
-        ? Math.min(680, Math.max(240, window.innerHeight * 0.72))
+        ? Math.min(440, Math.max(300, window.innerHeight * 0.46))
         : Math.min(384, max);
       setPanelSize(size ?? ((isMobile ? rect.height : rect.width) || defaultSize), isMobile);
     };
@@ -219,7 +219,7 @@ export function createGuideChat(host, { material, sectionIndex = 0, sectionHeadi
     const bounds = host.getBoundingClientRect();
     const stored = isMobile ? panelHeight : panelWidth;
     const defaultSize = isMobile
-      ? Math.min(680, Math.max(240, window.innerHeight * 0.72))
+      ? Math.min(440, Math.max(300, window.innerHeight * 0.46))
       : Math.min(384, max);
     setPanelSize(stored ?? ((isMobile ? bounds.height : bounds.width) || defaultSize), isMobile);
     handle.setAttribute("aria-orientation", isMobile ? "horizontal" : "vertical");
@@ -277,7 +277,7 @@ export function createGuideChat(host, { material, sectionIndex = 0, sectionHeadi
           <button class="btn btn-ghost btn-icon" type="button" data-guide-chat-close aria-label="Close study help">×</button>
         </div>
       </header>
-      <p id="guide-chat-privacy" class="guide-chat-privacy">Answers use course sources when available. This chat is saved privately with this guide until you clear it. It is not used for mastery scores.</p>
+      <p id="guide-chat-privacy" class="guide-chat-privacy">Chat is saved privately with this guide. Course sources are cited when available; it does not affect mastery.</p>
       <label class="guide-chat-scope"><span>Ask about</span><select data-guide-chat-scope><option value="section">This section</option><option value="guide">The whole guide</option></select></label>
       <div class="guide-chat-scroll">
         <div class="guide-chat-messages" data-guide-chat-messages aria-live="polite" aria-relevant="additions text">${messages.map(messageHtml).join("")}</div>
@@ -289,7 +289,6 @@ export function createGuideChat(host, { material, sectionIndex = 0, sectionHeadi
         <label class="field"><span class="visually-hidden">Ask a question about your study guide</span><textarea name="message" rows="2" maxlength="${MAX_MESSAGE_CHARS}" placeholder="Ask a question about this guide…" required></textarea></label>
         <button class="btn btn-primary" type="submit">Send</button>
       </form>
-      <p class="guide-chat-footer">Chat text and practice answers are saved in this private transcript. They do not change quiz results or mastery.</p>
     </aside>`;
     const resizeHandle = document.createElement("div");
     resizeHandle.className = "guide-chat-resize-handle";
