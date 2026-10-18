@@ -74,7 +74,7 @@ from app.services.tutor_memory import TutorMemoryService
 
 logger = logging.getLogger("screen_tutor.errors")
 _PRIVATE_GUIDE_ROUTE = re.compile(
-    r"^/api/study-materials/[0-9a-fA-F-]{36}/(?:guide-chat|guide-progress|"
+    r"^/api/study-materials/[0-9a-fA-F-]{36}/(?:guide-chat(?:/[0-9a-fA-F-]{36})?|guide-progress|"
     r"guide-sections/[0-9]{1,2}/mini-quiz)$"
 )
 

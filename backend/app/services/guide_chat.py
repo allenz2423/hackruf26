@@ -1,4 +1,4 @@
-"""Transient, source-grounded study-guide chat. No conversation data is persisted."""
+"""Private, source-grounded study-guide chat; transcripts are stored per learner and guide."""
 
 from __future__ import annotations
 
@@ -36,9 +36,10 @@ For intent=explain, clarify the requested concept. For example, offer one small,
 worked analogous example that leaves the learner an active step. For connect, relate
 concepts only when the supplied guide/source evidence supports the connection. For
 practice, write one new short question grounded in supplied evidence. On a later
-practice turn, respond to the student's transient attempt with useful feedback and
-offer another question only if helpful. A practice question and response are
-ephemeral and are not a validated assessment. If the student asks to edit a shared
+practice turn, respond to the student's saved attempt with useful feedback and
+offer another question only if helpful. Chat and practice answers are saved in the
+learner's private guide transcript, but are not a validated assessment or mastery
+evidence. If the student asks to edit a shared
 guide, or context says `guide_editing_allowed` or `editable_section_available` is
 false, explain that no safe edit preview is available and that the saved guide has
 not changed.
@@ -54,7 +55,7 @@ authorized course chunks."""
 
 GUIDE_CHAT_EDIT_INSTRUCTION = """The student has requested a guide edit. If they explicitly ask you to
 change the focused section or ask you to apply a preference already stated in this
-transient conversation, return an `edit_proposal`. If the needed preference is
+saved conversation, return an `edit_proposal`. If the needed preference is
 unclear, ask one focused question and return no proposal. Use `guide_editing_allowed`
 and `editable_section_available`; if either is false, return no proposal. Make the
 smallest useful change, changing only required blocks. Use supplied block IDs

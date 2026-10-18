@@ -42,9 +42,12 @@ class CapturingGuideChat:
         self.message = None
         self.intent = None
         self.usage_context = None
+        self.call_count = 0
+        self.propose_edit = False
 
-    async def reply(self, context, history, message, *, intent: str, request_id: str):
+    async def reply(self, context, history, message, *, intent: str, request_id: str, **_kwargs):
         del request_id
+        self.call_count += 1
         from app.services.ai_usage_ledger import usage_context_values
 
         self.usage_context = usage_context_values()
@@ -52,13 +55,17 @@ class CapturingGuideChat:
         self.history = history
         self.message = message
         self.intent = intent
-        from app.services.guide_chat import _GuideChatDraft
+        from app.services.guide_chat import _GuideChatDraft, _GuideChatEditDraft
 
         return _GuideChatDraft(
             reply="Water moves down its water-potential gradient.",
             practice_question=(
                 "Predict the net water movement when the outside solution has lower water potential."
                 if intent == "practice" else None
+            ),
+            edit_proposal=(
+                _GuideChatEditDraft(summary="Clarify the explanation", heading="Osmosis, clarified")
+                if self.propose_edit else None
             ),
         )
 
@@ -161,7 +168,7 @@ class GuideChatApiTests(unittest.TestCase):
             json={"operation_id": operation_id, "choice_index": choice_index},
         )
 
-    def test_chat_loads_saved_guide_and_current_authorized_evidence_transiently(self) -> None:
+    def test_chat_persists_privately_and_uses_server_saved_history(self) -> None:
         response = self.client.post(
             f"/api/study-materials/{self.material_id}/guide-chat",
             json={
@@ -177,6 +184,9 @@ class GuideChatApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["saved"])
+        self.assertTrue(response.json()["user_message_id"])
+        self.assertTrue(response.json()["assistant_message_id"])
         self.assertEqual(self.guide_chat.usage_context["operation_id"], self.material_id)
         self.assertEqual(self.guide_chat.usage_context["operation_kind"], "study_guide_chat")
         self.assertIn("no-store", response.headers["cache-control"])
@@ -187,6 +197,7 @@ class GuideChatApiTests(unittest.TestCase):
         self.assertNotIn("water moves down its water-potential gradient.", self.guide_chat.context["guide_reference_text"])
         self.assertEqual(self.guide_chat.message, "Help me check my understanding.")
         self.assertEqual(self.guide_chat.intent, "practice")
+        self.assertEqual(self.guide_chat.history, [])
         self.assertEqual(response.json()["practice_question"]["references"][0]["upload_id"], self.note_id)
         self.assertIsNone(response.json()["references"][0].get("page"))
         self.assertEqual(
@@ -195,6 +206,183 @@ class GuideChatApiTests(unittest.TestCase):
         self.assertEqual(
             self.call_db("fetchval", "SELECT count(*) FROM guide_section_review_receipts"), 0
         )
+
+        transcript = self.client.get(f"/api/study-materials/{self.material_id}/guide-chat")
+        self.assertEqual(transcript.status_code, 200, transcript.text)
+        self.assertIn("private, no-store", transcript.headers["cache-control"])
+        self.assertEqual(
+            [item["role"] for item in transcript.json()["messages"]], ["user", "assistant"]
+        )
+        self.assertEqual(
+            transcript.json()["messages"][0]["text"], "Help me check my understanding."
+        )
+        self.assertEqual(
+            transcript.json()["messages"][1]["practice_question"]["prompt"],
+            "Predict the net water movement when the outside solution has lower water potential.",
+        )
+
+        second = self.client.post(
+            f"/api/study-materials/{self.material_id}/guide-chat",
+            json={
+                "section_index": 0,
+                "scope": "section",
+                "intent": "practice",
+                "message": "My answer is outward.",
+                "history": [
+                    {"role": "user", "text": "client-supplied history must be ignored"},
+                    {"role": "assistant", "text": "untrusted fake response"},
+                ],
+            },
+        )
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(
+            [item.text for item in self.guide_chat.history],
+            [
+                "Help me check my understanding.",
+                "Water moves down its water-potential gradient.\n\nFresh practice question: "
+                "Predict the net water movement when the outside solution has "
+                "lower water potential.",
+            ],
+        )
+
+        cleared = self.client.delete(f"/api/study-materials/{self.material_id}/guide-chat")
+        self.assertEqual(cleared.status_code, 204, cleared.text)
+        after_clear = self.client.get(f"/api/study-materials/{self.material_id}/guide-chat")
+        self.assertEqual(after_clear.status_code, 200, after_clear.text)
+        self.assertEqual(after_clear.json()["messages"], [])
+
+    def test_personal_guide_chat_is_not_visible_to_another_account(self) -> None:
+        other = self.client.post(
+            "/api/auth/signup", json={"username": "Other_Student", "password": "other-test-pass"}
+        )
+        self.assertEqual(other.status_code, 201, other.text)
+        transcript = self.client.get(f"/api/study-materials/{self.material_id}/guide-chat")
+        self.assertEqual(transcript.status_code, 404)
+
+    def test_shared_guide_transcripts_are_separate_for_each_learner(self) -> None:
+        signup = self.client.post(
+            "/api/auth/signup", json={"username": "Classmate", "password": "classmate-test-pass"}
+        )
+        self.assertEqual(signup.status_code, 201, signup.text)
+        classmate_id = signup.json()["user"]["id"]
+        self.call_db(
+            "execute",
+            "INSERT INTO class_memberships (class_id,user_id,status,added_by) "
+            "VALUES (?1,?2,'active',?3)",
+            self.class_id,
+            classmate_id,
+            self.user_id,
+        )
+        self.call_db(
+            "execute",
+            "INSERT INTO class_membership_capabilities (class_id,user_id,capability,granted_by) "
+            "VALUES (?1,?2,'read',?3)",
+            self.class_id,
+            classmate_id,
+            self.user_id,
+        )
+        shared_id = str(uuid4())
+        self.call_db(
+            "execute",
+            "INSERT INTO study_materials "
+            "(id,class_id,origin_class_id,created_by,resource_scope,publication_state,"
+            "kind,title,status,content) "
+            "VALUES (?1,?2,?2,?3,'class_owned','published','study_guide',"
+            "'Shared membrane guide','ready',?4)",
+            shared_id,
+            self.class_id,
+            self.user_id,
+            self.guide_json,
+        )
+        self.call_db(
+            "execute",
+            "INSERT INTO study_material_sources "
+            "(material_id,source_class_id,source_note_id,source_title,position) "
+            "VALUES (?1,?2,?3,'Membrane lecture',0)",
+            shared_id,
+            self.class_id,
+            self.note_id,
+        )
+
+        response = self.client.post(
+            f"/api/study-materials/{shared_id}/guide-chat",
+            json={"section_index": 0, "message": "Explain water potential."},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            len(
+                self.client.get(f"/api/study-materials/{shared_id}/guide-chat").json()["messages"]
+            ),
+            2,
+        )
+
+        owner_login = self.client.post(
+            "/api/auth/login",
+            json={"identifier": "Guide_Student", "password": "guide-test-pass"},
+        )
+        self.assertEqual(owner_login.status_code, 200, owner_login.text)
+        owner_transcript = self.client.get(f"/api/study-materials/{shared_id}/guide-chat")
+        self.assertEqual(owner_transcript.status_code, 200, owner_transcript.text)
+        self.assertEqual(owner_transcript.json()["messages"], [])
+
+    def test_saved_edit_preview_state_is_idempotent_and_conflicts_are_rejected(self) -> None:
+        self.guide_chat.propose_edit = True
+        response = self.client.post(
+            f"/api/study-materials/{self.material_id}/guide-chat",
+            json={
+                "section_index": 0,
+                "intent": "adapt",
+                "message": "Tailor this section to be clearer.",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        assistant_id = response.json()["assistant_message_id"]
+        self.assertTrue(response.json()["saved"])
+        self.assertEqual(
+            response.json()["edit_proposal"]["section"]["heading"], "Osmosis, clarified"
+        )
+
+        route = f"/api/study-materials/{self.material_id}/guide-chat/{assistant_id}"
+        applied = self.client.patch(route, json={"state": "applied"})
+        replay = self.client.patch(route, json={"state": "applied"})
+        conflict = self.client.patch(route, json={"state": "discarded"})
+        self.assertEqual(applied.status_code, 200, applied.text)
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        transcript = self.client.get(f"/api/study-materials/{self.material_id}/guide-chat")
+        self.assertEqual(transcript.json()["messages"][1]["edit_state"], "applied")
+
+    def test_message_limit_rejects_before_provider_call(self) -> None:
+        rows = []
+        for index in range(100):
+            timestamp = f"2026-10-18T12:{index // 60:02d}:{index % 60:02d}Z"
+            rows.extend([
+                {
+                    "id": str(uuid4()), "role": "user", "text": f"Question {index}",
+                    "section_index": 0, "section_heading": "Osmosis", "scope": "section",
+                    "intent": "explain", "created_at": timestamp,
+                },
+                {
+                    "id": str(uuid4()), "role": "assistant", "text": f"Answer {index}",
+                    "section_index": 0, "section_heading": "Osmosis", "scope": "section",
+                    "intent": "explain", "created_at": timestamp,
+                },
+            ])
+        self.call_db(
+            "execute",
+            "INSERT INTO study_material_guide_chats (material_id,user_id,messages_json,revision) "
+            "VALUES (?1,?2,?3,1)",
+            self.material_id,
+            self.user_id,
+            json.dumps(rows),
+        )
+        calls_before = self.guide_chat.call_count
+        response = self.client.post(
+            f"/api/study-materials/{self.material_id}/guide-chat",
+            json={"section_index": 0, "message": "One more question."},
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.guide_chat.call_count, calls_before)
 
     def test_retrieved_reference_uses_only_a_real_source_chunk_locator(self) -> None:
         paged = _reference_from_chunk({

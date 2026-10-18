@@ -565,6 +565,19 @@ CREATE TABLE IF NOT EXISTS study_materials (
     CHECK (status = 'failed' OR failure_code IS NULL)
 );
 
+-- Private learner transcript for the guide-scoped clarification chat. Chat is
+-- separate from quiz attempts, mastery, study scores, and Live tutor history.
+CREATE TABLE IF NOT EXISTS study_material_guide_chats (
+    material_id  TEXT NOT NULL REFERENCES study_materials(id) ON DELETE CASCADE,
+    user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    messages_json TEXT NOT NULL DEFAULT '[]'
+        CHECK (json_valid(messages_json) AND json_type(messages_json) = 'array'
+               AND json_array_length(messages_json) <= 200 AND length(messages_json) <= 2000000),
+    revision     INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+    updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (material_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS upload_documents (
     note_id           TEXT NOT NULL REFERENCES course_notes(id) ON DELETE CASCADE,
     detail_level      TEXT NOT NULL CHECK (detail_level IN ('concise', 'balanced', 'detailed')),

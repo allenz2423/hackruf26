@@ -750,6 +750,25 @@ export function sendGuideChatMessageApi(materialId, message, { signal } = {}) {
   });
 }
 
+export function getGuideChatApi(materialId, { signal } = {}) {
+  return apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/guide-chat`, { signal });
+}
+
+export function clearGuideChatApi(materialId, { signal } = {}) {
+  return apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/guide-chat`, {
+    method: "DELETE",
+    signal
+  });
+}
+
+export function updateGuideChatEditStateApi(materialId, messageId, state, { signal } = {}) {
+  return apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/guide-chat/${encodeURIComponent(messageId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ state }),
+    signal
+  });
+}
+
 export function applyGuideChatEditApi(materialId, edit, { signal } = {}) {
   return apiFetch(`/api/study-materials/${encodeURIComponent(materialId)}/guide-edits`, {
     method: "POST",

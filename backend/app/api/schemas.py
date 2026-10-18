@@ -1613,11 +1613,91 @@ class GuideChatResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
     reply: str = Field(min_length=1, max_length=6000)
     references: list[GuideChatReference] = Field(default_factory=list, max_length=8)
-    source_warnings: list[Literal[
-        "source_changed", "source_missing", "source_context_truncated", "source_evidence_unavailable"
-    ]] = Field(default_factory=list, max_length=4)
+    source_warnings: list[
+        Literal[
+            "source_changed",
+            "source_missing",
+            "source_context_truncated",
+            "source_evidence_unavailable",
+        ]
+    ] = Field(default_factory=list, max_length=4)
     practice_question: GuidePracticeQuestion | None = None
     edit_proposal: GuideChatEditPreview | None = None
+    saved: bool = True
+    user_message_id: UUID | None = None
+    assistant_message_id: UUID | None = None
+
+
+class GuideChatEditStateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    state: Literal["applied", "discarded"]
+
+
+class SavedGuideChatMessage(BaseModel):
+    """One private, guide-scoped chat message; this is not learning evidence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+    id: UUID
+    role: Literal["user", "assistant"]
+    text: str = Field(min_length=1, max_length=6000, strict=True)
+    section_index: int = Field(ge=0, le=99)
+    section_heading: str = Field(min_length=1, max_length=300)
+    scope: Literal["section", "guide"]
+    block_index: int | None = Field(default=None, ge=0, le=23)
+    intent: Literal["explain", "example", "connect", "practice", "adapt"]
+    created_at: str = Field(min_length=20, max_length=40)
+    references: list[GuideChatReference] = Field(default_factory=list, max_length=8)
+    source_warnings: list[
+        Literal[
+            "source_changed",
+            "source_missing",
+            "source_context_truncated",
+            "source_evidence_unavailable",
+        ]
+    ] = Field(default_factory=list, max_length=4)
+    practice_question: GuidePracticeQuestion | None = None
+    edit_proposal: GuideChatEditPreview | None = None
+    edit_state: Literal["pending", "applied", "discarded"] | None = None
+
+    @model_validator(mode="after")
+    def validate_role_metadata(self) -> SavedGuideChatMessage:
+        if self.role == "user" and len(self.text) > 2000:
+            raise ValueError("Guide chat questions must be at most 2000 characters.")
+        if self.role == "user" and (
+            self.references
+            or self.source_warnings
+            or self.practice_question
+            or self.edit_proposal
+            or self.edit_state
+        ):
+            raise ValueError("User messages cannot contain assistant metadata.")
+        if self.edit_state is not None and self.edit_proposal is None:
+            raise ValueError("An edit state requires an edit proposal.")
+        return self
+
+
+class SavedGuideChatResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    messages: list[SavedGuideChatMessage] = Field(max_length=200)
+    updated_at: str | None = Field(default=None, max_length=40)
+
+    @model_validator(mode="after")
+    def transcript_is_complete(self) -> SavedGuideChatResponse:
+        if len(self.messages) % 2 or any(
+            message.role != ("user" if index % 2 == 0 else "assistant")
+            for index, message in enumerate(self.messages)
+        ):
+            raise ValueError(
+                "Saved guide-chat transcripts must contain complete alternating turns."
+            )
+        return self
+
+
+class GuideChatEditStateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    message_id: UUID
+    state: Literal["applied", "discarded"]
+    updated_at: str
 
 
 class GuideChatEditApplyRequest(BaseModel):

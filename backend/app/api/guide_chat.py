@@ -1,11 +1,13 @@
-"""Owner-authorized transient clarification chat and guide-check progress."""
+"""Owner-authorized persistent guide chat and private guide-check progress."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import re
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -15,8 +17,11 @@ from pydantic import ValidationError
 from app.api.dependencies import database, enforce_sqlite_api_policy
 from app.api.errors import ApiError
 from app.api.schemas import (
-    GuideChatReference,
     GuideChatEditPreview,
+    GuideChatEditStateRequest,
+    GuideChatEditStateResponse,
+    GuideChatMessage,
+    GuideChatReference,
     GuideChatRequest,
     GuideChatResponse,
     GuideChatSectionEdit,
@@ -24,24 +29,24 @@ from app.api.schemas import (
     GuideMiniQuizAttemptResponse,
     GuidePracticeQuestion,
     GuideProgressResponse,
-    GuideSectionProgress,
-    SourceCitation,
-    StudyGuideContent,
     GuideSectionContent,
+    GuideSectionProgress,
+    SavedGuideChatMessage,
+    SavedGuideChatResponse,
+    StudyGuideContent,
     StudyGuideSectionV2,
 )
-from app.config import Settings
+from app.services.ai_usage_ledger import bind_usage_context, reset_usage_context
 from app.services.class_access import (
     can_view_unreleased,
     class_access,
     is_effectively_published,
     material_access,
 )
-from app.services.ai_usage_ledger import bind_usage_context, reset_usage_context
 from app.services.database import json_value
-from app.services.guide_templates import guide_block_alt_text, guide_block_fallback
 from app.services.guide_chat import GUIDE_CHAT_MAX_CONTEXT_CHARS
 from app.services.guide_editing import guide_section_fingerprint
+from app.services.guide_templates import guide_block_alt_text, guide_block_fallback
 from app.services.source_index import fetch_authorized_chunk, search_authorized_sources
 
 logger = logging.getLogger("screen_tutor.guide_chat_api")
@@ -53,6 +58,8 @@ MAX_GUIDE_TEXT_CHARS = 14_000
 MAX_CONTEXT_CHARS = GUIDE_CHAT_MAX_CONTEXT_CHARS
 MAX_SECTION_CITATIONS = 32
 MAX_EDITABLE_SECTION_CONTEXT_CHARS = 6_000
+MAX_SAVED_CHAT_MESSAGES = 200
+MAX_SAVED_CHAT_JSON_CHARS = 2_000_000
 GUIDE_EDIT_REQUEST_RE = re.compile(
     r"\b(?:adapt|tailor|rewrite|revise|modify|edit|update|shorten|expand|simplify|"
     r"reformat|add|remove|replace|make|turn|change|apply|customize|personalize|"
@@ -80,6 +87,137 @@ async def _ready_guide(request: Request, material_id: UUID, owner_id: UUID):
             503, "guide_chat_context_unavailable", "This guide is temporarily unavailable for chat.",
         ) from None
     return db, material, content
+
+
+async def _chat_material(request: Request, material_id: UUID, owner_id: UUID):
+    db = database(request)
+    material, _access = await material_access(db, material_id, owner_id)
+    if material["kind"] != "study_guide":
+        raise ApiError(409, "guide_chat_not_supported", "This material is not a study guide.")
+    return db, material
+
+
+def _chat_lock(request: Request, material_id: UUID, owner_id: UUID) -> asyncio.Lock:
+    """Serialize one learner's guide thread without holding SQLite during provider work."""
+    locks = getattr(request.app.state, "guide_chat_locks", None)
+    if locks is None:
+        locks = {}
+        request.app.state.guide_chat_locks = locks
+    key = (str(material_id), str(owner_id))
+    lock = locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[key] = lock
+    return lock
+
+
+async def _load_chat_transcript(db, material_id: UUID, owner_id: UUID):
+    row = await db.fetchrow(
+        "SELECT messages_json,revision,updated_at FROM study_material_guide_chats "
+        "WHERE material_id=?1 AND user_id=?2",
+        material_id,
+        owner_id,
+    )
+    if row is None:
+        return [], 0, None
+    try:
+        raw_messages = json.loads(row["messages_json"])
+        transcript = SavedGuideChatResponse(
+            messages=[SavedGuideChatMessage.model_validate(item) for item in raw_messages],
+            updated_at=row["updated_at"],
+        )
+    except (TypeError, ValueError, json.JSONDecodeError, ValidationError):
+        logger.error("guide_chat_transcript_invalid material_id=%s", material_id)
+        raise ApiError(
+            503,
+            "guide_chat_unavailable",
+            "This saved chat cannot be read right now. Contact support if it continues.",
+        ) from None
+    return transcript.messages, int(row["revision"]), str(row["updated_at"])
+
+
+async def _save_chat_transcript(
+    db,
+    *,
+    material_id: UUID,
+    owner_id: UUID,
+    expected_revision: int,
+    messages: list[SavedGuideChatMessage],
+) -> str:
+    if len(messages) > MAX_SAVED_CHAT_MESSAGES:
+        raise ApiError(
+            409,
+            "guide_chat_limit",
+            "This chat reached its saved-message limit. Clear it to continue.",
+        )
+    if len(messages) % 2 or any(
+        item.role != ("user" if index % 2 == 0 else "assistant")
+        for index, item in enumerate(messages)
+    ):
+        raise ApiError(500, "guide_chat_invalid", "The chat could not be saved safely.")
+    serialized = json.dumps(
+        [item.model_dump(mode="json", exclude_none=True) for item in messages],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    if len(serialized) > MAX_SAVED_CHAT_JSON_CHARS:
+        raise ApiError(
+            409, "guide_chat_limit", "This chat reached its saved-size limit. Clear it to continue."
+        )
+    async with db.acquire() as connection:
+        async with connection.transaction():
+            row = await connection.fetchrow(
+                "SELECT revision FROM study_material_guide_chats "
+                "WHERE material_id=?1 AND user_id=?2",
+                material_id,
+                owner_id,
+            )
+            actual_revision = int(row["revision"]) if row else 0
+            if actual_revision != expected_revision:
+                raise ApiError(
+                    409,
+                    "guide_chat_changed",
+                    "This chat changed in another window. Reload the guide chat before continuing.",
+                )
+            if row is None:
+                await connection.execute(
+                    "INSERT INTO study_material_guide_chats "
+                    "(material_id,user_id,messages_json,revision) VALUES (?1,?2,?3,1)",
+                    material_id,
+                    owner_id,
+                    serialized,
+                )
+            else:
+                await connection.execute(
+                    "UPDATE study_material_guide_chats SET messages_json=?3,revision=revision+1,"
+                    "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                    "WHERE material_id=?1 AND user_id=?2 AND revision=?4",
+                    material_id,
+                    owner_id,
+                    serialized,
+                    expected_revision,
+                )
+            updated_at = await connection.fetchval(
+                "SELECT updated_at FROM study_material_guide_chats "
+                "WHERE material_id=?1 AND user_id=?2",
+                material_id,
+                owner_id,
+            )
+    return str(updated_at)
+
+
+def _model_history(messages: list[SavedGuideChatMessage]) -> list[GuideChatMessage]:
+    recent = list(messages[-6:])
+
+    def text_for(item: SavedGuideChatMessage) -> str:
+        value = item.text
+        if item.role == "assistant" and item.practice_question:
+            value += "\n\nFresh practice question: " + item.practice_question.prompt
+        return value[:6_000]
+
+    while recent and sum(len(text_for(item)) for item in recent) > 12_000:
+        recent = recent[2:]
+    return [GuideChatMessage(role=item.role, text=text_for(item)) for item in recent]
 
 
 def _section_text(section: object) -> str:
@@ -399,6 +537,92 @@ async def _authorized_source_context(
     return excerpts, references[:8]
 
 
+@router.get(
+    "/api/study-materials/{material_id}/guide-chat",
+    response_model=SavedGuideChatResponse,
+)
+async def get_guide_chat(
+    material_id: UUID, request: Request, response: Response
+) -> SavedGuideChatResponse:
+    _no_store(response)
+    owner_id = await enforce_sqlite_api_policy(request, request.app.state.settings)
+    db, _material = await _chat_material(request, material_id, owner_id)
+    async with _chat_lock(request, material_id, owner_id):
+        messages, _revision, updated_at = await _load_chat_transcript(db, material_id, owner_id)
+    return SavedGuideChatResponse(messages=messages, updated_at=updated_at)
+
+
+@router.delete("/api/study-materials/{material_id}/guide-chat", status_code=204)
+async def clear_guide_chat(material_id: UUID, request: Request) -> Response:
+    owner_id = await enforce_sqlite_api_policy(request, request.app.state.settings)
+    db, _material = await _chat_material(request, material_id, owner_id)
+    async with _chat_lock(request, material_id, owner_id):
+        _messages, revision, _updated_at = await _load_chat_transcript(db, material_id, owner_id)
+        await _save_chat_transcript(
+            db,
+            material_id=material_id,
+            owner_id=owner_id,
+            expected_revision=revision,
+            messages=[],
+        )
+    result = Response(status_code=204)
+    _no_store(result)
+    return result
+
+
+@router.patch(
+    "/api/study-materials/{material_id}/guide-chat/{message_id}",
+    response_model=GuideChatEditStateResponse,
+)
+async def update_guide_chat_edit_state(
+    material_id: UUID,
+    message_id: UUID,
+    payload: GuideChatEditStateRequest,
+    request: Request,
+    response: Response,
+) -> GuideChatEditStateResponse:
+    _no_store(response)
+    owner_id = await enforce_sqlite_api_policy(request, request.app.state.settings)
+    db, _material = await _chat_material(request, material_id, owner_id)
+    async with _chat_lock(request, material_id, owner_id):
+        messages, revision, updated_at = await _load_chat_transcript(db, material_id, owner_id)
+        target_index = next(
+            (index for index, item in enumerate(messages) if item.id == message_id),
+            None,
+        )
+        if target_index is None:
+            raise ApiError(
+                404, "guide_chat_message_not_found", "That saved chat message is unavailable."
+            )
+        target = messages[target_index]
+        if target.role != "assistant" or target.edit_proposal is None:
+            raise ApiError(
+                409,
+                "guide_chat_edit_unavailable",
+                "That message has no saved guide edit to update.",
+            )
+        if target.edit_state == payload.state:
+            updated_at = updated_at or datetime.now(UTC).isoformat(
+                timespec="milliseconds"
+            ).replace("+00:00", "Z")
+        elif target.edit_state != "pending":
+            raise ApiError(
+                409, "guide_chat_edit_changed", "That guide edit was already resolved."
+            )
+        else:
+            messages[target_index] = target.model_copy(update={"edit_state": payload.state})
+            updated_at = await _save_chat_transcript(
+                db,
+                material_id=material_id,
+                owner_id=owner_id,
+                expected_revision=revision,
+                messages=messages,
+            )
+    return GuideChatEditStateResponse(
+        message_id=message_id, state=payload.state, updated_at=updated_at
+    )
+
+
 @router.post(
     "/api/study-materials/{material_id}/guide-chat",
     response_model=GuideChatResponse,
@@ -410,8 +634,23 @@ async def guide_chat(
     response: Response,
 ) -> GuideChatResponse:
     _no_store(response)
-    settings: Settings = request.app.state.settings
-    owner_id = await enforce_sqlite_api_policy(request, settings)
+    owner_id = await enforce_sqlite_api_policy(request, request.app.state.settings)
+    db, _material = await _chat_material(request, material_id, owner_id)
+    async with _chat_lock(request, material_id, owner_id):
+        return await _generate_guide_chat_turn(
+            material_id, payload, request, response, owner_id=owner_id, db=db
+        )
+
+
+async def _generate_guide_chat_turn(
+    material_id: UUID,
+    payload: GuideChatRequest,
+    request: Request,
+    response: Response,
+    *,
+    owner_id: UUID,
+    db,
+) -> GuideChatResponse:
     db, material, guide = await _ready_guide(request, material_id, owner_id)
     if payload.section_index >= len(guide.sections):
         raise ApiError(400, "invalid_section", "That guide section is unavailable.")
@@ -420,6 +659,16 @@ async def guide_chat(
         blocks = getattr(section, "blocks", None)
         if not isinstance(blocks, list) or payload.block_index >= len(blocks):
             raise ApiError(400, "invalid_block", "That guide block is unavailable.")
+
+    saved_messages, transcript_revision, _transcript_updated_at = await _load_chat_transcript(
+        db, material_id, owner_id
+    )
+    if len(saved_messages) + 2 > MAX_SAVED_CHAT_MESSAGES:
+        raise ApiError(
+            409,
+            "guide_chat_limit",
+            "This chat reached its saved-message limit. Clear it to continue.",
+        )
 
     limiter = request.app.state.study_tutor_rate_limiter
     retry_after = await limiter.check(str(owner_id))
@@ -549,7 +798,7 @@ async def guide_chat(
         edit_kwargs = {"allow_edit": True} if allow_edit else {}
         draft = await service.reply(
             context,
-            payload.history,
+            _model_history(saved_messages),
             payload.message,
             intent=payload.intent,
             request_id=request_id,
@@ -596,12 +845,68 @@ async def guide_chat(
                 reply.rstrip()
                 + "\n\nI couldn't prepare a safe section preview, so the saved guide was not changed."
             )[:6000]
+    user_message_id = uuid4()
+    assistant_message_id = uuid4()
+    user_created_at = datetime.now(UTC).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+    assistant_created_at = datetime.now(UTC).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+    user_entry = SavedGuideChatMessage(
+        id=user_message_id,
+        role="user",
+        text=payload.message,
+        section_index=payload.section_index,
+        section_heading=str(section.heading)[:300],
+        scope=payload.scope,
+        block_index=payload.block_index,
+        intent=payload.intent,
+        created_at=user_created_at,
+    )
+    assistant_entry = SavedGuideChatMessage(
+        id=assistant_message_id,
+        role="assistant",
+        text=reply,
+        section_index=payload.section_index,
+        section_heading=str(section.heading)[:300],
+        scope=payload.scope,
+        block_index=payload.block_index,
+        intent=payload.intent,
+        created_at=assistant_created_at,
+        references=response_references,
+        source_warnings=sorted(warnings),
+        practice_question=practice_question,
+        edit_proposal=edit_proposal,
+        edit_state="pending" if edit_proposal else None,
+    )
+    saved = True
+    try:
+        await _save_chat_transcript(
+            db,
+            material_id=material_id,
+            owner_id=owner_id,
+            expected_revision=transcript_revision,
+            messages=[*saved_messages, user_entry, assistant_entry],
+        )
+    except ApiError:
+        raise
+    except (sqlite3.Error, TypeError, ValueError) as exc:
+        saved = False
+        logger.warning(
+            "guide_chat_transcript_save_failed material_id=%s category=%s",
+            material_id,
+            type(exc).__name__,
+        )
     return GuideChatResponse(
         reply=reply,
         references=response_references,
         source_warnings=sorted(warnings),
         practice_question=practice_question,
         edit_proposal=edit_proposal,
+        saved=saved,
+        user_message_id=user_message_id if saved else None,
+        assistant_message_id=assistant_message_id if saved else None,
     )
 
 
