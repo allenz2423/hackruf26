@@ -268,6 +268,10 @@ export function createGuideChat(host, { material, sectionIndex = 0, sectionHeadi
 
   function render() {
     if (destroyed) return;
+    const previousChatScroll = host.querySelector(".guide-chat-scroll");
+    const previousScrollTop = previousChatScroll?.scrollTop || 0;
+    const wasNearBottom = !previousChatScroll
+      || previousChatScroll.scrollHeight - previousChatScroll.scrollTop - previousChatScroll.clientHeight <= 48;
     stopPanelResize?.();
     host.innerHTML = `<aside class="guide-chat-panel" aria-labelledby="guide-chat-title" aria-describedby="guide-chat-privacy">
       <header class="guide-chat-header">
@@ -300,7 +304,7 @@ export function createGuideChat(host, { material, sectionIndex = 0, sectionHeadi
     resizeHandle.setAttribute("aria-orientation", "vertical");
     resizeHandle.innerHTML = '<span aria-hidden="true"></span>';
     host.prepend(resizeHandle);
-    const messageBox = host.querySelector("[data-guide-chat-messages]");
+    const chatScroll = host.querySelector(".guide-chat-scroll");
     const scope = host.querySelector("[data-guide-chat-scope]");
     const panel = host.querySelector(".guide-chat-panel");
     panel?.setAttribute("id", "guide-chat-panel");
@@ -356,7 +360,15 @@ export function createGuideChat(host, { material, sectionIndex = 0, sectionHeadi
     if (composer) composer.disabled = pending || loadedMaterialId !== guideMaterial.id || Boolean(loadError);
     host.querySelectorAll("[data-guide-chat-intent]").forEach((button) => { button.disabled = pending || loadedMaterialId !== guideMaterial.id || Boolean(loadError); });
     host.querySelectorAll("[data-guide-edit-apply], [data-guide-edit-discard]").forEach((button) => { button.disabled = pending; });
-    if (messageBox) messageBox.scrollTop = messageBox.scrollHeight;
+    if (chatScroll) {
+      const restoreScrollPosition = () => {
+        if (!chatScroll.isConnected) return;
+        const maxScrollTop = Math.max(0, chatScroll.scrollHeight - chatScroll.clientHeight);
+        chatScroll.scrollTop = wasNearBottom ? maxScrollTop : Math.min(previousScrollTop, maxScrollTop);
+      };
+      restoreScrollPosition();
+      window.requestAnimationFrame?.(restoreScrollPosition);
+    }
   }
 
   function setTriggerExpanded(expanded) {
