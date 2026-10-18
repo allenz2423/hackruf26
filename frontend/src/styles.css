@@ -5100,23 +5100,29 @@ main {
 }
 
 .pathway-stage-list {
-  display: grid;
-  justify-items: stretch;
+  display: flex;
+  align-items: stretch;
   gap: var(--space-1);
-  max-width: 42rem;
-  margin: 0 auto;
+  min-width: 0;
+  margin: 0;
   padding: 0;
   list-style: none;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: thin;
 }
 
 .pathway-stage-list li {
-  display: grid;
-  justify-items: center;
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
   gap: var(--space-1);
+  min-width: 0;
 }
 
 .pathway-stage-card {
-  width: min(100%, 32rem);
+  flex: 1 1 0;
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--surface);
@@ -5129,9 +5135,12 @@ main {
 
 .pathway-stage-button {
   display: grid;
+  grid-template-columns: 1.45rem minmax(0, 1fr);
+  align-items: center;
   width: 100%;
-  gap: var(--space-1);
-  padding: var(--space-3);
+  min-height: 3.25rem;
+  gap: var(--space-2);
+  padding: 0.55rem 0.65rem;
   border: 0;
   border-radius: inherit;
   background: transparent;
@@ -5144,22 +5153,53 @@ main {
   outline-offset: -3px;
 }
 
-.pathway-stage-button span {
+.pathway-stage-button .pathway-stage-number {
+  display: grid;
+  width: 1.4rem;
+  aspect-ratio: 1;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--surface-muted);
   color: var(--muted);
-  font-size: 0.8125rem;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.pathway-stage-card[data-active] .pathway-stage-number {
+  background: var(--primary);
+  color: var(--surface);
+}
+
+.pathway-stage-button strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pathway-stage-detail {
+  margin-top: var(--space-2);
+  padding: 0.65rem 0.8rem;
+  border-left: 3px solid var(--primary);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
 }
 
 .pathway-stage-explanation {
   margin: 0;
-  padding: 0 var(--space-3) var(--space-3);
   color: var(--muted);
   line-height: 1.5;
 }
 
 .pathway-connector {
+  flex: 0 0 auto;
   color: var(--primary);
-  font-size: 1.35rem;
+  font-size: 1.1rem;
   font-weight: 700;
+}
+
+@media (max-width: 560px) {
+  .pathway-stage-list li {
+    flex: 0 0 min(70vw, 13rem);
+  }
 }
 
 .binary-search-trace li,

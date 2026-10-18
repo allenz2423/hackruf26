@@ -53,12 +53,13 @@ test("process pathways expose each stage, announce selection, and escape authore
   });
   const html = renderAdditionalGuideBlock(block);
 
-  assert.match(html, /data-mermaid-pathway/);
-  assert.match(html, /<ol class="pathway-stage-list">/);
-  assert.match(html, /<button class="pathway-stage-button" type="button" data-pathway-stage="evaporation"[^>]* aria-pressed="true"/);
+  assert.doesNotMatch(html, /data-mermaid-pathway/);
+  assert.match(html, /<ol class="pathway-stage-list" aria-label="Ordered process stages">/);
+  assert.match(html, /<button class="pathway-stage-button" type="button" data-pathway-stage="evaporation"[^>]* aria-describedby="pathway-\d+-stage-explanation" aria-pressed="true"/);
   assert.match(html, /data-pathway-stage="condensation"[^>]*aria-pressed="false"/);
-  assert.match(html, /data-pathway-explanation="evaporation"[^>]*>Liquid becomes vapor/);
-  assert.match(html, /data-pathway-explanation="condensation"[^>]* hidden>/);
+  assert.match(html, /data-stage-text="&lt;script&gt;unsafe\(\)&lt;\/script&gt; vapor forms droplets\."/);
+  assert.match(html, /data-pathway-active-explanation>Liquid becomes vapor\.<\/p>/);
+  assert.equal((html.match(/class="pathway-stage-explanation"/g) || []).length, 1);
   assert.match(html, /role="status" aria-live="polite"/);
   assert.match(html, /Plain-text path: evaporate, then condense\./);
   assert.doesNotMatch(html, /<script>unsafe\(\)<\/script>/);
@@ -110,26 +111,23 @@ test("molecule keyboard and pathway buttons update accessible status state", () 
   assert.equal(oxygen.attributes["aria-pressed"], "false");
   assert.equal(moleculeStatus.textContent, "H: This hydrogen is bonded to oxygen.");
 
-  const firstText = new FakeElement();
-  firstText.dataset.stageText = "The liquid evaporates.";
-  const secondText = new FakeElement();
-  secondText.dataset.stageText = "Vapor condenses.";
-  const firstButton = new FakeElement({ pathwayStage: "evaporation" });
-  const secondButton = new FakeElement({ pathwayStage: "condensation" });
+  const firstButton = new FakeElement({ pathwayStage: "evaporation", stageNumber: "1", stageTitle: "Evaporation", stageText: "The liquid evaporates." });
+  const secondButton = new FakeElement({ pathwayStage: "condensation", stageNumber: "2", stageTitle: "Condensation", stageText: "Vapor condenses." });
+  const activeExplanation = new FakeElement();
+  activeExplanation.id = "pathway-explanation";
   const pathwayStatus = new FakeElement();
   const pathway = new FakeElement({ guideActivity: "process_pathway_v1" });
   pathway.matches = {
     "[data-pathway-stage]": [firstButton, secondButton],
     "[data-pathway-status]": pathwayStatus,
-    '[data-pathway-explanation="evaporation"]': firstText,
-    '[data-pathway-explanation="condensation"]': secondText
+    "[data-pathway-active-explanation]": activeExplanation
   };
   mountAdditionalGuideBlocks({ querySelectorAll: () => [pathway] });
   secondButton.listeners.click();
 
   assert.equal(firstButton.attributes["aria-pressed"], "false");
   assert.equal(secondButton.attributes["aria-pressed"], "true");
-  assert.equal(firstText.hidden, true);
-  assert.equal(secondText.hidden, false);
-  assert.equal(pathwayStatus.innerHTML, "Stage 2 of 2: Vapor condenses.");
+  assert.equal(secondButton.attributes["aria-describedby"], "pathway-explanation");
+  assert.equal(activeExplanation.innerHTML, "Vapor condenses.");
+  assert.equal(pathwayStatus.innerHTML, "Stage 2 of 2: Condensation. Vapor condenses.");
 });

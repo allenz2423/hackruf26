@@ -305,12 +305,13 @@ function moleculeCard(block) {
 
 function processPathwayCard(block) {
   const id = safeId("pathway");
+  const firstStage = block.stages[0];
   return `<section class="study-interactive-model activity-model process-pathway" data-guide-activity="process_pathway_v1" data-activity-id="${id}" aria-labelledby="${id}-title">
     <div class="activity-heading"><div><span class="guide-meta-label">Process pathway</span><h4 id="${id}-title">${mathHtml(block.title)}</h4></div></div>
-    <p class="activity-intro">Select a stage to read its explanation. The order follows the supplied course material.</p>
-    <div class="guide-library-visual guide-library-diagram" data-mermaid-pathway role="img" aria-label="Mermaid flow diagram of the ordered process stages." hidden></div>
-    <ol class="pathway-stage-list">${block.stages.map((stage, index) => `<li><div class="pathway-stage-card" data-pathway-stage-card${index === 0 ? " data-active" : ""}><button class="pathway-stage-button" type="button" data-pathway-stage="${escapeHtml(stage.id)}" data-stage-title="${escapeHtml(stage.title)}"${index === 0 ? ` aria-describedby="${id}-stage-explanation-${index}"` : ""} aria-pressed="${index === 0}"><span>Stage ${index + 1}</span><strong>${mathHtml(stage.title)}</strong></button><p class="pathway-stage-explanation" id="${id}-stage-explanation-${index}" data-pathway-explanation="${escapeHtml(stage.id)}" data-stage-text="${escapeHtml(stage.explanation)}"${index > 0 ? " hidden" : ""}>${mathHtml(stage.explanation)}</p></div>${index < block.stages.length - 1 ? `<span class="pathway-connector" aria-hidden="true">↓</span>` : ""}</li>`).join("")}</ol>
-    <p class="activity-result visually-hidden" data-pathway-status role="status" aria-live="polite">Stage 1 of ${block.stages.length}: ${mathHtml(block.stages[0].explanation)}</p>${modelText(block)}</section>`;
+    <p class="activity-intro">Choose a stage to see its explanation.</p>
+    <ol class="pathway-stage-list" aria-label="Ordered process stages">${block.stages.map((stage, index) => `<li><div class="pathway-stage-card" data-pathway-stage-card${index === 0 ? " data-active" : ""}><button class="pathway-stage-button" type="button" data-pathway-stage="${escapeHtml(stage.id)}" data-stage-number="${index + 1}" data-stage-title="${escapeHtml(stage.title)}" data-stage-text="${escapeHtml(stage.explanation)}"${index === 0 ? ` aria-describedby="${id}-stage-explanation"` : ""} aria-pressed="${index === 0}"><span class="pathway-stage-number" aria-hidden="true">${index + 1}</span><strong>${mathHtml(stage.title)}</strong></button></div>${index < block.stages.length - 1 ? `<span class="pathway-connector" aria-hidden="true">→</span>` : ""}</li>`).join("")}</ol>
+    <div class="pathway-stage-detail"><p class="pathway-stage-explanation" id="${id}-stage-explanation" data-pathway-active-explanation>${mathHtml(firstStage.explanation)}</p></div>
+    <p class="activity-result visually-hidden" data-pathway-status role="status" aria-live="polite">Stage 1 of ${block.stages.length}: ${escapeHtml(firstStage.title)}. ${mathHtml(firstStage.explanation)}</p>${modelText(block)}</section>`;
 }
 
 function animalCellSvg(focusIds, id) {
@@ -729,33 +730,24 @@ function mountMolecule(card) {
 function mountProcessPathway(card) {
   const buttons = [...card.querySelectorAll("[data-pathway-stage]")];
   const status = card.querySelector("[data-pathway-status]");
+  const explanation = card.querySelector("[data-pathway-active-explanation]");
   function select(button, index) {
     buttons.forEach((item) => {
       const active = item === button;
       item.setAttribute("aria-pressed", String(active));
       const stageCard = item.closest?.("[data-pathway-stage-card]");
       stageCard?.toggleAttribute?.("data-active", active);
-      const explanation = card.querySelector(`[data-pathway-explanation="${item.dataset.pathwayStage}"]`);
-      if (explanation) explanation.hidden = !active;
       if (active && explanation?.id) item.setAttribute("aria-describedby", explanation.id);
       else item.removeAttribute?.("aria-describedby");
     });
-    const explanation = card.querySelector(`[data-pathway-explanation="${button.dataset.pathwayStage}"]`);
-    status.innerHTML = mathHtml(`Stage ${index + 1} of ${buttons.length}: ${explanation?.dataset.stageText || ""}`);
+    const title = button.dataset.stageTitle || button.querySelector("strong")?.textContent || "Selected stage";
+    const text = button.dataset.stageText || "";
+    if (explanation) explanation.innerHTML = mathHtml(text);
+    status.innerHTML = mathHtml(`Stage ${button.dataset.stageNumber || index + 1} of ${buttons.length}: ${title}. ${text}`);
+    if (explanation) void typesetMath(explanation);
     void typesetMath(status);
   }
   buttons.forEach((button, index) => button.addEventListener("click", () => select(button, index)));
-  const diagram = card.querySelector("[data-mermaid-pathway]");
-  if (diagram && buttons.length >= 2) {
-    const stages = buttons.map((button) => ({
-      id: button.dataset.pathwayStage,
-      title: button.dataset.stageTitle || button.querySelector("strong")?.textContent || ""
-    }));
-    mountGuideLibrary(card, async () => {
-      const { mountMermaidFlow } = await import("./libraries/mermaid-flow.js");
-      return mountMermaidFlow(diagram, stages);
-    }, () => { diagram.hidden = false; }, () => { diagram.hidden = true; });
-  }
 }
 
 function mountAnimalCellMap(card) {
