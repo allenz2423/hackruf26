@@ -3778,9 +3778,11 @@ body.is-resizing-guide-chat-mobile * {
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 0.15rem;
-  scrollbar-width: thin;
+  scrollbar-width: none;
   scroll-snap-type: x proximity;
 }
+
+.guide-chat-starters::-webkit-scrollbar { display: none; }
 
 .guide-chat-starters .btn {
   min-width: max-content;
@@ -4146,7 +4148,7 @@ body.is-resizing-guide-chat-mobile * {
     overflow-x: auto;
     overflow-y: hidden;
     padding-bottom: 0.15rem;
-    scrollbar-width: thin;
+    scrollbar-width: none;
     scroll-snap-type: x proximity;
   }
 
