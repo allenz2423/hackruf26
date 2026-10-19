@@ -3,7 +3,7 @@ import test from "node:test";
 import { webcrypto } from "node:crypto";
 
 import { createStudyMaterialApi } from "../src/api.js";
-import { clearStudyMaterialOperationId, getStudyMaterialOperationId, lastOpenedStudyMaterial, renderStudyTab } from "../src/study.js";
+import { clearStudyMaterialOperationId, createClassAssistantMaterials, getStudyMaterialOperationId, lastOpenedStudyMaterial, renderStudyTab } from "../src/study.js";
 
 function globals(t, values) {
   for (const [key, value] of Object.entries(values)) {
@@ -62,6 +62,68 @@ test("study-material API sends nonblank guide and assessment preferences", async
   assert.equal(requests[2].body.title, "Membrane Transport");
   assert.equal(requests[2].body.guide_style, "visual");
   assert.equal(requests[2].body.additional_instructions, "Cover every chapter in order.");
+});
+
+test("class assistant can create private materials from any class tab and report progress", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const originalCrypto = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  const requests = [];
+  const additions = [];
+  const statuses = [];
+  let refreshes = 0;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    if (originalCrypto) Object.defineProperty(globalThis, "crypto", originalCrypto);
+    else delete globalThis.crypto;
+  });
+  Object.defineProperty(globalThis, "crypto", { configurable: true, value: webcrypto });
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path: String(path), options });
+    const isCreate = options.method === "POST";
+    const detail = {
+      id: "assistant-guide-1",
+      kind: "study_guide",
+      title: "Osmosis · Study guide",
+      status: isCreate ? "generating" : "ready",
+      resource_scope: "personal",
+      scope: { kind: "uploads", upload_ids: ["upload-1"] },
+      item_count: 1,
+      content: { sections: [] }
+    };
+    return new Response(JSON.stringify(detail), {
+      status: isCreate ? 202 : 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+
+  const materials = await createClassAssistantMaterials({
+    materialRequest: {
+      topic: "Osmosis",
+      kinds: ["study_guide"],
+      upload_ids: ["upload-1"],
+      count: 8,
+      learner_focus: "Compare diffusion and osmosis"
+    },
+    backendClassId: "server-class-1",
+    klass: { id: "local-class-1", uploads: [] },
+    onMaterialAdded: (material) => additions.push(material),
+    onMaterialsChanged: () => { refreshes += 1; },
+    onStatus: (status) => statuses.push(status)
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(requests[0].path, "/api/classes/server-class-1/study-materials");
+  assert.equal(requests[0].options.method, "POST");
+  const payload = JSON.parse(requests[0].options.body);
+  assert.equal(payload.destination, "personal");
+  assert.deepEqual(payload.scope, { kind: "uploads", upload_ids: ["upload-1"] });
+  assert.deepEqual(payload.guide_styles, ["balanced", "worked_examples"]);
+  assert.match(payload.additional_instructions, /Compare diffusion and osmosis/);
+  assert.equal(materials[0].status, "generating");
+  assert.deepEqual(requests.map((request) => request.options.method || "GET"), ["POST", "GET"]);
+  assert.deepEqual(additions.map((material) => material.status), ["generating", "ready"]);
+  assert.equal(refreshes, 2);
+  assert.deepEqual(statuses.map((status) => status.status), ["generating", "ready"]);
 });
 
 test("generation operation IDs are stable for retries without persisting request text", async (t) => {

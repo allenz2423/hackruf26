@@ -4,7 +4,6 @@ import { renderFlashcards } from "./flashcards.js";
 import { escapeHtml, openDialog, toast } from "./ui.js";
 import { openMaterialViewer } from "./material-viewer.js";
 import { renderMasteryLadderPanel } from "./mastery-ladder.js";
-import { mountClassStudyAssistant } from "./class-study-assistant.js";
 import { loadTutorLanguage, GENERATION_LANGUAGES } from "./tutor-language.js";
 import { classHasCapability, updateClass } from "./classes.js";
 import { getBackendClassId, getBackendUploadId, prepareStudySources, waitForStudyMaterial } from "./course-sync.js";
@@ -219,6 +218,98 @@ export function formatRemoteMaterial(detail, klassId, uiTypeFallback, uploads = 
   };
 }
 
+/** Start the assistant's owner-private study materials from any class tab. */
+export async function createClassAssistantMaterials({
+  materialRequest,
+  backendClassId,
+  klass,
+  onMaterialAdded,
+  onMaterialsChanged,
+  onStatus
+}) {
+  const requestedKinds = Array.isArray(materialRequest?.kinds) ? materialRequest.kinds : [];
+  const uploadIds = Array.isArray(materialRequest?.upload_ids) ? materialRequest.upload_ids : [];
+  if (!backendClassId || !requestedKinds.length || !uploadIds.length) {
+    throw new Error("Jot could not verify which class sources to use.");
+  }
+  const started = [];
+  function reportMaterial(item) {
+    const index = started.findIndex((existing) =>
+      (item.id && existing.id === item.id)
+      || (!item.id && existing.kind === item.kind && existing.title === item.title)
+    );
+    if (index >= 0) started[index] = { ...started[index], ...item };
+    else started.push(item);
+    onStatus?.({ ...started[index >= 0 ? index : started.length - 1] });
+  }
+  const topic = String(materialRequest.topic || "Requested topic").trim().slice(0, 240);
+  for (const kind of requestedKinds.slice(0, 4)) {
+    const displayType = fromApiKind(kind);
+    const title = `${topic} · ${displayType}`.slice(0, 160);
+    const focus = String(materialRequest.learner_focus || "").trim().slice(0, 400);
+    const additionalInstructions = [
+      `Focus on ${topic}. Keep the material aligned to the selected class uploads.`,
+      focus ? `Adapt the explanation and practice to this learner focus: ${focus}` : ""
+    ].filter(Boolean).join(" ").slice(0, 1_000);
+    try {
+      const summary = await createStudyMaterialApi(backendClassId, {
+        kind,
+        title,
+        scope: { kind: "uploads", upload_ids: uploadIds },
+        options: {
+          count: Math.max(4, Math.min(24, Number(materialRequest.count) || 10)),
+          difficulty: "mixed"
+        },
+        additionalInstructions,
+        destination: "personal",
+        guideStyles: kind === "study_guide" ? ["balanced", "worked_examples"] : null,
+        operationId: secureOperationId()
+      });
+      await onMaterialAdded?.(formatRemoteMaterial(summary, klass.id, displayType, klass.uploads, backendClassId));
+      onMaterialsChanged?.();
+      reportMaterial({
+        id: summary.id,
+        kind: displayType,
+        title: summary.title || title,
+        status: summary.status || "Generating"
+      });
+
+      void waitForStudyMaterial(summary.id, {
+        timeoutMs: Number.POSITIVE_INFINITY,
+        onStatus: async (detail) => {
+          await onMaterialAdded?.(formatRemoteMaterial(detail, klass.id, displayType, klass.uploads, backendClassId));
+          onMaterialsChanged?.();
+          reportMaterial({
+            id: detail.id || summary.id,
+            kind: displayType,
+            title: detail.title || summary.title || title,
+            status: detail.status || "Generating"
+          });
+        }
+      }).catch((error) => {
+        reportMaterial({
+          id: summary.id,
+          kind: displayType,
+          title: summary.title || title,
+          status: "Status unavailable",
+          error: error?.message || "Could not check generation status."
+        });
+      });
+    } catch (error) {
+      reportMaterial({
+        kind: displayType,
+        title,
+        status: "Could not start",
+        error: error?.message || "Generation request failed."
+      });
+    }
+  }
+  if (!started.some((item) => item.status !== "Could not start")) {
+    throw new Error(started[0]?.error || "Could not start study-material generation.");
+  }
+  return started.map(({ error, ...item }) => item);
+}
+
 export function displayStudyMaterialTitle(title, className) {
   const original = String(title || "").trim();
   const courseName = String(className || "").trim();
@@ -326,7 +417,7 @@ function scoreableQuestions(material) {
   });
 }
 
-export async function renderStudyTab({ root, klass, currentUserId = null, currentUserAvatar = null, onMaterialAdded, onAttemptCompleted }) {
+export async function renderStudyTab({ root, klass, currentUserId = null, currentUserAvatar = null, onMaterialAdded, onAttemptCompleted, onRegisterAssistantMaterialsRefresh }) {
   const backendClassId = getBackendClassId(klass);
   let studyMaterialFolders = [];
   let selectedStudyFolder = "all";
@@ -334,8 +425,6 @@ export async function renderStudyTab({ root, klass, currentUserId = null, curren
   let organizationProposal = null;
   let organizationBusy = false;
   let personalSummaries = [];
-  const classAssistantState = { messages: [] };
-  let disposeClassAssistant = null;
   if (currentUserId) {
     try {
       personalSummaries = await getMyStudyMaterialsApi();
@@ -420,8 +509,6 @@ export async function renderStudyTab({ root, klass, currentUserId = null, curren
     : upload.status === "ready" ? "Ready" : getBackendUploadId(upload) ? "Processing" : "Saved in browser";
 
   function renderStudyView() {
-    disposeClassAssistant?.();
-    disposeClassAssistant = null;
     const hasUploads = klass.uploads.length > 0;
     root.innerHTML = `
       <section class="section-stack">
@@ -529,7 +616,6 @@ export async function renderStudyTab({ root, klass, currentUserId = null, curren
         </details>
         ${backendClassId ? `<div id="mastery-ladder-root"></div>` : ""}
         <div class="section-stack study-saved-section">
-          ${backendClassId && currentUserId ? `<div id="class-study-assistant-root"></div>` : ""}
           <div>
             <h2>Saved materials</h2>
             <p class="muted">Open study guides and flashcards, or start a quiz to see explanations and saved scores.</p>
@@ -573,17 +659,6 @@ export async function renderStudyTab({ root, klass, currentUserId = null, curren
     const guideTitleBlock = root.querySelector("#study-guide-title-block");
     const guideStyleBlock = root.querySelector("#study-guide-style-block");
 
-    const assistantRoot = root.querySelector("#class-study-assistant-root");
-    if (assistantRoot) {
-      disposeClassAssistant = mountClassStudyAssistant({
-        root: assistantRoot,
-        classId: backendClassId,
-        localClassId: klass.id,
-        className: klass.name,
-        state: classAssistantState,
-        onCreateMaterials: createAssistantMaterials
-      });
-    }
     let generating = false;
     let activeMaterialType = "Quiz";
     const instructionDrafts = new Map();
@@ -998,106 +1073,9 @@ export async function renderStudyTab({ root, klass, currentUserId = null, curren
       }).join("")}</div>`;
     }
 
-    async function createAssistantMaterials(materialRequest, onStatus) {
-      const requestedKinds = Array.isArray(materialRequest?.kinds) ? materialRequest.kinds : [];
-      const uploadIds = Array.isArray(materialRequest?.upload_ids) ? materialRequest.upload_ids : [];
-      if (!backendClassId || !requestedKinds.length || !uploadIds.length) {
-        throw new Error("Jot could not verify which class sources to use.");
-      }
-      const started = [];
-      function reportMaterial(item) {
-        const index = started.findIndex((existing) =>
-          (item.id && existing.id === item.id)
-          || (!item.id && existing.kind === item.kind && existing.title === item.title)
-        );
-        if (index >= 0) started[index] = { ...started[index], ...item };
-        else started.push(item);
-        onStatus?.({ ...started[index >= 0 ? index : started.length - 1] });
-      }
-      const topic = String(materialRequest.topic || "Requested topic").trim().slice(0, 240);
-      for (const kind of requestedKinds.slice(0, 4)) {
-        const displayType = fromApiKind(kind);
-        const title = `${topic} · ${displayType}`.slice(0, 160);
-        const focus = String(materialRequest.learner_focus || "").trim().slice(0, 400);
-        const additionalInstructions = [
-          `Focus on ${topic}. Keep the material aligned to the selected class uploads.`,
-          focus ? `Adapt the explanation and practice to this learner focus: ${focus}` : ""
-        ].filter(Boolean).join(" ").slice(0, 1_000);
-        try {
-          const summary = await createStudyMaterialApi(backendClassId, {
-            kind,
-            title,
-            scope: { kind: "uploads", upload_ids: uploadIds },
-            options: {
-              count: Math.max(4, Math.min(24, Number(materialRequest.count) || 10)),
-              difficulty: "mixed"
-            },
-            additionalInstructions,
-            destination: "personal",
-            guideStyles: kind === "study_guide" ? ["balanced", "worked_examples"] : null,
-            operationId: secureOperationId()
-          });
-          await onMaterialAdded(formatRemoteMaterial(summary, klass.id, displayType, klass.uploads, backendClassId));
-          renderMaterials();
-          reportMaterial({
-            id: summary.id,
-            kind: displayType,
-            title: summary.title || title,
-            status: summary.status || "Generating"
-          });
-
-          const controller = new AbortController();
-          const stopWaiting = () => controller.abort();
-          window.addEventListener("hashchange", stopWaiting, { once: true });
-          void waitForStudyMaterial(summary.id, {
-            signal: controller.signal,
-            timeoutMs: Number.POSITIVE_INFINITY,
-            onStatus: async (detail) => {
-              await onMaterialAdded(formatRemoteMaterial(detail, klass.id, displayType, klass.uploads, backendClassId));
-              if (document.contains(list)) renderMaterials();
-              reportMaterial({
-                id: detail.id || summary.id,
-                kind: displayType,
-                title: detail.title || summary.title || title,
-                status: detail.status || "Generating"
-              });
-            }
-          }).then(async (detail) => {
-            await onMaterialAdded(formatRemoteMaterial(detail, klass.id, displayType, klass.uploads, backendClassId));
-            if (document.contains(list)) renderMaterials();
-            reportMaterial({
-              id: detail.id || summary.id,
-              kind: displayType,
-              title: detail.title || summary.title || title,
-              status: detail.status || "Ready"
-            });
-            window.removeEventListener("hashchange", stopWaiting);
-          }).catch((error) => {
-            window.removeEventListener("hashchange", stopWaiting);
-            if (!controller.signal.aborted) {
-              reportMaterial({
-                id: summary.id,
-                kind: displayType,
-                title: summary.title || title,
-                status: "Status unavailable"
-              });
-              console.warn("Assistant material polling stopped:", error);
-            }
-          });
-        } catch (error) {
-          reportMaterial({
-            kind: displayType,
-            title,
-            status: "Could not start",
-            error: error?.message || "Generation request failed."
-          });
-        }
-      }
-      if (!started.some((item) => item.status !== "Could not start")) {
-        throw new Error(started[0]?.error || "Could not start study-material generation.");
-      }
-      return started.map(({ error, ...item }) => item);
-    }
+    onRegisterAssistantMaterialsRefresh?.(() => {
+      if (document.contains(list)) renderMaterials();
+    });
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();

@@ -169,7 +169,7 @@ export function mountClassStudyAssistant({
           <textarea id="class-assistant-input" name="message" rows="2" maxlength="${MAX_MESSAGE_LENGTH}" placeholder="Ask about class, progress, or reminders…" required></textarea>
           <button class="btn btn-primary" type="submit" aria-label="Send message" ${busy ? "disabled" : ""}>${icon("send", { size: 18 })}<span>Send</span></button>
         </form>
-        <p class="class-assistant-privacy">Chat stays in this page and clears when you leave. It does not change scores or mastery.</p>
+        <p class="class-assistant-privacy">Chat stays with this class as you browse its tabs, and clears when you leave the class. It does not change scores or mastery.</p>
       </section>` : ""}
     </div>`;
     const transcript = root.querySelector("[data-class-assistant-transcript]");
@@ -223,7 +223,7 @@ export function mountClassStudyAssistant({
       if (!controller.signal.aborted) {
         appendAssistant(error?.message || "Jot couldn't answer right now. Please try again.");
       } else {
-        appendAssistant("I stopped working on that message when you left the class page.");
+        appendAssistant("I stopped working on that message because the page changed.");
       }
     } finally {
       controllers.delete(controller);

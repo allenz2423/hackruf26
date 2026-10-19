@@ -28,7 +28,8 @@ import { renderLibraryTab } from "./library.js";
 import { renderConceptGraphTab } from "./concept-graph.js";
 import { createRouter } from "./router.js";
 import { ScreenCaptureController } from "./screen-capture.js";
-import { formatRemoteMaterial, openRemoteStudyGuideViewer, renderStudyTab } from "./study.js";
+import { createClassAssistantMaterials, formatRemoteMaterial, openRemoteStudyGuideViewer, renderStudyTab } from "./study.js";
+import { mountClassStudyAssistant } from "./class-study-assistant.js";
 import { openMaterialViewer } from "./material-viewer.js";
 import { renderLearningProgress } from "./progress.js";
 import { AVATAR_ACCESSORIES, AVATAR_COLORS, AVATAR_FACES, avatarSvg, describeAvatar, normalizeAvatar, randomAvatar } from "./avatar.js";
@@ -85,6 +86,30 @@ let currentUser = null;
 let disposeTutor = null;
 let tutorMemoryPanel = null;
 let authCheckState = "checking";
+const classAssistantSession = {
+  key: null,
+  localClassId: null,
+  state: { messages: [] },
+  dispose: null,
+  refreshStudyMaterials: null
+};
+
+window.addEventListener("hashchange", () => {
+  const match = window.location.hash.match(/^#\/classes\/([^/?]+)/);
+  let nextClassId = null;
+  if (match) {
+    try { nextClassId = decodeURIComponent(match[1]); }
+    catch { nextClassId = match[1]; }
+  }
+  if (classAssistantSession.localClassId && nextClassId !== classAssistantSession.localClassId) {
+    classAssistantSession.dispose?.();
+    classAssistantSession.key = null;
+    classAssistantSession.localClassId = null;
+    classAssistantSession.state = { messages: [] };
+    classAssistantSession.dispose = null;
+    classAssistantSession.refreshStudyMaterials = null;
+  }
+});
 
 const state = {
   session: "idle",
@@ -754,6 +779,31 @@ async function renderClassTab({ id, tab }) {
     window.location.hash = "#/classes";
     return;
   }
+  const assistantKey = `${currentUser.id}:${klass.id}`;
+  if (classAssistantSession.key !== assistantKey) {
+    classAssistantSession.dispose?.();
+    classAssistantSession.key = assistantKey;
+    classAssistantSession.localClassId = klass.id;
+    classAssistantSession.state = { messages: [] };
+  } else {
+    classAssistantSession.dispose?.();
+  }
+  classAssistantSession.dispose = null;
+  classAssistantSession.refreshStudyMaterials = null;
+
+  const onAssistantMaterialAdded = async (material) => {
+    if (material.resourceScope === "personal") {
+      // Owner-private resources stay out of the account-agnostic shared class cache.
+      const index = klass.materials.findIndex((item) => item.id === material.id);
+      if (index >= 0) klass.materials[index] = material;
+      else klass.materials.push(material);
+      return material;
+    }
+    const currentClass = getClassById(klass.id) || klass;
+    const materials = currentClass.materials.filter((item) => item.id !== material.id);
+    klass.materials = [...materials, material];
+    return updateClass(klass.id, { materials: klass.materials });
+  };
   const backLink = `<a class="back-link" href="#/classes">${icon("arrowLeft", { size: 16 })} All classes</a>`;
 
   shell(`
@@ -775,11 +825,30 @@ async function renderClassTab({ id, tab }) {
           `).join("")}
         </nav>
       </div>
+      ${backendClassId ? `<div id="class-study-assistant-root"></div>` : ""}
       <div id="class-tab"></div>
     </section>
   `, { section: "classes", tutor, compact: true });
 
   const root = document.querySelector("#class-tab");
+  const assistantRoot = document.querySelector("#class-study-assistant-root");
+  if (assistantRoot && backendClassId) {
+    classAssistantSession.dispose = mountClassStudyAssistant({
+      root: assistantRoot,
+      classId: backendClassId,
+      localClassId: klass.id,
+      className: klass.name,
+      state: classAssistantSession.state,
+      onCreateMaterials: (materialRequest, onStatus) => createClassAssistantMaterials({
+        materialRequest,
+        backendClassId,
+        klass,
+        onMaterialAdded: onAssistantMaterialAdded,
+        onMaterialsChanged: () => classAssistantSession.refreshStudyMaterials?.(),
+        onStatus
+      })
+    });
+  }
 
   if (tab === "study") {
     await renderStudyTab({
@@ -787,6 +856,9 @@ async function renderClassTab({ id, tab }) {
       klass,
       currentUserId: currentUser?.id || null,
       currentUserAvatar: currentUser?.avatar || null,
+      onRegisterAssistantMaterialsRefresh: (refresh) => {
+        classAssistantSession.refreshStudyMaterials = refresh;
+      },
       onMaterialAdded: (material) => {
         if (material.resourceScope === "personal") {
           // Personal resources are served from the owner-scoped API and must not
