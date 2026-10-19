@@ -334,7 +334,7 @@ export async function renderStudyTab({ root, klass, currentUserId = null, curren
   let organizationProposal = null;
   let organizationBusy = false;
   let personalSummaries = [];
-  const classAssistantState = { messages: [], events: [], eventsLoaded: false };
+  const classAssistantState = { messages: [] };
   let disposeClassAssistant = null;
   if (currentUserId) {
     try {

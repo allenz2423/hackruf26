@@ -40,3 +40,24 @@ test("class assistant uses private same-origin endpoints with bounded chat paylo
   assert.equal(calls[2].url, "/api/classes/class%2Fid/study-assistant/events/event%2Fid");
   assert.equal(calls[2].options.method, "DELETE");
 });
+
+test("class reminder reads and deletes accept abort signals for page navigation", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    return new Response(JSON.stringify({ events: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+
+  const controller = new AbortController();
+  await getClassStudyAssistantEventsApi("class/id", { signal: controller.signal });
+  await deleteClassStudyAssistantEventApi("class/id", "event/id", { signal: controller.signal });
+
+  assert.equal(calls[0].options.signal, controller.signal);
+  assert.equal(calls[1].options.signal, controller.signal);
+  assert.equal(calls[1].options.method, "DELETE");
+});

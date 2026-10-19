@@ -16,6 +16,7 @@ import {
   getClassSourceChunkApi
 } from "./api.js";
 import { sourceChunkMarkup, sourceSearchHitMarkup } from "./source-search.js";
+import { mountClassStudyAssistantReminders } from "./class-study-assistant.js";
 
 const ACCEPTED_EXTENSIONS = new Set(["pdf", "docx", "pptx", "txt", "md", "png", "jpg", "jpeg", "mp4", "webm", "mov", "mp3", "m4a", "wav"]);
 const MAX_FILE_SIZE = 100 * 1024 * 1024;
@@ -186,6 +187,7 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
           </div>
         </div>
       </div>
+      ${backendClassId && currentUserId ? `<div id="class-assistant-reminders-root"></div>` : ""}
       ${(syllabusData || localSyllabus) ? `
         <section class="panel syllabus-panel" aria-label="Syllabus outline">
           <div>
@@ -272,6 +274,9 @@ export async function renderLibraryTab({ root, klass, currentUserId = null, onUp
       </div>
     </section>
   `;
+
+  const remindersRoot = root.querySelector("#class-assistant-reminders-root");
+  if (remindersRoot) mountClassStudyAssistantReminders({ root: remindersRoot, classId: backendClassId });
 
   const zone = root.querySelector(".upload-zone");
   const input = root.querySelector("#upload-input");

@@ -664,15 +664,15 @@ export function sendClassStudyAssistantMessageApi(classId, message, history = []
   });
 }
 
-export async function getClassStudyAssistantEventsApi(classId) {
-  const response = await apiFetch(`/api/classes/${encodeURIComponent(classId)}/study-assistant/events`);
+export async function getClassStudyAssistantEventsApi(classId, { signal } = {}) {
+  const response = await apiFetch(`/api/classes/${encodeURIComponent(classId)}/study-assistant/events`, { signal });
   return Array.isArray(response.events) ? response.events : [];
 }
 
-export function deleteClassStudyAssistantEventApi(classId, eventId) {
+export function deleteClassStudyAssistantEventApi(classId, eventId, { signal } = {}) {
   return apiFetch(
     `/api/classes/${encodeURIComponent(classId)}/study-assistant/events/${encodeURIComponent(eventId)}`,
-    { method: "DELETE" }
+    { method: "DELETE", signal }
   );
 }
 
