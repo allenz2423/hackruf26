@@ -620,13 +620,10 @@ export async function renderStudyTab({ root, klass, currentUserId = null, curren
             <h2>Saved materials</h2>
             <p class="muted">Open study guides and flashcards, or start a quiz to see explanations and saved scores.</p>
           </div>
-          <div class="account-status-banner signed-in-banner">
-            ${icon("sparkles", { size: 20 })}
-            <div>
-              <strong>AI-generated study materials</strong>
-              <span>Selected course text and prompts are processed by this Jot deployment's administrator-configured AI provider. Scanned files and lecture recordings may use Gemini. Generated materials and quiz scores are saved by the backend.</span>
-            </div>
-          </div>
+          <details class="account-status-banner signed-in-banner study-ai-notice" open>
+            <summary>${icon("sparkles", { size: 20 })}<span><strong>AI-generated study materials</strong><small>How Jot handles course content</small></span></summary>
+            <div class="study-ai-notice-body">Selected course text and prompts are processed by this Jot deployment's administrator-configured AI provider. Scanned files and lecture recordings may use Gemini. Generated materials and quiz scores are saved by the backend.</div>
+          </details>
           ${backendClassId && currentUserId ? `
             <div id="material-folder-toolbar" class="study-folder-toolbar"></div>
             <div id="study-organization-preview"></div>` : ""}
@@ -638,6 +635,8 @@ export async function renderStudyTab({ root, klass, currentUserId = null, curren
     const pageSection = root.querySelector(":scope > section");
     const savedSection = pageSection?.querySelector(".study-saved-section");
     const customizeDetails = pageSection?.querySelector("#study-create-details");
+    const aiNotice = pageSection?.querySelector(".study-ai-notice");
+    if (aiNotice && window.matchMedia?.("(max-width: 640px)").matches) aiNotice.open = false;
     if (pageSection && savedSection && customizeDetails) {
       pageSection.insertBefore(savedSection, pageSection.firstChild);
       pageSection.append(customizeDetails);

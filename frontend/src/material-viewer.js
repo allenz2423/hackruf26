@@ -192,19 +192,19 @@ function guideSectionSources(section, blocks) {
   });
 }
 
-function guidePageNavigationHtml(currentPage, sectionCount) {
+function guidePageNavigationHtml(currentPage, sectionCount, placement = "bottom") {
   if (sectionCount <= 1) return "";
   return `
-    <nav class="guide-page-nav" aria-label="Study guide pagination">
-      <button class="btn btn-secondary" type="button" data-guide-previous ${currentPage === 0 ? "disabled" : ""}>
-        Previous section
+    <nav class="guide-page-nav guide-page-nav-${placement}" aria-label="Study guide section navigation">
+      <button class="btn btn-secondary" type="button" data-guide-previous aria-label="Previous section" ${currentPage === 0 ? "disabled" : ""}>
+        <span class="guide-page-nav-long">Previous section</span><span class="guide-page-nav-short" aria-hidden="true">Previous</span>
       </button>
-      <div class="guide-page-position" aria-live="polite">
+      <div class="guide-page-position" aria-live="${placement === "top" ? "off" : "polite"}">
         <span>Section ${currentPage + 1} of ${sectionCount}</span>
         <progress max="${sectionCount}" value="${currentPage + 1}" aria-label="Study guide progress"></progress>
       </div>
-      <button class="btn btn-primary" type="button" data-guide-next ${currentPage === sectionCount - 1 ? "disabled" : ""}>
-        Next section
+      <button class="btn btn-primary" type="button" data-guide-next aria-label="Next section" ${currentPage === sectionCount - 1 ? "disabled" : ""}>
+        <span class="guide-page-nav-long">Next section</span><span class="guide-page-nav-short" aria-hidden="true">Next</span>
       </button>
     </nav>
   `;
@@ -333,22 +333,28 @@ function renderGuide(root, material, onRetry = null, {
       </div>
     ` : ""}
       <div class="study-mode-actions">
-      ${material.isRemote && material.status === "ready" ? `
-        <button class="btn btn-primary" type="button" data-download-guide="pdf">Download PDF</button>
-        <button class="btn btn-secondary" type="button" data-download-guide="latex">Download LaTeX</button>
-        <span class="field-hint" role="status" data-download-status></span>
-      ` : ""}
       ${flashcardsAvailable ? `
-        <button class="btn btn-secondary" type="button" data-flashcards>
-          ${icon("cards", { size: 16 })} Study flashcards
+        <button class="btn btn-secondary" type="button" data-flashcards aria-label="Study flashcards">
+          ${icon("cards", { size: 16 })}<span class="study-action-label-long">Study flashcards</span><span class="study-action-label-short" aria-hidden="true">Flashcards</span>
         </button>
       ` : ""}
         ${questionsAvailable ? `
-        <button class="btn btn-secondary" type="button" data-practice>
-          ${icon("quiz", { size: 16 })} Practice questions
+        <button class="btn btn-secondary" type="button" data-practice aria-label="Practice questions">
+          ${icon("quiz", { size: 16 })}<span class="study-action-label-long">Practice questions</span><span class="study-action-label-short" aria-hidden="true">Practice</span>
         </button>
         ` : ""}
-        ${material.isRemote && material.status === "ready" ? `<button class="btn btn-ghost btn-small" type="button" data-guide-progress-clear>Clear guide review schedule</button><span class="field-hint" data-guide-progress-status role="status" aria-live="polite"></span>` : ""}
+        ${material.isRemote && material.status === "ready" ? `
+          <details class="guide-extra-actions">
+            <summary>Guide options</summary>
+            <div class="guide-extra-actions-panel">
+              <button class="btn btn-primary" type="button" data-download-guide="pdf">Download PDF</button>
+              <button class="btn btn-secondary" type="button" data-download-guide="latex">Download LaTeX</button>
+              <span class="field-hint" role="status" data-download-status></span>
+              <button class="btn btn-ghost btn-small" type="button" data-guide-progress-clear>Clear guide review schedule</button>
+              <span class="field-hint" data-guide-progress-status role="status" aria-live="polite"></span>
+            </div>
+          </details>
+        ` : ""}
       </div>
 
     ${sections.length > 1 ? `
@@ -367,7 +373,7 @@ function renderGuide(root, material, onRetry = null, {
       </nav>
     ` : ""}
 
-    ${guidePageNavigationHtml(page, sections.length)}
+    ${guidePageNavigationHtml(page, sections.length, "top")}
     <article class="guide-content">
       ${section ? `
         <div class="guide-sections-list">

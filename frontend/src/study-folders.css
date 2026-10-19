@@ -547,6 +547,43 @@
 }
 
 @media (max-width: 40rem) {
+  .study-folder-toolbar {
+    gap: 0.65rem;
+    padding: 0.7rem;
+  }
+
+  .study-folder-toolbar-head {
+    align-items: flex-start;
+    gap: 0.55rem;
+  }
+
+  .study-folder-toolbar-head p {
+    font-size: 0.78rem;
+    line-height: 1.35;
+  }
+
+  .study-folder-toolbar-actions { gap: 0.4rem; }
+  .study-folder-toolbar-actions .btn { min-height: 2.4rem; padding-inline: 0.6rem; }
+
+  .study-folder-nav {
+    flex-wrap: nowrap;
+    align-items: stretch;
+    gap: 0.4rem;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 1px 2px 5px;
+    scrollbar-width: thin;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .study-folder-chip,
+  .study-folder-entry { flex: 0 0 auto; }
+  .study-folder-chip { min-height: 2.4rem; }
+  .study-folder-entry { max-width: 75vw; }
+  .study-folder-entry .study-folder-chip { max-width: calc(75vw - 2.5rem); }
+  .study-folder-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .study-folder-name .icon { flex: 0 0 16px; }
+
   .study-organizer-review {
     padding: var(--space-4);
   }

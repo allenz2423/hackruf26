@@ -1,5 +1,6 @@
 import "./styles.css";
 import "./study-folders.css";
+import "./mobile-polish.css";
 import jotMascot from "./assets/jot-mascot.png";
 import { AnnotationController } from "./annotations.js";
 import { AudioController } from "./audio.js";
@@ -532,7 +533,7 @@ async function renderClasses() {
 
   shell(`
     <section>
-      <div class="page-heading">
+      <div class="page-heading class-overview-heading">
         <div>
           <h1>Your classes</h1>
           <p class="muted">Upload materials to a class, then study or get tutoring from them.</p>
@@ -543,21 +544,27 @@ async function renderClasses() {
           <button id="new-class" class="btn btn-primary" type="button">${icon("plus", { size: 18 })} New class</button>
         </div>
       </div>
-      <form class="panel class-join-panel" id="join-class-form">
-        <div>
-          <h2>Join a class</h2>
-          <p class="muted">Enter a temporary invitation code from a class manager.</p>
-        </div>
-        <label class="class-join-field" for="class-invitation-code">
-          <span class="visually-hidden">Invitation code</span>
-          <input id="class-invitation-code" name="code" autocomplete="off" required minlength="24" maxlength="128" placeholder="Paste invitation code" />
-        </label>
-        <button class="btn btn-secondary" type="submit">${icon("arrowRight", { size: 16 })} Join class</button>
-        <p class="field-hint class-join-status" id="class-join-status" role="status" aria-live="polite"></p>
-      </form>
+      <details class="class-join-details" id="class-join-details" open>
+        <summary><strong>Join a class</strong><span>Have an invitation code?</span></summary>
+        <form class="panel class-join-panel" id="join-class-form">
+          <div>
+            <h2>Join a class</h2>
+            <p class="muted">Enter a temporary invitation code from a class manager.</p>
+          </div>
+          <label class="class-join-field" for="class-invitation-code">
+            <span class="visually-hidden">Invitation code</span>
+            <input id="class-invitation-code" name="code" autocomplete="off" required minlength="24" maxlength="128" placeholder="Paste invitation code" />
+          </label>
+          <button class="btn btn-secondary" type="submit">${icon("arrowRight", { size: 16 })} Join class</button>
+          <p class="field-hint class-join-status" id="class-join-status" role="status" aria-live="polite"></p>
+        </form>
+      </details>
       <div class="class-grid" id="class-grid"></div>
     </section>
   `, { section: "classes" });
+
+  const joinDetails = document.querySelector("#class-join-details");
+  if (joinDetails && window.matchMedia?.("(max-width: 640px)").matches) joinDetails.open = false;
 
   const grid = document.querySelector("#class-grid");
   if (!classes.length) {
