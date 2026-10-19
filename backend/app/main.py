@@ -21,6 +21,7 @@ from app.api.class_concept_graph import router as class_concept_graph_router
 from app.api.class_library import router as class_library_router
 from app.api.class_memberships import router as class_memberships_router
 from app.api.class_question_bank import router as class_question_bank_router
+from app.api.class_study_assistant import router as class_study_assistant_router
 from app.api.errors import ApiError
 from app.api.guide_chat import router as guide_chat_router
 from app.api.learning import router as learning_router
@@ -40,6 +41,7 @@ from app.middleware.request_size import RequestSizeLimitMiddleware
 from app.security.rate_limit import InMemoryRateLimiter
 from app.services.ai_provider_settings import load_provider_config
 from app.services.ai_usage_ledger import UsageLedgerRecorder
+from app.services.class_study_assistant import ClassStudyAssistantService
 from app.services.concept_graph import (
     enqueue_missing_concept_extractions,
     process_queued_concept_extractions,
@@ -204,6 +206,7 @@ def create_app(
             settings.study_tutor_rate_limit,
             settings.study_tutor_rate_window_seconds,
         )
+        application.state.class_study_assistant_rate_limiter = InMemoryRateLimiter(15, 60)
         application.state.study_performance_rate_limiter = InMemoryRateLimiter(5, 60)
         application.state.quiz_reasoning_rate_limiter = InMemoryRateLimiter(20, 60)
         application.state.ai_provider_test_rate_limiter = InMemoryRateLimiter(5, 300)
@@ -260,6 +263,10 @@ def create_app(
             "admin-configured",
         )
         application.state.guide_chat_service = GuideChatService(
+            openai_client,
+            "admin-configured",
+        )
+        application.state.class_study_assistant_service = ClassStudyAssistantService(
             openai_client,
             "admin-configured",
         )
@@ -333,6 +340,7 @@ def create_app(
     application.include_router(study_material_organization_router)
     application.include_router(class_memberships_router)
     application.include_router(class_question_bank_router)
+    application.include_router(class_study_assistant_router)
     application.include_router(class_concept_graph_router)
     application.include_router(upload_documents_router)
     application.include_router(tutor_memory_router)

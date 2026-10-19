@@ -114,6 +114,8 @@ Class-library routes use `class_access.py` to resolve an active membership, capa
 - `GET|PUT|DELETE /api/admin/ai-provider` and `POST /api/admin/ai-provider/test` (administrator-only provider settings; DELETE removes the admin override and restores environment settings; responses never include the API key)
 - `GET /api/admin/ai-usage` and `PUT /api/admin/ai-usage/balance` (administrator-only provider request ledger, per-material cost rollups, and manual balance snapshots)
 - `POST /api/study-materials/{material_id}/performance-score` and `DELETE /api/study-materials/{material_id}/performance-score` (owner-private model-generated study score and clear action)
+- `POST /api/classes/{class_id}/study-assistant` (private class assistant; owner-only performance context, currently authorized source retrieval, and typed actions)
+- `GET /api/classes/{class_id}/study-assistant/events` and `DELETE /api/classes/{class_id}/study-assistant/events/{event_id}` (private dated reminders for the authenticated learner)
 - `POST /api/study-tutor` for in-page quiz/practice-test review hints and follow-up explanations
 - `GET|POST|DELETE /api/study-materials/{material_id}/guide-chat` for a private, source-grounded guide transcript; `PATCH /api/study-materials/{material_id}/guide-chat/{message_id}` records whether a saved edit preview was applied or discarded
 - `POST /api/study-materials/{material_id}/flags`
@@ -127,6 +129,14 @@ Flashcard-review endpoints are available to signed-in users for ready flashcard 
 ### In-page study tutor
 
 `POST /api/study-tutor` returns `{"reply": "..."}` using the administrator-selected compatible model for quiz-review tutoring. No Live connection or media is involved. The existing adaptive tutoring and answer-withholding policy applies: focused hints, prerequisite explanations, and analogous examples; avoid supplying the student's nontrivial next step or final answer. Typed messages within the separate live tutor remain on Gemini Live alongside screen/audio context.
+
+### Class study assistant
+
+`POST /api/classes/{class_id}/study-assistant` accepts `{message, history}` with at most 2,000 characters in the new message, eight alternating history entries, and 12,000 history characters total. History is supplied by the open browser page, used for one request, and is not stored. The response is `{reply, references, saved_event, material_request}`. The server requires a logged-in learner and current read access to the class. It assembles only that learner's released quiz/exam aggregates, own mastery/review summaries, saved numeric AI study-score estimates, flashcard self-ratings, and private class reminders. It never loads other learners' performance. AI study scores are clearly identified as model estimates, not grades. Course excerpts are retrieved from current, authorized source-index revisions and are treated as untrusted reference data. The prompt returns a strict typed JSON result; deterministic checks gate event/material actions on an explicit date/event phrase or material-generation request and requested material types in the user's latest message.
+
+An event action accepts only a bounded title, event kind, and ISO calendar date. The server resolves duplicate `(owner,class,date,title)` entries idempotently and saves a private row; past or malformed dates are rejected with a clarification in the reply. `GET /api/classes/{class_id}/study-assistant/events` returns only the caller's events; `DELETE .../events/{event_id}` deletes only that caller's event. These reminders never alter the class syllabus or become visible to managers/members.
+
+A material action contains one to four requested kinds, a topic, and a selection of source upload IDs. The model may select only from the small set of authorized source uploads whose relevant excerpts the server included in the request. The frontend then calls the existing personal `POST /api/classes/{class_id}/study-materials` endpoint with those exact IDs, a fresh idempotency ID, and bounded defaults; that endpoint rechecks access and readiness. No action can request a class contribution, expand to all uploads, or access an unreleased source. If retrieval has no evidence, the server suppresses the action and tells the learner. Responses are rate limited, private/no-store, bounded to one provider call, and logged without message, context, or provider text. Chat content is not a score or mastery input.
 
 ### Guide clarification chat
 

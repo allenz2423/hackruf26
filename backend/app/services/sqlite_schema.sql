@@ -1476,3 +1476,20 @@ CREATE TABLE IF NOT EXISTS tutor_recaps (
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 CREATE INDEX IF NOT EXISTS tutor_recaps_scope_idx ON tutor_recaps (scope_id, created_at DESC);
+
+
+-- Private class planning reminders created at a learner's explicit request.
+-- These are not shared syllabus events and never expose learner performance.
+CREATE TABLE IF NOT EXISTS class_study_assistant_events (
+    id               TEXT PRIMARY KEY,
+    owner_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    class_id         TEXT NOT NULL REFERENCES course_classes(id) ON DELETE CASCADE,
+    event_kind       TEXT NOT NULL CHECK (event_kind IN ('exam','quiz','assignment','deadline','class_event')),
+    title            TEXT NOT NULL CHECK (length(trim(title)) BETWEEN 1 AND 160),
+    normalized_title TEXT NOT NULL CHECK (length(trim(normalized_title)) BETWEEN 1 AND 320),
+    event_date       TEXT NOT NULL CHECK (date(event_date)=event_date),
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (owner_id,class_id,event_date,normalized_title)
+);
+CREATE INDEX IF NOT EXISTS class_study_assistant_events_owner_class_date_idx
+    ON class_study_assistant_events(owner_id,class_id,event_date,id);

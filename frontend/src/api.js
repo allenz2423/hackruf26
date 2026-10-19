@@ -656,6 +656,26 @@ export async function getStudyMaterialsApi(classId) {
   }));
 }
 
+export function sendClassStudyAssistantMessageApi(classId, message, history = [], { signal } = {}) {
+  return apiFetch(`/api/classes/${encodeURIComponent(classId)}/study-assistant`, {
+    method: "POST",
+    body: JSON.stringify({ message, history }),
+    signal
+  });
+}
+
+export async function getClassStudyAssistantEventsApi(classId) {
+  const response = await apiFetch(`/api/classes/${encodeURIComponent(classId)}/study-assistant/events`);
+  return Array.isArray(response.events) ? response.events : [];
+}
+
+export function deleteClassStudyAssistantEventApi(classId, eventId) {
+  return apiFetch(
+    `/api/classes/${encodeURIComponent(classId)}/study-assistant/events/${encodeURIComponent(eventId)}`,
+    { method: "DELETE" }
+  );
+}
+
 export async function getStudyMaterialFoldersApi(classId) {
   const res = await apiFetch(`/api/classes/${encodeURIComponent(classId)}/study-material-organization/folders`);
   return res.items || [];
